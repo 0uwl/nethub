@@ -1,2 +1,2 @@
 # network-software-depot
-A simple system for  managing  software updates for various network devices
+A simple system for  managing  software updates for various network devices using Ansible
