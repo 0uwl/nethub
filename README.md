@@ -75,14 +75,15 @@ wholesale, extended rather than rebuilt: the existing views (device
 allowlist management, provisioning log) stay as-is, and new views are
 added on top of the same framework/component structure for the
 Software Lifecycle module, namely an image upload form, a registry
-browser, and the software-lifecycle side of the unified log viewer.
+browser, an upgrade request form with the per-phase approval gates §8.1
+requires, and the software-lifecycle side of the unified log viewer.
 Within that viewer, provisioning history and software-lifecycle job
 history stay as separate, distinctly labeled logs rather than being
 merged into one timeline. Each entry is a single row describing one
-event (a provisioning attempt, a registry job). The system does not
-correlate entries with each other or attach them to a persistent device
-record; that would make it an inventory manager, which it explicitly
-isn't (see Non-Goals).
+event (a provisioning attempt, a registry job, an upgrade phase). The
+system does not correlate entries with each other or attach them to a
+persistent device record; that would make it an inventory manager, which
+it explicitly isn't (see Non-Goals).
 
 ### 3.2 Backend
 One Flask service, organized as two logical modules:
@@ -217,6 +218,28 @@ Ansible, since it is Kea plus phone-home and needs no EE. The two logs
 are not merged into one timeline. The two egress protocols stay
 distinct, because the shared store beneath them is what makes that split
 cheap.
+
+### 3.5 Everything the EE reads is rendered
+
+§3.4's registry file is the first instance of a pattern the rest of the
+system follows: **NetHub renders the inputs its playbooks consume rather
+than accepting them.** The registry file is a projection of the
+`artifacts` table (§7.2). So is the per-job inventory — hosts,
+`image_bundle` references, connection variables — written at dispatch
+into a `private_data_dir` that is discarded with the job. So is the
+playbook, in the weaker sense that it ships with NetHub and is selected
+by `platform` rather than supplied.
+
+What a user submits is a request: which devices, and which published
+bundle each should end up on. NetHub validates it and compiles the rest.
+The reasoning is in §8.1, and the rule is the one §7.2 already states
+for the registry — the table is the source of truth, the file is derived
+from it, and there is no second place for the two to disagree.
+
+This is also why the rendered inventory carries no credentials.
+Connection variables come from the submitting admin's identity (§4.3),
+and the one secret a run needs is passed in memory rather than written
+into the directory the EE mounts.
 
 ## 4. Security Model
 
@@ -362,6 +385,75 @@ verification does not replace: hash verification confirms the fetched
 bytes weren't tampered with, and says nothing about who was allowed to
 fetch them in the first place.
 
+### 4.3 Admin identity, and who the device sees
+
+Everything above concerns the unauthenticated day-0 route. The
+authenticated side has its own model, and it turns on one awkward fact:
+the protocol that authenticates an admin to NetHub cannot authenticate
+that admin to a switch.
+
+The admin session is OIDC — authorization code with PKCE against the
+organization's existing IdP, keyed on the `sub` claim rather than on
+email, which changes when people marry or teams get renamed. What the
+IdP returns is an identity, not a decision. A directory that
+authenticates the whole organization is not an authorization statement
+about who may publish an IOS-XE image, so a successful login is checked
+against the local `users` table and refused if there is no active row.
+That is the shape of §4.1's serial allowlist reused: an external
+assertion establishes *who*, a local list decides *what*, and neither is
+trusted to do the other's job.
+
+**The device credential is a separate mechanism, deliberately.** OIDC's
+value is that NetHub never sees a password; `network_cli` needs a
+password to send. Both are true, so the upgrade dispatch (§8.1) collects
+the submitter's device credential at submit time and holds it for the
+life of that run. It is never written into the `private_data_dir`, never
+kept in the session, and never persisted — it is handed to
+`ansible-runner` in memory and dropped when the run reaches a terminal
+state. It belongs to the run rather than to the session, because a
+serial activation wave outlives any reasonable session lifetime.
+
+The username is not collected. It is `users.device_username`, mapped
+from the OIDC identity server-side and set by an administrator rather
+than by its owner. A username the submitter can type is not evidence of
+anything, and evidence is the entire point of the arrangement:
+
+**Two-sided attribution.** Under a shared `ansible` service account,
+every change on every device is attributed to "ansible", and who
+actually made it is answerable only from NetHub's own records — that is,
+from the one system that would also be wrong if it were compromised.
+Under per-user credentials the same human appears in
+`upgrade_runs.submitted_by` on NetHub's side and in the device's own AAA
+accounting and syslog on the other, recorded by two systems that share
+no trust domain. Neither record is forgeable from the other's side,
+which is a stronger property than either half provides alone.
+
+What it costs, stated directly rather than left to imply otherwise:
+NetHub handles the plaintext device password of every admin who runs an
+upgrade, which an OIDC-only design would have avoided entirely. The
+compensation is not encryption, it is scope. The credential is
+job-scoped, memory-resident, and belongs to someone who already holds
+enable on the devices in question — NetHub is mediating access its user
+already has rather than manufacturing new access. That is what makes the
+trade acceptable here, and it would not make it acceptable anywhere the
+operator lacked that access already.
+
+Two operational consequences follow:
+
+- **A wrong credential must not become a lockout.** A stale password
+  against a fifty-host activation wave is fifty failed authentications
+  at the AAA server, which is how an engineer loses access to the entire
+  estate. The credential is validated once before dispatch and the run
+  refuses to start on failure, rather than discovering the problem one
+  device at a time.
+- **The SCP credential stays shared, and stays vaulted.** The device
+  pulls its own image from the distribution host; no human is in that
+  session. §4 already calls that credential the authorization gate on
+  the image store, which is a statement about the store and not about a
+  person. It is a separate account from `ansible_user` for the same
+  reason: reusing one for both would require a local account on the
+  distribution host for every engineer.
+
 ## 5. Data Model
 
 The engine is SQLite. That's a deliberate fit for the scale in §1 rather
@@ -421,6 +513,36 @@ suggestion.
     specified in §7.3 and §7.2.
   - Indexed on `(status, started_at)`, which is what the dashboard's
     default view and the startup sweep both query.
+- `upgrade_runs` table, the parent record for one dispatch of
+  `upgrade_iosxe.yml` (§8.1): `id`, `platform`, `submitted_by`,
+  `device_username_used`, `request_sha512`, `state`, `created_at`,
+  `finished_at`.
+  - `state` is the parent-level state the phase model needs, including
+    `awaiting_approval`, which §8.1 depends on holding no EE process.
+    Phase executions carry §7.3's status vocabulary; the run carries
+    where it sits between them.
+  - `device_username_used` snapshots `users.device_username` at
+    dispatch, for the reason `registry_jobs` snapshots
+    `version`/`filename`/`sha512`: an audit row that re-reads its own
+    answer from a mutable table stops being an audit row the first time
+    somebody's mapping is corrected.
+  - `request_sha512` is the digest of the submitted request document.
+    NetHub hashes what it ingests (§3.4), and a document deciding which
+    images land on which devices is not the exception to that.
+- `upgrade_run_hosts` table: `run_id`, `hostname`, `ansible_host`,
+  `artifact_id`, `bundle_key`, `filename`, `sha512`, `version`,
+  `flash_dir`, `state`, `last_phase`, `error_summary`. One row per
+  targeted device, using the same foreign-key-plus-snapshot arrangement
+  as `registry_jobs`. Per-host state living here rather than in the play
+  is what retires the `rescue`/`upgrade_stage_failed` bookkeeping §8.1
+  describes moving into the backend.
+- `upgrade_phase_jobs` table: `id`, `run_id`, `phase`, `approved_by`,
+  `approved_at`, `status`, `failure_stage`, `error_summary`,
+  `started_at`, `heartbeat_at`, `finished_at`, `playbook_log_path`. One
+  row per EE execution, reusing `registry_jobs`' status vocabulary and
+  startup sweep (§7.3) unchanged. `approved_by` and `approved_at` are
+  what §8.1 means by an approval being a row rather than a keystroke;
+  without them the gate is a UI affordance instead of a record.
 - Provisioning-side tables (allowlist, bounded provisioning log) carried
   forward from the existing ZTP design, retention-bounded as before. The
   provisioning log and `registry_jobs` share a row shape and retention
@@ -429,30 +551,55 @@ suggestion.
   served (§3.4), and allowlist entries carry the TTL and one-shot
   consumption state described in §4.1.
 - `users`, the admin accounts backing the authenticated session §3.2
-  requires. `uploaded_by` and `submitted_by` reference it. Without it
-  they are free text that decays as people join and leave, which is a
-  poor foundation for something whose stated purpose is an audit trail.
+  requires: `id`, `oidc_subject`, `display_name`, `device_username`,
+  `role`, `is_active`, `created_at`. `uploaded_by` and `submitted_by`
+  reference it. Without it they are free text that decays as people join
+  and leave, which is a poor foundation for something whose stated
+  purpose is an audit trail.
+  - `oidc_subject` is the IdP's `sub` claim, and is the unique key.
+    Email is not, because it changes.
+  - `device_username` is the name this person authenticates to devices
+    under (§4.3). An administrator sets it; its owner does not, and no
+    submitted request is ever read for it.
+  - `is_active` rather than deletion. A row an audit trail references
+    cannot be removed without rewriting history, which is the same
+    reasoning that makes an artifact `superseded` instead of updated.
 
 ## 6. Workflow
 
 **Day-0**: device phones home over HTTP → allowlist check → DHCP hooks
 → image/config delivery → hash verification → provisioning logged.
 
-**Day-2** (behind admin auth): admin submits bundle key/version/file/
-checksum → backend verifies SHA-512 against staged bytes → artifact row
-written as `staged` → bundle key checked against the currently published
-row (overwrite requires confirmation, and supersedes rather than
-overwrites, §5) → job row written and the request returns → per-job
+**Day-2, publish** (behind admin auth): admin submits bundle
+key/version/file/checksum → backend verifies SHA-512 against staged
+bytes → artifact row written as `staged` → bundle key checked against
+the currently published row (overwrite requires confirmation, and
+supersedes rather than overwrites, §5) → job row written and the request
+returns → per-job
 inventory built for the active distribution target → `publish_image.yml`
 run via `ansible-runner` against the pinned EE image → on success,
 artifact promoted to `published`, registry re-rendered from the table
 under lock and committed → job result and log recorded and surfaced in
 the dashboard.
 
-Both flows above are the success path. What happens when an individual
-step fails is §7. Because the day-2 flow spans a database, a working
-tree, and a git repository, "what if it fails here" has a different
-answer at almost every arrow.
+**Day-2, upgrade** (behind admin auth): admin uploads an upgrade request
+→ request validated (supported platform, every bundle key resolving to a
+`published` artifact row, no connection variables and no template
+expressions) → run and per-host rows written, request digest recorded →
+submitter's device credential collected and validated once against the
+AAA server (§4.3) → pre-check phase dispatched against a NetHub-rendered
+inventory → per-host results recorded and the run parks at
+`awaiting_approval` → admin approves staging → image copied to each
+device and verified against its SHA-512 → admin approves activation →
+devices reloaded in serial waves → verification runs without a gate →
+optionally, admin approves cleanup → per-host outcomes and phase logs
+surfaced in the dashboard.
+
+All three flows above are the success path. What happens when an
+individual step fails is §7. Because the publish flow spans a database,
+a working tree, and a git repository — and the upgrade flow spans a
+database and a fleet of devices that reboot — "what if it fails here"
+has a different answer at almost every arrow.
 
 ## 7. Failure, Concurrency, and Staleness
 
@@ -564,6 +711,11 @@ system, which requires numbers rather than an adjective:
   integers per serial and exist precisely to outlive log rotation.
 - **`registry_jobs`**: 365 days, matching the operational question they
   answer ("what did we deploy last year, and when").
+- **`upgrade_runs`** and their host and phase rows: 365 days, purged as
+  a unit with the run. They answer the same class of question from the
+  other end ("what did we install, where, and who approved it"), so
+  splitting the horizon between the two would leave half of a publish-
+  then-install story on disk and the other half collected.
 - **Allowlist entries**: expire on their per-entry TTL (§4.1), not on a
   global schedule.
 - **Artifacts**: retained while referenced. An artifact that is
@@ -573,14 +725,21 @@ system, which requires numbers rather than an adjective:
   referencing it, and collecting a referenced one would leave the audit
   trail pointing at nothing.
 
-Purging a `registry_jobs` row also removes its `playbook_log_path` file
-in the same operation. A retention helper that deletes rows and leaves
-logs behind produces an ever-growing directory of orphans nothing can
-attribute.
+Purging a `registry_jobs` or `upgrade_phase_jobs` row also removes its
+`playbook_log_path` file in the same operation. A retention helper that
+deletes rows and leaves logs behind produces an ever-growing directory
+of orphans nothing can attribute — and the phase model multiplies those
+files per run, so the coupling matters more here than it did with one
+log per publish.
 
 Staleness is a property of the fleet, not of NetHub. The registry
 records what a device *should* run. Nothing in NetHub records what it
-*does* run, and per §2 nothing should, because that is inventory. The
+*does* run, and per §2 nothing should, because that is inventory. An
+upgrade run is not the exception it looks like: `upgrade_run_hosts`
+records the version a device reported *during that run*, which is a
+property of the job and expires with it, and those rows are deliberately
+never rolled up into a current-state view per device. That roll-up is
+precisely the line between a job record and an inventory. The
 consequence is that NetHub cannot tell an operator which devices are
 behind, only what the current target is and which jobs ran against it.
 Anything resembling fleet drift reporting has to come from the Ansible
@@ -622,7 +781,8 @@ against the same pinned EE, that installs a published image onto a set
 of devices.
 
 What a user submits is a request document, not an inventory: hosts, one
-bundle key per host, and a small closed set of typed knobs. NetHub
+bundle key per host, and a small closed set of typed knobs. This is
+§3.5's rule applied to the upgrade dispatch. NetHub
 validates it and compiles the real inventory around it. The two things
 it will not take are the reason for that indirection. A user-supplied
 playbook is arbitrary code inside the EE with the vaulted distribution
