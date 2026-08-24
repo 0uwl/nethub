@@ -19,7 +19,7 @@ rendered/                     <- NetHub writes this, per job
 The original example had one inventory tree carrying everything, which
 put three things in a user-writable file that must not be there:
 
-- **`image_registry`.** README 7.2 makes NetHub the sole writer of the
+- **`image_registry`.** Design doc §7.2 makes NetHub the sole writer of the
   registry and says the `artifacts` table wins on any inconsistency. An
   uploaded catalog lets a user name any filename and any SHA-512, which
   bypasses the table entirely and breaks 3.4's "hash computed once at
