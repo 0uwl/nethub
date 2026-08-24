@@ -96,17 +96,33 @@ inconsistency between table and file, the table wins (§7.2). The whole
 registry is re-rendered on every publish rather than patched in place,
 which is what makes that reconcile possible.
 
-**Admin identity is OIDC; device credentials are a second mechanism**
-(design doc §4.3). The admin session is OIDC keyed on the `sub` claim, checked
-against a local `users` row — the IdP establishes *who*, the local table
-decides *what*. But `network_cli` needs a password OIDC will never yield,
-so an upgrade run collects the submitter's device credential at submit
-time, holds it in memory for the life of the run, and never writes it to
-the `private_data_dir` or the session. The device username comes from
-`users.device_username`, mapped server-side and never read from a
-submitted request. The property this buys is two-sided attribution: the
-same human in `upgrade_runs.submitted_by` and in the device's own AAA
-accounting, recorded by two systems that share no trust domain.
+**Admin identity is OIDC by default, with local username/password as a
+second backend; device credentials are a separate mechanism again**
+(design doc §4.3/§4.4). `users.auth_backend` picks OIDC (keyed on the
+`sub` claim) or `local` (password hash, admin-issued one-shot enrollment
+token instead of an admin-set password, forced reset before first
+session) per row — either way the row is checked against the local
+`users` table, which decides *what* a verified *who* may do, including
+its `role` (`admin` manages users/deployment settings, `operator` runs
+day-to-day work). **Who sets that role depends on the backend and isn't
+symmetric**: for `local` rows an admin picks it and can edit it later
+from the settings page; for `oidc` rows it's computed at every login
+from a configured group claim (`oidc_group_claim`/`oidc_admin_group`)
+and shown read-only in NetHub — changing an OIDC user's role means
+changing their IdP group membership, never a NetHub edit (design doc
+§4.4). Don't add a role dropdown/edit path for OIDC-backed users; that's
+a deliberate gap, not a missing feature. But `network_cli` needs a
+password neither auth
+backend will yield, so an upgrade run collects the submitter's device
+credential at submit time, holds it in memory for the life of the run,
+and never writes it to the `private_data_dir` or the session. The device
+username comes from `users.device_username`, mapped server-side and
+never read from a submitted request. The property this buys is
+two-sided attribution: the same human in `upgrade_runs.submitted_by` and
+in the device's own AAA accounting, recorded by two systems that share
+no trust domain — which is also why local-account enrollment reuses the
+allowlist's TTL/one-shot pattern (§4.1) rather than letting an admin set
+someone else's password directly.
 
 **Failure, concurrency, and staleness semantics live in design doc §7** and
 are load-bearing rather than aspirational — EE runs are dispatched
@@ -148,16 +164,25 @@ seems to require one, the design is what needs revisiting, not the rule.
   A `{{ ... }}` expression in a submitted field is the playbook hole in a
   different costume.
 - **No user-settable connection vars.** `ansible_user` is the submitter's
-  own device identity. An identity the submitter can type is not evidence
-  of anything, and the audit property in §4.3 depends on it.
+  own device identity (or, only under shared account mode, one
+  admin-configured value — never something a submitter's request
+  supplies either way). An identity the submitter can type is not
+  evidence of anything, and the audit property in §4.3 depends on it.
 - **No EE invocation from the Flask process.** Flask holds the only
   unauthenticated route; giving it Podman access turns any Flask RCE into
   host-level container control (design doc §9). The sibling owns dispatch and
   the job row is the only IPC channel between them — which is also why
   there is no PTY streamed to the browser.
-- **No shared service account for device login.** That is the thing the
-  per-user credential design exists to remove. The SCP account on the
-  distribution host is different and stays shared: no human is in that
+- **No shared service account for device login — except one explicit,
+  deployment-level opt-in.** Per-user credentials are the default; a
+  deployment with no per-human device logins can turn on **shared
+  account mode** (design doc §4.4), which fixes `ansible_user` to one
+  admin-configured value for every run instead of reading
+  `users.device_username`. It is a knowingly-made deployment setting, not
+  a per-user choice and not a fallback that engages itself when an IdP
+  is missing — don't wire it up as a default or infer it from the
+  absence of OIDC. The SCP account on the distribution host is a
+  separate case and stays shared unconditionally: no human is in that
   session (design doc §4.3).
 
 ## Ansible playbook notes (`ansible/upgrade_iosxe.yml`)

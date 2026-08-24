@@ -413,6 +413,15 @@ kept in the session, and never persisted — it is handed to
 state. It belongs to the run rather than to the session, because a
 serial activation wave outlives any reasonable session lifetime.
 
+Every `users` row also carries a `role` (`admin` | `operator`). An admin
+manages other users, the allowlist's steady-state config, and any
+deployment-level settings (§4.4); an operator submits upgrades, uploads
+images, and works the allowlist day to day. The distinction only gates
+NetHub's own screens — it says nothing about, and never substitutes for,
+what a person's device credential actually authorizes on the device
+itself. Who gets to set that role, and whether NetHub or the IdP owns
+the decision, differs by auth backend — see §4.4.
+
 The username is not collected. It is `users.device_username`, mapped
 from the OIDC identity server-side and set by an administrator rather
 than by its owner. A username the submitter can type is not evidence of
@@ -453,6 +462,61 @@ Two operational consequences follow:
   person. It is a separate account from `ansible_user` for the same
   reason: reusing one for both would require a local account on the
   distribution host for every engineer.
+
+### 4.4 Local accounts, for teams without an IdP
+
+OIDC is the default because it means NetHub never sees a password for
+the admin session itself, but that shouldn't be a requirement to use
+NetHub at all — a team with no IdP needs a way in too. Local
+username/password is a second, self-hosted auth backend for the same
+`users` row: same `role`, same `device_username` mapping, same session
+shape downstream. `users.auth_backend` (`oidc` | `local`) picks which
+one authenticates a given row, and a deployment isn't limited to one or
+the other — an org with an IdP for most staff and a couple of contractor
+accounts it doesn't want in the IdP can run both.
+
+**Role is sourced from whichever backend authenticates the row, and only
+one direction is ever locally editable.** For `local` rows, an admin
+picks `role` at creation and can change it later from the same settings
+page that manages the account. For `oidc` rows, `role` is computed at
+every login from a configured claim — `oidc_group_claim` (which claim to
+read, default `groups`) and `oidc_admin_group` (which value maps to
+`admin`; anything else, including an absent claim, maps to `operator`)
+are deployment-level settings alongside the OIDC client id/secret/issuer
+— and NetHub's settings page shows it read-only, not as an editable
+field. An admin who wants to promote or demote an OIDC-backed user does
+that in the IdP, by moving them into or out of the configured group, not
+in NetHub; NetHub re-derives the role from the claim on the person's next
+login rather than caching a stale grant. That's the same authority split
+§4.1's allowlist and §4.3's `sub` claim already use, extended to role:
+when an IdP is in the picture, it decides *who counts as what* for
+anything it asserts, and NetHub's local table only decides what it's
+authoritative for on its own — which, for an OIDC row, is no longer
+role.
+
+Enrollment for a local account reuses the allowlist's own TTL/one-shot
+shape (§4.1) rather than inventing a second one: an admin creates the
+user row and a single-use, time-bounded enrollment token — never a
+password the admin picks on someone's behalf, which would just be the
+shared-credential problem moved one level up. That token is the user's
+first credential, valid for exactly one login, where it's spent setting
+a real password; unused, it expires like an unused allowlist entry. The
+row can't authenticate anything until that first reset completes.
+
+Per-user device credentials assume a per-human identity — local or
+OIDC, either satisfies it — but they still assume each engineer
+authenticates to devices under their own name. A team on one shared
+device account can't produce that, and forcing them to fake per-user
+device logins just to use NetHub is worse than admitting the gap
+outright. **Shared account mode** is an explicit, deployment-level
+setting (not a per-user fallback, and not implied by choosing the local
+auth backend) that fixes `ansible_user` to one admin-configured value
+for every upgrade run in that deployment, instead of reading
+`users.device_username`. It costs exactly what was just priced above
+for the SCP account: every device-side change attributed to one name,
+answerable only from NetHub's own audit trail rather than corroborated
+by the device's own AAA/syslog. That's a decision an admin makes once
+and visibly, not a default a missing IdP quietly falls back to.
 
 ## 5. Data Model
 
@@ -550,20 +614,34 @@ suggestion.
   additions: each provisioning log row records the `artifacts.id` it
   served (§3.4), and allowlist entries carry the TTL and one-shot
   consumption state described in §4.1.
-- `users`, the admin accounts backing the authenticated session §3.2
-  requires: `id`, `oidc_subject`, `display_name`, `device_username`,
-  `role`, `is_active`, `created_at`. `uploaded_by` and `submitted_by`
-  reference it. Without it they are free text that decays as people join
-  and leave, which is a poor foundation for something whose stated
-  purpose is an audit trail.
-  - `oidc_subject` is the IdP's `sub` claim, and is the unique key.
-    Email is not, because it changes.
+- `users`, the accounts backing the authenticated session §3.2
+  requires: `id`, `auth_backend`, `oidc_subject`, `password_hash`,
+  `must_reset_password`, `display_name`, `device_username`, `role`,
+  `is_active`, `created_at`. `uploaded_by` and `submitted_by` reference
+  it. Without it they are free text that decays as people join and
+  leave, which is a poor foundation for something whose stated purpose
+  is an audit trail.
+  - `auth_backend` (`oidc` | `local`, §4.4) picks which of the next two
+    fields is meaningful for this row; the other stays null.
+  - `oidc_subject` is the IdP's `sub` claim, and is the unique key for
+    `oidc` rows. Email is not, because it changes.
+  - `password_hash` backs `local` rows only. It's never set directly by
+    an admin — enrollment issues a one-shot token instead (§4.4), and
+    the row is created with `must_reset_password` true, cleared only
+    when the user spends that token on a real password.
+  - `role` is `admin` or `operator` (§4.3): admin manages users and
+    deployment-level settings, operator runs day-to-day
+    provisioning/upgrade work.
   - `device_username` is the name this person authenticates to devices
     under (§4.3). An administrator sets it; its owner does not, and no
     submitted request is ever read for it.
   - `is_active` rather than deletion. A row an audit trail references
     cannot be removed without rewriting history, which is the same
     reasoning that makes an artifact `superseded` instead of updated.
+- Local-account enrollment tokens carry the TTL/one-shot shape §4.1
+  already defines for the allowlist: a token tied to one `users.id`,
+  consumed exactly once, expiring unused. Not a new pattern, so not
+  broken out as a separate concept here beyond noting the reuse.
 
 ## 6. Workflow
 
