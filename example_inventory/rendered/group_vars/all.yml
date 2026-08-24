@@ -1,0 +1,19 @@
+---
+## RENDERED BY NETHUB -- DO NOT EDIT.
+##
+## ansible_user is the submitting admin's device username, mapped from
+## their OIDC identity server-side (users.device_username). It is never
+## read from the upgrade request: if a user could set it, the device-side
+## log would attribute the change to whatever they typed, and the
+## two-sided audit trail this design exists to produce would be worthless.
+ansible_user: jsmith
+
+ansible_become: true
+ansible_become_method: enable
+
+## ansible_password is deliberately absent.
+##
+## The submitter's device password is collected at job submission and
+## handed to ansible-runner in memory (--ask-pass style), because anything
+## written here lands in the private_data_dir on disk and is mounted into
+## the EE container. Same for ansible_become_password.

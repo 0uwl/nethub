@@ -1,0 +1,49 @@
+---
+## RENDERED BY NETHUB -- DO NOT EDIT.
+##
+## Example values throughout. The sha512 digests are real (carried over
+## from the original example); file_size values are illustrative.
+ansible_network_os: cisco.ios.ios
+
+## Distribution host, and the service account the DEVICE uses to pull its
+## image from it.
+##
+## This is machine-to-machine: the switch opens the SCP session, not a
+## human. 4 calls this credential "the access-control gate on who can
+## pull an image", which is an authorization decision about the image
+## store, not about a person -- so it stays a shared, vaulted account.
+##
+## Kept deliberately separate from `ansible_user` in group_vars/all.yml.
+## The original example reused ansible_user for both, which breaks the
+## moment ansible_user becomes a human's RADIUS name: the distribution
+## host would need a local account per engineer.
+scp_server: 192.168.1.15
+scp_user: nethub-dist
+scp_pass: "{{ vault_scp_pass }}"
+
+## Projection of the `artifacts` table, re-rendered on every dispatch.
+##
+## The table is the source of truth (7.2); this file is derived from it
+## and thrown away with the job. Hand-editing it is not "discouraged" --
+## the file does not outlive the run, so there is nothing to edit. Only
+## rows in the `published` state appear here.
+##
+## file_size is ALWAYS populated: ingest measures the file in the same
+## pass that hashes it (3.4), so the size is authoritative before any
+## device is contacted. This is what retires upgrade_iosxe.yml's
+## three-tier size cascade -- the localhost fact cache, the scp_server
+## stat fallback, and files/remote_image_size.py -- per 8.
+image_registry:
+  '17.12.06_lite':
+    filename: cat9k_lite_iosxe.17.12.06.SPA.bin
+    version: '17.12.06'
+    remote_dir: install
+    sha512: f254abe69ded4f8f771114d9e430f37d7ccbce1f21f9f86992ec4b35df7ab42a29566824504aa72116e21e8781c0004d152f33e2f231d085ca1026e375773f61
+    file_size: 468843657   # illustrative
+
+  '17.12.08_lite':
+    filename: cat9k_lite_iosxe.17.12.08.SPA.bin
+    version: '17.12.08'
+    remote_dir: install
+    sha512: 39bbc0a6d96c5056bb29ff97874571d94f598569a0f000c2265613bfddb66be5b7310783c6c6427cf2ac0e6dbdd5e5cc534925658a61b3f13817483f3beff660
+    file_size: 471177027

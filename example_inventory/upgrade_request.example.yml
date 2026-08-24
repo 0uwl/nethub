@@ -1,0 +1,39 @@
+---
+## User-uploaded upgrade request.
+##
+## This is NOT an Ansible inventory. NetHub validates it and compiles it
+## into one (see rendered/) before any playbook runs. It carries exactly
+## two kinds of information: which hosts to upgrade this run, and which
+## published image each one should end up on.
+##
+## Everything else -- connection settings, credentials, and the image
+## catalog itself -- is written by NetHub and cannot be set from here.
+## Keys not listed below are rejected at submit time rather than being
+## silently dropped, so a stale or over-ambitious file fails loudly.
+
+## Must name a platform NetHub supports (2.1). Only iosxe today; the
+## field exists so a second platform is an addition, not a rework.
+platform: iosxe
+
+hosts:
+  - name: test-switch
+    ansible_host: 192.168.1.142
+
+    ## Bundle key, resolved against the `artifacts` table at dispatch.
+    ## A plain string, never a Jinja expression -- NetHub performs the
+    ## lookup and renders the reference itself. Accepting `{{ ... }}` here
+    ## would hand a user template execution inside the EE, which is the
+    ## same hole as accepting a playbook.
+    ##
+    ## Only keys backed by a `published` artifact row resolve. An unknown
+    ## or still-`staged` key aborts the job before any device is contacted.
+    bundle: '17.12.06_lite'
+
+  - name: test-switch-2
+    ansible_host: 192.168.1.143
+    bundle: '17.12.08_lite'
+
+    ## Optional, and one of the few typed knobs a request may set.
+    ## Platform-dependent: 'flash:' on Cat9K-lite, 'bootflash:' on
+    ## Cat8500. Falls back to the platform default when omitted.
+    flash_dir: 'bootflash:'
