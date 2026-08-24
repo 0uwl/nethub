@@ -1,0 +1,408 @@
+---
+## Runs first, ungathered and unbatched (no serial limit), so the full
+## upgrade plan for every targeted host can be printed in one pass before
+## the main play below starts connecting to devices and making changes.
+## image_bundle is a plain inventory var, so this needs no facts/connection.
+- name: IOSXE Upgrade Plan Preview
+  hosts: iosxe
+  gather_facts: false
+  tasks:
+    - name: Print upgrade plan for all targeted hosts
+      tags: pre-check, install
+      run_once: true  # noqa: run-once[task] -- this play has no serial, so it always covers every targeted host in one pass
+      delegate_to: localhost
+      ansible.builtin.debug:
+        msg: >-
+          {{ item }} -> target version
+          {{ hostvars[item].image_bundle.version | default('UNDEFINED (set image_bundle for this host)') }},
+          image {{ hostvars[item].image_bundle.filename | default('UNDEFINED') }}
+      loop: "{{ ansible_play_hosts_all }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Continue with upgrade process?
+      tags: image-copy, install
+      ansible.builtin.pause:
+        prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+
+- name: IOSXE Upgrade Playbook
+  hosts: iosxe
+  gather_facts: false
+  connection: network_cli
+
+  # Tested on Cat8500 and Cat9K
+
+  # NOTE: You may need to increase copy image timeouts, please test manually before run this playbook
+
+  ## Upgrades hosts one at a time by default. Override with
+  ## -e upgrade_serial=N for a larger batch. Note: with N > 1, hosts in
+  ## the same wave share this terminal's stdin, so the pause prompts
+  ## below can interleave -- prefer upgrade_serial=1 for confirmed runs.
+  ##
+  ## any_errors_fatal/max_fail_percentage are intentionally left unset:
+  ## a host that fails is dropped from the rest of its wave but does not
+  ## block other hosts in that wave or later waves.
+  serial: "{{ upgrade_serial | default(1) }}"
+
+  ## These variable can also be defined in a file or group or host vars.
+  ## target_image / target_image_sha512 / target_xe_ver are resolved from
+  ## the host's `image_bundle` var (required -- see inventory/hosts.yml)
+  ## -- see the "Resolve target image from image_bundle" task below.
+  vars:
+    flash_dir: 'flash:' # e.g: 'bootflash' or 'flash:'
+
+    scp_server: 192.168.1.15
+    ## scp_pass comes from inventory/group_vars/iosxe/vars.yml (and the
+    ## vaulted vault.yml behind it) -- do not hardcode it here.
+
+  tasks:
+    - name: Gather and print basic IOS XE facts
+      ansible.builtin.import_role:
+        name: iosxe_facts
+      vars:
+        iosxe_facts_flash_dir: "{{ flash_dir }}"
+
+    - name: Set upgrade timestamp
+      tags: backup, install
+      ansible.builtin.set_fact:
+        timestamp: "{{ lookup('pipe', 'date \"+%Y-%m-%d-%H-%M\"') }}"
+
+    ## Configuration backup
+    - name: Config Backup for {{ inventory_hostname }}
+      tags: backup, install
+      cisco.ios.ios_config:
+        backup: true
+        backup_options:
+          filename: "{{ inventory_hostname }}_backup_{{ timestamp }}.cfg"
+          dir_path: ./backup
+      register: config_output
+
+    ## Display message for pre-check begins
+    - name: Starting pre-checks...
+      ansible.builtin.debug:
+        msg: "Starting pre-checks ..."
+      tags: pre-check, install
+
+    ## Set IOSXE Version as variable via set fact
+    - name: Set fact for the current IOSXE version
+      tags: pre-check, check-version, post-check, install
+      ansible.builtin.set_fact:
+        current_xe_ver: "{{ ansible_facts['net_version'] }}"
+
+    - name: Print parsed output for the current IOSXE version
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} currently running with {{ current_xe_ver }}"
+
+    - name: Assert image_bundle is defined
+      tags: pre-check, check-version, install
+      ansible.builtin.assert:
+        quiet: false
+        that:
+          - image_bundle is defined
+        fail_msg: >-
+          No image_bundle defined for {{ inventory_hostname }} -- set it in inventory
+          (host_vars or group_vars) to the image_registry entry to install.
+          See inventory/hosts.yml for an example. Aborting.
+
+    - name: Resolve target image from image_bundle
+      tags: pre-check, check-version, install
+      ansible.builtin.set_fact:
+        target_image: "{{ image_bundle.filename }}"
+        target_image_sha512: "{{ image_bundle.sha512 }}"
+        target_image_remote_dir: "{{ image_bundle.remote_dir }}"
+        target_xe_ver: "{{ image_bundle.version }}"
+
+    ## Initialized after target_xe_ver is resolved so upgrade_result.status
+    ## exists for every targeted host by the time the summary play runs,
+    ## even if this host never reaches the "Record upgrade result" task
+    ## further down (e.g. it fails a pre-check). Without this, the summary
+    ## play's extract() on a missing key would blow up instead of just
+    ## reporting "not_started".
+    - name: Initialize upgrade result tracking
+      tags: pre-check, check-version, post-check, install
+      ansible.builtin.set_fact:
+        upgrade_result:
+          status: not_started
+          current_version: "{{ current_xe_ver }}"
+          target_version: "{{ target_xe_ver }}"
+
+    - name: Assert that switch is NOT running with the target IOSXE version
+      tags: pre-check, check-version, install
+      ansible.builtin.assert:
+        that:
+          - "current_xe_ver != target_xe_ver"
+        quiet: false
+        success_msg: "{{ inventory_hostname }} not running target verion {{ target_xe_ver }}, current version is {{ current_xe_ver }}"
+        fail_msg: "{{ inventory_hostname }} already running {{ target_xe_ver }}"
+
+    ## If image_bundle already records this image's size, skip the
+    ## remote SCP stat entirely -- it's the same file every run, so once
+    ## it's known there's no need to ask scp_server for it again.
+    - name: Use known target image size from image_bundle, if defined
+      tags: pre-check, disk_check, image-check, image-copy, install
+      ansible.builtin.set_fact:
+        target_image_size: "{{ image_bundle.file_size }}"
+      when: "'file_size' in image_bundle"
+
+    ## Otherwise, reuse whatever an earlier host in THIS run already
+    ## discovered for the same image (see "Cache discovered image size"
+    ## below) -- only the first host targeting a given image per run
+    ## needs to hit scp_server for it.
+    - name: Use previously discovered image size from this run, if available
+      tags: pre-check, disk_check, image-check, image-copy, install
+      vars:
+        remote_path: "{{ target_image_remote_dir }}/{{ target_image }}"
+      ansible.builtin.set_fact:
+        target_image_size: "{{ hostvars['localhost'].discovered_image_sizes[remote_path] }}"
+      when:
+        - target_image_size is not defined
+        - remote_path in (hostvars['localhost'].discovered_image_sizes | default({}))
+
+    ## The device pulls the image directly from scp_server, so the
+    ## controller has to ask that server for the file's size rather than
+    ## stat-ing a local copy -- see files/remote_image_size.py. Only
+    ## needed when target_image_size wasn't already resolved above.
+    - name: Determine remote image size via SCP
+      tags: pre-check, disk_check, image-check, image-copy, install
+      delegate_to: localhost
+      no_log: true
+      when: target_image_size is not defined
+      environment:
+        REMOTE_HOST: "{{ scp_server }}"
+        REMOTE_USER: "{{ ansible_user }}"
+        REMOTE_PASS: "{{ scp_pass }}"
+        REMOTE_PATH: "{{ target_image_remote_dir }}/{{ target_image }}"
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/files/remote_image_size.py"
+      register: remote_image_size
+      changed_when: false
+
+    - name: Set target image size fact from SCP lookup
+      tags: pre-check, disk_check, image-check, image-copy, install
+      ansible.builtin.set_fact:
+        target_image_size: "{{ remote_image_size.stdout | trim | int }}"
+      when: target_image_size is not defined
+
+    ## Shares this host's freshly discovered size with the rest of the
+    ## hosts in this run (delegate_facts stores it on localhost's own
+    ## hostvars, which every host -- including later serial waves -- can
+    ## read back via the task above).
+    - name: Cache discovered image size for the rest of this run
+      tags: pre-check, disk_check, image-check, image-copy, install
+      vars:
+        remote_path: "{{ target_image_remote_dir }}/{{ target_image }}"
+      delegate_to: localhost
+      delegate_facts: true
+      ansible.builtin.set_fact:
+        discovered_image_sizes: "{{ (hostvars['localhost'].discovered_image_sizes | default({})) | combine({remote_path: target_image_size}) }}"
+
+    - name: Set target image size fact in KB
+      ansible.builtin.set_fact:
+        target_image_size_kb: "{{ (target_image_size | int / 1024) | round(0, 'ceil') | int }}"
+      tags: pre-check, disk_check, image-check, image-copy, install
+
+    - name: Print image sizes
+      ansible.builtin.debug:
+        msg: >-
+          Target image size is {{ target_image_size }} bytes ({{ target_image_size_kb }} KB).
+          Total available in the device is {{ iosxe_facts_flash_dir_info['spacefree_kb'] }} KB
+      tags: pre-check, disk_check, image-check, image-copy, install
+
+    - name: Assert Enough Disk Space Available
+      tags: image-copy, install
+      ansible.builtin.assert:
+        quiet: false
+        success_msg: "Enough disk spcae available to accommodate target image."
+        fail_msg: 'Not enough disk space available for the target image!'
+        that:
+          - "iosxe_facts_flash_dir_info['spacefree_kb'] | int > target_image_size_kb | int"
+
+    ## Check if device has the target image
+    - name: Check if switch has the target image in {{ flash_dir }}
+      tags: pre-check, install, image-check, image-copy
+      cisco.ios.ios_command:
+        commands: "dir {{ flash_dir }}"
+      register: image_check
+
+    - name: Set image check as fact
+      tags: pre-check, install, image-check, image-copy
+      ansible.builtin.set_fact:
+        dir_image_check: "{{ image_check.stdout[0] | regex_search(image_var, multiline=True) }}"
+      vars:
+        image_var: "{{ target_image }}"
+
+    ## Ansible to copy the image via SCP if does not exist in the flash or bootflash
+    - name: Copy IOSXE image if it does not already exist in {{ flash_dir }}
+      block:
+        - name: Assert target image is not already present in {{ flash_dir }}
+          tags: image-copy, install
+          ansible.builtin.assert:
+            quiet: false
+            success_msg: '{{ target_image }} NOT in {{ flash_dir }}'
+            fail_msg: '{{ target_image }} was found in {{ flash_dir }}'
+            that:
+              - "target_image != dir_image_check"
+
+        - name: Would you like to copy the IOSXE image via SCP?
+          tags: image-copy, install
+          ansible.builtin.pause:
+            prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+
+        - name: Copy IOSXE image file via SCP
+          tags: image-copy, install
+          cisco.ios.ios_command:
+            commands:
+              - command: 'copy scp://{{ ansible_user }}:{{ scp_pass }}@{{ scp_server }}/{{ target_image_remote_dir }}/{{ target_image }} {{ flash_dir }}'
+                check_all: true
+                prompt:
+                  - "Destination filename [{{ target_image }}]?"
+                answer:
+                  - "\r"
+            wait_for:
+              - result[0] contains {{ target_image_size }} bytes copied
+          vars:
+            ansible_command_timeout: 1200
+          ## Whole task is suppressed: the copy command embeds scp_pass
+          ## directly in the string, so there's no finer-grained redaction.
+          no_log: true
+          register: image_copy
+
+        - name: Target image SHA512 file validation
+          tags: image-validate, install
+          cisco.ios.ios_command:
+            commands:
+              - verify /sha512 {{ flash_dir }}{{ target_image }} {{ target_image_sha512 }}
+            wait_for:
+              - result[0] contains Verified
+          vars:
+            ansible_command_timeout: 600
+          register: image_validation_result
+
+        - name: Print target image validation result
+          tags: image-validate, install
+          ansible.builtin.debug:
+            msg: "{{ image_validation_result.stdout_lines[0][1] }}"
+
+      rescue:
+        - name: Checks Status
+          ansible.builtin.debug:
+            msg: 'Some checks failed, please review the output...'
+
+        - name: Mark this host as failed for the batch summary
+          ansible.builtin.set_fact:
+            upgrade_stage_failed: true
+
+    - name: Preparing to install/upgrade {{ inventory_hostname }}
+      tags: install, upgrade
+      ansible.builtin.pause:
+        prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+      when: ansible_net_version != target_xe_ver
+
+    ## IOSXE Upgrade process starting
+    - name: Install/Upgrade IOSXE Software
+      block:
+        - name: Saving configuration before upgrading
+          tags: install, upgrade
+          cisco.ios.ios_command:
+            commands:
+              - 'write memory'
+
+        - name: Installing Target IOSXE {{ target_xe_ver }}
+          tags: install, upgrade
+          cisco.ios.ios_command:
+            commands:
+              - command: 'install add file {{ flash_dir }}{{ target_image }} activate commit prompt-level none'
+          register: install_output
+          vars:
+            ansible_command_timeout: 1800
+
+        - name: Wait for connectivity to return on {{ inventory_hostname }}
+          tags: install, upgrade
+          ansible.builtin.wait_for_connection:
+            delay: 60
+            sleep: 30
+            timeout: 900
+
+      rescue:
+        - name: Installation status check
+          tags: install, upgrade
+          ansible.builtin.debug:
+            msg: 'Upgrade process is having some trouble ...'
+
+        - name: Mark this host as failed for the batch summary
+          tags: install, upgrade
+          ansible.builtin.set_fact:
+            upgrade_stage_failed: true
+
+      always:
+        - name: Print Install Results
+          tags: install upgrade
+          ansible.builtin.debug:
+            var: install_output.stdout_lines
+
+        - name: Gather post-upgrade facts for {{ inventory_hostname }}
+          tags: post-check, install, upgrade
+          cisco.ios.ios_facts:
+
+        - name: Record upgrade result for the batch summary
+          tags: post-check, install, upgrade
+          ansible.builtin.set_fact:
+            upgrade_result:
+              status: >-
+                {{ 'success' if (ansible_net_version == target_xe_ver and not
+                (upgrade_stage_failed | default(false))) else 'failed' }}
+              current_version: "{{ ansible_net_version }}"
+              target_version: "{{ target_xe_ver }}"
+
+        - name: "Assert switch is running the target IOSXE version after upgrade: {{ target_xe_ver }}"
+          tags: post-check, install, upgrade
+          ansible.builtin.assert:
+            quiet: false
+            success_msg: "{{ inventory_hostname }} has been upgraded to {{ ansible_net_version }}"
+            fail_msg: "Failed to upgrade the {{ inventory_hostname }}, it is still runninng {{ ansible_net_version }}"
+            that:
+              - "ansible_net_version == target_xe_ver"
+
+        - name: Do you want to clean up unnecessary packages ?
+          tags: install, upgrade
+          ansible.builtin.pause:
+            prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+
+        - name: Cleaning up unnecessary package files
+          tags: install, cleanup, upgrade
+          cisco.ios.ios_command:
+            commands:
+              - command: install remove inactive
+                prompt: Do you want to remove the above files?
+                answer: 'y'
+            wait_for:
+              - result[0] contains SUCCESS
+          register: cleanup_output
+          vars:
+            ansible_command_timeout: 300
+
+        - name: Print Cleanup Results
+          tags: install, cleanup, upgrade
+          ansible.builtin.debug:
+            var: cleanup_output.stdout_lines
+
+        ## Display message for Upgrade process completed.
+        - name: Upgrade completed
+          ansible.builtin.debug:
+            msg: "Upgrade completed."
+          tags: pre-check, install, upgrade
+
+## Runs once, after all serial waves of the play above have finished, so
+## it can report on every targeted host regardless of how many waves
+## upgrade_serial split them into (a run_once task inside the play above
+## would only see the current wave).
+- name: IOSXE Upgrade Summary
+  hosts: iosxe
+  gather_facts: false
+  tasks:
+    - name: Report batch upgrade summary
+      ansible.builtin.import_role:
+        name: batch_summary
