@@ -52,6 +52,12 @@ ansible-playbook ansible/upgrade_iosxe.yml -e upgrade_serial=1
 See [design-document.md](design-document.md) for what it expects and how
 NetHub will eventually dispatch it.
 
+## AI usage
+
+Parts of this codebase and its documentation are developed with AI
+assistance (Claude Code). Every change is reviewed by a human maintainer
+before being merged.
+
 ## Learn more
 
 - [design-document.md](design-document.md) — full architecture, security
