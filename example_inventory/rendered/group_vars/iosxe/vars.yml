@@ -5,21 +5,41 @@
 ## from the original example); file_size values are illustrative.
 ansible_network_os: cisco.ios.ios
 
-## Distribution host, and the service account the DEVICE uses to pull its
-## image from it.
+## The distribution host is NetHub itself (3.3), and the account the
+## DEVICE uses to pull its image from it over SFTP.
 ##
-## This is machine-to-machine: the switch opens the SCP session, not a
-## human. 4 calls this credential "the access-control gate on who can
-## pull an image", which is an authorization decision about the image
-## store, not about a person -- so it stays a shared, vaulted account.
+## Named dist_* rather than sftp_*: the protocol is an implementation
+## detail of one task in the playbook, the identity of the host is not.
+##
+## This is machine-to-machine: the switch opens the session, not a human.
+## 4.2 calls this credential "the access-control gate on who can pull an
+## image", which is an authorization decision about the image store, not
+## about a person -- so the ACCOUNT stays shared.
 ##
 ## Kept deliberately separate from `ansible_user` in group_vars/all.yml.
-## The original example reused ansible_user for both, which breaks the
-## moment ansible_user becomes a human's RADIUS name: the distribution
-## host would need a local account per engineer.
-scp_server: 192.168.1.15
-scp_user: nethub-dist
-scp_pass: "{{ vault_scp_pass }}"
+## Reusing ansible_user for both breaks the moment it becomes a human's
+## AAA name: the distribution host would need a local account per
+## engineer, and the human's own password would be the one the device
+## sends.
+dist_server: 127.0.0.1
+dist_user: nethub-dist
+
+## dist_pass is NOT rendered here, and there is no vault.yml behind it.
+##
+## The password is minted per phase execution by the sibling, injected in
+## memory, and expired when that execution reaches a terminal state
+## (4.3.1). Anything written to this file lands in the private_data_dir
+## on disk and is mounted into the EE container -- the same reason
+## ansible_password is absent from all.yml.
+##
+## The account it opens is deliberately cheap to lose: ForceCommand
+## internal-sftp, ChrootDirectory over the published image subtree, no
+## shell, read-only. That is the reason the transfer is SFTP rather than
+## SCP -- serving legacy SCP would need a shell and the scp binary inside
+## the chroot, and ForceCommand breaks it outright. The constraint is only
+## available because NetHub owns the distribution host, and it is what
+## makes the one disclosure 4.3.1 cannot fix -- a submitter naming a
+## machine they control -- worth close to nothing.
 
 ## Projection of the `artifacts` table, re-rendered on every dispatch.
 ##
@@ -32,7 +52,10 @@ scp_pass: "{{ vault_scp_pass }}"
 ## pass that hashes it (3.4), so the size is authoritative before any
 ## device is contacted. This is what retires upgrade_iosxe.yml's
 ## three-tier size cascade -- the localhost fact cache, the scp_server
-## stat fallback, and files/remote_image_size.py -- per 8.
+## stat fallback, and files/remote_image_size.py -- per 8. That cascade is
+## now deleted from the playbook: the distribution account has no shell,
+## so there is nothing on the far end to run a remote stat with, and
+## file_size is required rather than discovered.
 image_registry:
   '17.12.06_lite':
     filename: cat9k_lite_iosxe.17.12.06.SPA.bin

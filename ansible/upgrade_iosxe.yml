@@ -51,9 +51,15 @@
   vars:
     flash_dir: 'flash:' # e.g: 'bootflash' or 'flash:'
 
-    scp_server: 192.168.1.15
-    ## scp_pass comes from inventory/group_vars/iosxe/vars.yml (and the
-    ## vaulted vault.yml behind it) -- do not hardcode it here.
+    ## NetHub PUSHES the image to the device (design doc 4.3.1). There is
+    ## no distribution host account, no scp_pass, and no vault: the only
+    ## credential in play is the submitter's own device credential, which
+    ## network_cli is already sending to this host.
+    ##
+    ## image_mount_dir is where the published artifact subtree is mounted
+    ## read-only into the EE. It is addressed by artifacts.storage_path and
+    ## is NOT inside the private_data_dir, which is tmpfs (design doc 3.5).
+    image_mount_dir: /images
 
   tasks:
     - name: Gather and print basic IOS XE facts
@@ -61,6 +67,55 @@
         name: iosxe_facts
       vars:
         iosxe_facts_flash_dir: "{{ flash_dir }}"
+
+    ## NetHub requires privilege level 15 at login. There is no `enable`
+    ## escalation anywhere in this playbook and no become_password is
+    ## collected: every command below -- write memory, copy to flash,
+    ## install add -- needs level 15, so an account that cannot reach it
+    ## cannot run an upgrade at all. Asserting it here turns that into one
+    ## clear failure at pre-check instead of a confusing denial partway
+    ## through a wave.
+    - name: Assert session is at privilege level 15
+      tags: pre-check, install
+      block:
+        - name: Read current privilege level
+          cisco.ios.ios_command:
+            commands: 'show privilege'
+          register: privilege_check
+
+        - name: Fail unless the session is privilege 15
+          ansible.builtin.assert:
+            quiet: false
+            success_msg: 'Session is at privilege level 15.'
+            fail_msg: >-
+              Session is not at privilege level 15. NetHub requires
+              level-15 accounts; grant this user level 15 at login rather
+              than relying on enable escalation.
+            that:
+              - "'level is 15' in privilege_check.stdout[0]"
+
+    ## Cisco documents `ip ssh source-interface` as a prerequisite for
+    ## SFTP client-side functionality. Asserting it here turns a missing
+    ## global command into one clear pre-check failure rather than a
+    ## transfer that dies partway through a wave.
+    - name: Assert SFTP client prerequisite is configured
+      tags: pre-check, install
+      block:
+        - name: Read ip ssh source-interface
+          cisco.ios.ios_command:
+            commands: 'show running-config | include ^ip ssh source-interface'
+          register: ssh_source_interface_check
+
+        - name: Fail unless ip ssh source-interface is set
+          ansible.builtin.assert:
+            quiet: false
+            success_msg: 'ip ssh source-interface is configured.'
+            fail_msg: >-
+              ip ssh source-interface is not configured. Cisco documents it
+              as a prerequisite for SFTP client functionality, which this
+              playbook uses to pull the image from the distribution host.
+            that:
+              - "ssh_source_interface_check.stdout[0] | trim | length > 0"
 
     - name: Set upgrade timestamp
       tags: backup, install
@@ -136,68 +191,35 @@
         success_msg: "{{ inventory_hostname }} not running target verion {{ target_xe_ver }}, current version is {{ current_xe_ver }}"
         fail_msg: "{{ inventory_hostname }} already running {{ target_xe_ver }}"
 
-    ## If image_bundle already records this image's size, skip the
-    ## remote SCP stat entirely -- it's the same file every run, so once
-    ## it's known there's no need to ask scp_server for it again.
-    - name: Use known target image size from image_bundle, if defined
+    ## file_size is required, not discovered.
+    ##
+    ## This used to be a three-tier cascade: use image_bundle.file_size if
+    ## present, else reuse a value another host in this run had already
+    ## discovered (cached on localhost via delegate_facts), else shell out
+    ## to files/remote_image_size.py for a remote stat over SCP.
+    ##
+    ## All of that is gone. NetHub measures the file in the same pass that
+    ## hashes it at ingest and always renders file_size into the registry,
+    ## so tiers 2 and 3 only ever answered a question NetHub already knows
+    ## the answer to. Under the push model there is no remote host to ask
+    ## in any case -- the file is on a read-only mount the EE can stat
+    ## directly -- and files/remote_image_size.py was referenced but never
+    ## written.
+    - name: Resolve target image size from image_bundle
+      tags: pre-check, disk_check, image-check, image-copy, install
+      ansible.builtin.assert:
+        quiet: false
+        success_msg: 'image_bundle records file_size for {{ target_image }}.'
+        fail_msg: >-
+          image_bundle for {{ target_image }} has no file_size. NetHub
+          always renders it; a hand-written inventory must supply it too.
+        that:
+          - "'file_size' in image_bundle"
+
+    - name: Set target image size fact
       tags: pre-check, disk_check, image-check, image-copy, install
       ansible.builtin.set_fact:
         target_image_size: "{{ image_bundle.file_size }}"
-      when: "'file_size' in image_bundle"
-
-    ## Otherwise, reuse whatever an earlier host in THIS run already
-    ## discovered for the same image (see "Cache discovered image size"
-    ## below) -- only the first host targeting a given image per run
-    ## needs to hit scp_server for it.
-    - name: Use previously discovered image size from this run, if available
-      tags: pre-check, disk_check, image-check, image-copy, install
-      vars:
-        remote_path: "{{ target_image_remote_dir }}/{{ target_image }}"
-      ansible.builtin.set_fact:
-        target_image_size: "{{ hostvars['localhost'].discovered_image_sizes[remote_path] }}"
-      when:
-        - target_image_size is not defined
-        - remote_path in (hostvars['localhost'].discovered_image_sizes | default({}))
-
-    ## The device pulls the image directly from scp_server, so the
-    ## controller has to ask that server for the file's size rather than
-    ## stat-ing a local copy -- see files/remote_image_size.py. Only
-    ## needed when target_image_size wasn't already resolved above.
-    - name: Determine remote image size via SCP
-      tags: pre-check, disk_check, image-check, image-copy, install
-      delegate_to: localhost
-      no_log: true
-      when: target_image_size is not defined
-      environment:
-        REMOTE_HOST: "{{ scp_server }}"
-        REMOTE_USER: "{{ ansible_user }}"
-        REMOTE_PASS: "{{ scp_pass }}"
-        REMOTE_PATH: "{{ target_image_remote_dir }}/{{ target_image }}"
-      ansible.builtin.command:
-        argv:
-          - python3
-          - "{{ playbook_dir }}/files/remote_image_size.py"
-      register: remote_image_size
-      changed_when: false
-
-    - name: Set target image size fact from SCP lookup
-      tags: pre-check, disk_check, image-check, image-copy, install
-      ansible.builtin.set_fact:
-        target_image_size: "{{ remote_image_size.stdout | trim | int }}"
-      when: target_image_size is not defined
-
-    ## Shares this host's freshly discovered size with the rest of the
-    ## hosts in this run (delegate_facts stores it on localhost's own
-    ## hostvars, which every host -- including later serial waves -- can
-    ## read back via the task above).
-    - name: Cache discovered image size for the rest of this run
-      tags: pre-check, disk_check, image-check, image-copy, install
-      vars:
-        remote_path: "{{ target_image_remote_dir }}/{{ target_image }}"
-      delegate_to: localhost
-      delegate_facts: true
-      ansible.builtin.set_fact:
-        discovered_image_sizes: "{{ (hostvars['localhost'].discovered_image_sizes | default({})) | combine({remote_path: target_image_size}) }}"
 
     - name: Set target image size fact in KB
       ansible.builtin.set_fact:
@@ -234,8 +256,15 @@
       vars:
         image_var: "{{ target_image }}"
 
-    ## Ansible to copy the image via SCP if does not exist in the flash or bootflash
-    - name: Copy IOSXE image if it does not already exist in {{ flash_dir }}
+    ## NetHub pushes the image to the device's own SCP server, rather than
+    ## having the device fetch it. Design doc 4.3.1 has the reasoning; the
+    ## short version is that a deployment may block outbound SSH from its
+    ## devices entirely, which makes a pull structurally impossible.
+    ##
+    ## The price is that this block MUTATES THE DEVICE CONFIG. It enables
+    ## the SCP server and must put it back. Read the always: section before
+    ## changing anything here.
+    - name: Push IOSXE image if it does not already exist in {{ flash_dir }}
       block:
         - name: Assert target image is not already present in {{ flash_dir }}
           tags: image-copy, install
@@ -246,54 +275,114 @@
             that:
               - "target_image != dir_image_check"
 
-        - name: Would you like to copy the IOSXE image via SCP?
+        - name: Would you like to push the IOSXE image via SCP?
           tags: image-copy, install
           ansible.builtin.pause:
-            prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+            prompt: "[{{ inventory_hostname }}] This ENABLES the SCP server on the device (restored afterwards). Press enter to continue or ctrl-c + a to abort"
 
-        - name: Copy IOSXE image file via SCP
+        ## Capture before you change. Restoring on a device that
+        ## legitimately runs an SCP server must be a no-op, not a disable.
+        - name: Read prior SCP server state
           tags: image-copy, install
           cisco.ios.ios_command:
-            commands:
-              - command: 'copy scp://{{ ansible_user }}:{{ scp_pass }}@{{ scp_server }}/{{ target_image_remote_dir }}/{{ target_image }} {{ flash_dir }}'
-                check_all: true
-                prompt:
-                  - "Destination filename [{{ target_image }}]?"
-                answer:
-                  - "\r"
-            wait_for:
-              - result[0] contains {{ target_image_size }} bytes copied
-          vars:
-            ansible_command_timeout: 1200
-          ## Whole task is suppressed: the copy command embeds scp_pass
-          ## directly in the string, so there's no finer-grained redaction.
-          no_log: true
-          register: image_copy
+            commands: 'show running-config | include ^ip scp server'
+          register: scp_server_prior
 
-        - name: Target image SHA512 file validation
-          tags: image-validate, install
-          cisco.ios.ios_command:
-            commands:
-              - verify /sha512 {{ flash_dir }}{{ target_image }} {{ target_image_sha512 }}
-            wait_for:
-              - result[0] contains Verified
-          vars:
-            ansible_command_timeout: 600
-          register: image_validation_result
+        - name: Record whether the SCP server was already enabled
+          tags: image-copy, install
+          ansible.builtin.set_fact:
+            scp_server_prior_enabled: "{{ 'ip scp server enable' in scp_server_prior.stdout[0] }}"
 
-        - name: Print target image validation result
-          tags: image-validate, install
-          ansible.builtin.debug:
-            msg: "{{ image_validation_result.stdout_lines[0][1] }}"
+        - name: Enable the device SCP server
+          tags: image-copy, install
+          cisco.ios.ios_config:
+            lines:
+              - 'ip scp server enable'
+          when: not scp_server_prior_enabled
 
+        ## THE TRANSFER MECHANISM IS THE ONE UNSETTLED PART OF THIS DESIGN,
+        ## and it is isolated here so that swapping it is a one-file change.
+        ##
+        ## net_put's SCP path is reported broken against IOS-XE under the
+        ## libssh connection type (pylibssh #673); the paramiko alternative
+        ## works but is deprecated in ansible.netcommon. SFTP is not an
+        ## option in this direction -- IOS-XE has no SFTP server -- so SCP
+        ## is the only wire protocol available for a push.
+        ##
+        ## ansible/net_put_probe.yml settles empirically whether this is
+        ## usable. If it is not, replace this include with
+        ## tasks/push_image_scp.yml (OpenSSH scp invoked inside the EE
+        ## against a rendered known_hosts). Nothing else in this playbook
+        ## or in the data model changes with that swap.
+        - name: Push the image to the device
+          tags: image-copy, install
+          ansible.builtin.include_tasks: tasks/push_image_net_put.yml
+
+      ## The rescue records the failure; the always: puts the device back;
+      ## the end_host after the block is what actually stops the install.
+      ##
+      ## end_host is deliberately NOT called in the rescue: it would race
+      ## the always: block, and leaving the SCP server enabled is a worse
+      ## outcome than a slightly later exit.
       rescue:
         - name: Checks Status
           ansible.builtin.debug:
-            msg: 'Some checks failed, please review the output...'
+            msg: 'Image staging failed for this host -- see output above. Not installing.'
 
         - name: Mark this host as failed for the batch summary
           ansible.builtin.set_fact:
             upgrade_stage_failed: true
+
+      ## Runs whether the push succeeded, failed, or errored partway.
+      ## Design doc 4.3.1 calls this the compensating action, and calls it
+      ## load-bearing: a phase that leaves the SCP server enabled has
+      ## changed a production device and not changed it back, and NetHub
+      ## cannot enumerate the devices that happened to afterwards.
+      always:
+        - name: Restore SCP server to its prior state
+          tags: image-copy, install
+          cisco.ios.ios_config:
+            lines:
+              - "{{ 'ip scp server enable' if scp_server_prior_enabled | default(false) else 'no ip scp server enable' }}"
+          register: scp_server_restore
+          failed_when: false
+          when: scp_server_prior_enabled is defined
+
+        - name: Read back SCP server state
+          tags: image-copy, install
+          cisco.ios.ios_command:
+            commands: 'show running-config | include ^ip scp server'
+          register: scp_server_after
+          failed_when: false
+          when: scp_server_prior_enabled is defined
+
+        - name: Record whether the restore was confirmed
+          tags: image-copy, install
+          ansible.builtin.set_fact:
+            scp_restore_confirmed: >-
+              {{ (scp_server_prior_enabled is not defined)
+                 or (('ip scp server enable' in (scp_server_after.stdout[0] | default('')))
+                     == (scp_server_prior_enabled | bool)) }}
+
+        - name: Warn loudly if the device was not put back
+          tags: image-copy, install
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: {{ inventory_hostname }} SCP server state was NOT
+              restored. This device has been changed and not changed back.
+              Fix it by hand -- NetHub cannot enumerate devices in this
+              state (design doc 2, 4.3.1, 7.4).
+          when: not (scp_restore_confirmed | bool)
+
+    ## A failed stage, OR an unconfirmed restore, stops this host. An
+    ## unconfirmed restore is not a partial success: design doc 4.3.1 makes
+    ## it a failure no matter what else went right, because activate's
+    ## `write memory` would otherwise commit the enable to startup-config
+    ## permanently, where a reload would have discarded it.
+    - name: Stop processing this host if staging failed or the device was not restored
+      tags: image-copy, install
+      ansible.builtin.meta: end_host
+      when: (upgrade_stage_failed | default(false)) or not (scp_restore_confirmed | default(true))
 
     - name: Preparing to install/upgrade {{ inventory_hostname }}
       tags: install, upgrade

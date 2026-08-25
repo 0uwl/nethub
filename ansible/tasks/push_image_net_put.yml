@@ -1,0 +1,54 @@
+---
+## The transfer mechanism, isolated so it can be swapped whole.
+##
+## Included by upgrade_iosxe.yml's staging block. The caller has already:
+##   - asserted privilege 15
+##   - asserted the image is not already in flash
+##   - asserted there is enough free space
+##   - captured the prior SCP server state and enabled the server
+##
+## and will restore the SCP server in its always: block regardless of what
+## happens in here. Nothing in this file should assume it runs to
+## completion.
+##
+## Contract this file must honour if it is replaced:
+##   in   -- image_mount_dir, target_image, target_image_sha512,
+##           target_image_size, flash_dir
+##   out  -- the image present in flash_dir and SHA-512 verified ON THE
+##           DEVICE, or a task failure
+##
+## Alternative implementation, if net_put proves unusable: OpenSSH scp
+## invoked inside the EE against a rendered known_hosts. See
+## ansible/net_put_probe.yml and design doc 10.
+
+- name: Push the image via net_put
+  ansible.netcommon.net_put:
+    src: "{{ image_mount_dir }}/{{ target_image }}"
+    dest: "{{ flash_dir }}{{ target_image }}"
+    protocol: scp
+  vars:
+    ## Generous on purpose: this is a multi-hundred-megabyte transfer over
+    ## whatever link separates NetHub from the device. Design doc 8 puts a
+    ## per-host bound on the phase derived from file_size; this is the
+    ## backstop under it, not the real limit.
+    ansible_command_timeout: 10000
+  register: image_push
+
+## The module's exit status is not evidence that the right bytes arrived.
+## This is, and it is design doc 3.4's third consumption of the digest
+## computed once at ingest.
+- name: Verify the pushed image on the device
+  tags: image-validate, install
+  cisco.ios.ios_command:
+    commands:
+      - "verify /sha512 {{ flash_dir }}{{ target_image }} {{ target_image_sha512 }}"
+    wait_for:
+      - result[0] contains Verified
+  vars:
+    ansible_command_timeout: 600
+  register: image_validation_result
+
+- name: Print target image validation result
+  tags: image-validate, install
+  ansible.builtin.debug:
+    msg: "{{ image_validation_result.stdout_lines[0][1] }}"

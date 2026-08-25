@@ -8,12 +8,26 @@
 ## two-sided audit trail this design exists to produce would be worthless.
 ansible_user: jsmith
 
-ansible_become: true
-ansible_become_method: enable
+## No become. NetHub requires privilege level 15 AT LOGIN (4.3).
+##
+## Every command an upgrade runs -- write memory, copy to flash,
+## install add ... activate commit -- needs level 15 anyway. Asking for it
+## at login rather than reaching it through `enable` means there is no
+## escalation step and no become_password to collect, which keeps a second
+## secret out of a credential path built to minimise them. It also removes
+## the shared enable secret, which is the same shared-credential objection
+## 4.3 raises about service accounts.
+##
+## It is a property rather than a tax. NetHub's own `role` gates NetHub's
+## screens and never substitutes for what a credential authorizes on the
+## device (4.3); the privilege requirement is what makes that concrete,
+## because the refusal comes from the device. The playbook asserts it at
+## pre-check so an under-privileged account fails once and clearly.
 
 ## ansible_password is deliberately absent.
 ##
 ## The submitter's device password is collected at job submission and
 ## handed to ansible-runner in memory (--ask-pass style), because anything
 ## written here lands in the private_data_dir on disk and is mounted into
-## the EE container. Same for ansible_become_password.
+## the EE container. There is no ansible_become_password either, for the
+## reason given above: no become step exists to need one.
