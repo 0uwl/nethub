@@ -29,31 +29,31 @@
       ansible.builtin.pause:
         prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
 
-- name: IOSXE Upgrade Playbook
+- name: IOSXE Image Staging
   hosts: upgrade_batch
   gather_facts: false
   connection: network_cli
 
-  # Tested on Cat8500 and Cat9K
+  # Tested on Cat9K
 
   # NOTE: You may need to increase copy image timeouts, please test manually before run this playbook
 
-  ## Upgrades hosts one at a time by default. Override with
-  ## -e upgrade_serial=N for a larger batch. Note: with N > 1, hosts in
-  ## the same wave share this terminal's stdin, so the pause prompts
-  ## below can interleave -- prefer upgrade_serial=1 for confirmed runs.
+  ## Staging (the SCP push) is the slow part, so it gets its own serial,
+  ## independent of the activation play below. Defaults to upgrade_serial
+  ## (and from there to 1) so a caller who only ever sets upgrade_serial
+  ## sees no change in behaviour; pass -e upgrade_stage_serial=N to widen
+  ## just this play, e.g. upgrade_stage_serial=10 upgrade_serial=1 pushes
+  ## to 10 hosts at once but still activates one at a time.
+  ##
+  ## Note: with N > 1, hosts in the same wave share this terminal's stdin,
+  ## so the "enable SCP server?" pause in tasks/stage_image.yml can
+  ## interleave across them -- same caveat the activation play's serial
+  ## has always carried.
   ##
   ## any_errors_fatal/max_fail_percentage are intentionally left unset:
   ## a host that fails is dropped from the rest of its wave but does not
   ## block other hosts in that wave or later waves.
-  serial: "{{ upgrade_serial | default(1) }}"
-
-  ## These variable can also be defined in a file or group or host vars.
-  ## target_image / target_image_sha512 / target_version are resolved from
-  ## the host's `software_bundle` var (required -- see inventory/hosts.yml)
-  ## -- see tasks/resolve_target_bundle.yml.
-  vars:
-    flash_dir: 'flash:' # e.g: 'bootflash' or 'flash:'
+  serial: "{{ upgrade_stage_serial | default(upgrade_serial) | default(1) }}"
 
   tasks:
     - name: Gather and print basic IOS XE facts
@@ -102,12 +102,6 @@
       tags: pre-check, check-version, image-check, image-copy, install
       ansible.builtin.include_tasks: tasks/resolve_target_bundle.yml
 
-    ## Initialized after target_version is resolved so upgrade_result.status
-    ## exists for every targeted host by the time the summary play runs,
-    ## even if this host never reaches the "Record upgrade result" task
-    ## further down (e.g. it fails a pre-check). Without this, the summary
-    ## play's extract() on a missing key would blow up instead of just
-    ## reporting "not_started".
     - name: Initialize upgrade result tracking
       tags: pre-check, check-version, post-check, install
       ansible.builtin.set_fact:
@@ -133,6 +127,14 @@
       tags: image-copy, install
       ansible.builtin.include_tasks: tasks/stage_image.yml
 
+## Separate play so activation keeps its own serial pacing (default 1)
+## regardless of how wide thestaging play above ran
+- name: IOSXE Image Activation
+  hosts: upgrade_batch
+  gather_facts: false
+  connection: network_cli
+  serial: "{{ upgrade_serial | default(1) }}"
+  tasks:
     - name: Activate target image on {{ inventory_hostname }}
       tags: install, upgrade
       ansible.builtin.include_tasks: tasks/activate_image.yml
