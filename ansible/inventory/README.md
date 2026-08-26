@@ -10,7 +10,7 @@ rendered/                     <- NetHub writes this, per job
   group_vars/
     all.yml
     iosxe/
-      vars.yml                (image_registry projection)
+      vars.yml                (software_registry projection)
 ```
 
 ## Why the split
@@ -18,7 +18,7 @@ rendered/                     <- NetHub writes this, per job
 The original example had one inventory tree carrying everything, which
 put three things in a user-writable file that must not be there:
 
-- **`image_registry`.** Design doc §7.2 makes NetHub the sole writer of the
+- **`software_registry`.** Design doc §7.2 makes NetHub the sole writer of the
   registry and says the `artifacts` table wins on any inconsistency. An
   uploaded catalog lets a user name any filename and any SHA-512, which
   bypasses the table entirely and breaks 3.4's "hash computed once at
@@ -26,7 +26,7 @@ put three things in a user-writable file that must not be there:
 - **`ansible_user`.** Once this is the submitter's own device username,
   a user who can set it can run as anyone, and the device-side log
   stops being evidence.
-- **Jinja.** `image_bundle: "{{ image_registry['...'] }}"` is a template
+- **Jinja.** `software_bundle: "{{ software_registry['...'] }}"` is a template
   expression. Accepting user-authored Jinja into an EE run is the
   playbook-upload hole wearing a different hat.
 

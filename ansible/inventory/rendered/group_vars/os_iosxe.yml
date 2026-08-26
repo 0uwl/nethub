@@ -1,0 +1,16 @@
+---
+ansible_network_os: cisco.ios.ios
+
+software_registry:
+  search_dir: "/images"
+  '17.12.06_lite':
+    file_name: cat9k_lite_iosxe.17.12.06.SPA.bin
+    version: '17.12.06'
+    sha512: f254abe69ded4f8f771114d9e430f37d7ccbce1f21f9f86992ec4b35df7ab42a29566824504aa72116e21e8781c0004d152f33e2f231d085ca1026e375773f61
+    file_size: 468843657   # illustrative
+
+  '17.12.08_lite':
+    file_name: cat9k_lite_iosxe.17.12.08.SPA.bin
+    version: '17.12.08'
+    sha512: 39bbc0a6d96c5056bb29ff97874571d94f598569a0f000c2265613bfddb66be5b7310783c6c6427cf2ac0e6dbdd5e5cc534925658a61b3f13817483f3beff660
+    file_size: 471177027

@@ -2,11 +2,15 @@
 ## Runs first, ungathered and unbatched (no serial limit), so the full
 ## upgrade plan for every targeted host can be printed in one pass before
 ## the main play below starts connecting to devices and making changes.
-## image_bundle is a plain inventory var, so this needs no facts/connection.
+## software_bundle is a plain inventory var, so this needs no facts/connection.
 - name: IOSXE Upgrade Plan Preview
-  hosts: iosxe
+  hosts: upgrade_batch
   gather_facts: false
   tasks:
+    - name: Resolve target bundle for {{ inventory_hostname }}
+      tags: pre-check, check-version, install
+      ansible.builtin.include_tasks: tasks/resolve_target_bundle.yml
+
     - name: Print upgrade plan for all targeted hosts
       tags: pre-check, install
       run_once: true  # noqa: run-once[task] -- this play has no serial, so it always covers every targeted host in one pass
@@ -14,8 +18,8 @@
       ansible.builtin.debug:
         msg: >-
           {{ item }} -> target version
-          {{ hostvars[item].image_bundle.version | default('UNDEFINED (set image_bundle for this host)') }},
-          image {{ hostvars[item].image_bundle.filename | default('UNDEFINED') }}
+          {{ hostvars[item].target_bundle.version | default('UNDEFINED (set software_bundle for this host)') }},
+          image {{ hostvars[item].target_bundle.filename | default('UNDEFINED') }}
       loop: "{{ ansible_play_hosts_all }}"
       loop_control:
         label: "{{ item }}"
@@ -26,7 +30,7 @@
         prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
 
 - name: IOSXE Upgrade Playbook
-  hosts: iosxe
+  hosts: upgrade_batch
   gather_facts: false
   connection: network_cli
 
@@ -45,21 +49,11 @@
   serial: "{{ upgrade_serial | default(1) }}"
 
   ## These variable can also be defined in a file or group or host vars.
-  ## target_image / target_image_sha512 / target_xe_ver are resolved from
-  ## the host's `image_bundle` var (required -- see inventory/hosts.yml)
-  ## -- see the "Resolve target image from image_bundle" task below.
+  ## target_image / target_image_sha512 / target_version are resolved from
+  ## the host's `software_bundle` var (required -- see inventory/hosts.yml)
+  ## -- see tasks/resolve_target_bundle.yml.
   vars:
     flash_dir: 'flash:' # e.g: 'bootflash' or 'flash:'
-
-    ## NetHub PUSHES the image to the device (design doc 4.3.1). There is
-    ## no distribution host account, no scp_pass, and no vault: the only
-    ## credential in play is the submitter's own device credential, which
-    ## network_cli is already sending to this host.
-    ##
-    ## image_mount_dir is where the published artifact subtree is mounted
-    ## read-only into the EE. It is addressed by artifacts.storage_path and
-    ## is NOT inside the private_data_dir, which is tmpfs (design doc 3.5).
-    image_mount_dir: /images
 
   tasks:
     - name: Gather and print basic IOS XE facts
@@ -68,31 +62,9 @@
       vars:
         iosxe_facts_flash_dir: "{{ flash_dir }}"
 
-    ## NetHub requires privilege level 15 at login. There is no `enable`
-    ## escalation anywhere in this playbook and no become_password is
-    ## collected: every command below -- write memory, copy to flash,
-    ## install add -- needs level 15, so an account that cannot reach it
-    ## cannot run an upgrade at all. Asserting it here turns that into one
-    ## clear failure at pre-check instead of a confusing denial partway
-    ## through a wave.
     - name: Assert session is at privilege level 15
       tags: pre-check, install
-      block:
-        - name: Read current privilege level
-          cisco.ios.ios_command:
-            commands: 'show privilege'
-          register: privilege_check
-
-        - name: Fail unless the session is privilege 15
-          ansible.builtin.assert:
-            quiet: false
-            success_msg: 'Session is at privilege level 15.'
-            fail_msg: >-
-              Session is not at privilege level 15. NetHub requires
-              level-15 accounts; grant this user level 15 at login rather
-              than relying on enable escalation.
-            that:
-              - "'level is 15' in privilege_check.stdout[0]"
+      ansible.builtin.include_tasks: tasks/assert_privilege_15.yml
 
     - name: Set upgrade timestamp
       tags: backup, install
@@ -119,32 +91,18 @@
     - name: Set fact for the current IOSXE version
       tags: pre-check, check-version, post-check, install
       ansible.builtin.set_fact:
-        current_xe_ver: "{{ ansible_facts['net_version'] }}"
+        current_version: "{{ ansible_facts['net_version'] }}"
 
     - name: Print parsed output for the current IOSXE version
       ansible.builtin.debug:
         msg:
-          - "{{ inventory_hostname }} currently running with {{ current_xe_ver }}"
+          - "{{ inventory_hostname }} currently running with {{ current_version }}"
 
-    - name: Assert image_bundle is defined
-      tags: pre-check, check-version, install
-      ansible.builtin.assert:
-        quiet: false
-        that:
-          - image_bundle is defined
-        fail_msg: >-
-          No image_bundle defined for {{ inventory_hostname }} -- set it in inventory
-          (host_vars or group_vars) to the image_registry entry to install.
-          See inventory/hosts.yml for an example. Aborting.
+    - name: Resolve target bundle for {{ inventory_hostname }}
+      tags: pre-check, check-version, image-check, image-copy, install
+      ansible.builtin.include_tasks: tasks/resolve_target_bundle.yml
 
-    - name: Resolve target image from image_bundle
-      tags: pre-check, check-version, install
-      ansible.builtin.set_fact:
-        target_image: "{{ image_bundle.filename }}"
-        target_image_sha512: "{{ image_bundle.sha512 }}"
-        target_xe_ver: "{{ image_bundle.version }}"
-
-    ## Initialized after target_xe_ver is resolved so upgrade_result.status
+    ## Initialized after target_version is resolved so upgrade_result.status
     ## exists for every targeted host by the time the summary play runs,
     ## even if this host never reaches the "Record upgrade result" task
     ## further down (e.g. it fails a pre-check). Without this, the summary
@@ -155,317 +113,36 @@
       ansible.builtin.set_fact:
         upgrade_result:
           status: not_started
-          current_version: "{{ current_xe_ver }}"
-          target_version: "{{ target_xe_ver }}"
+          current_version: "{{ current_version }}"
+          target_version: "{{ target_version }}"
 
     - name: Assert that switch is NOT running with the target IOSXE version
       tags: pre-check, check-version, install
       ansible.builtin.assert:
         that:
-          - "current_xe_ver != target_xe_ver"
+          - "current_version != target_version"
         quiet: false
-        success_msg: "{{ inventory_hostname }} not running target verion {{ target_xe_ver }}, current version is {{ current_xe_ver }}"
-        fail_msg: "{{ inventory_hostname }} already running {{ target_xe_ver }}"
+        success_msg: "{{ inventory_hostname }} not running target verion {{ target_version }}, current version is {{ current_version }}"
+        fail_msg: "{{ inventory_hostname }} already running {{ target_version }}"
 
-    ## file_size is required, not discovered.
-    ##
-    ## This used to be a three-tier cascade: use image_bundle.file_size if
-    ## present, else reuse a value another host in this run had already
-    ## discovered (cached on localhost via delegate_facts), else shell out
-    ## to files/remote_image_size.py for a remote stat over SCP.
-    ##
-    ## All of that is gone. NetHub measures the file in the same pass that
-    ## hashes it at ingest and always renders file_size into the registry,
-    ## so tiers 2 and 3 only ever answered a question NetHub already knows
-    ## the answer to. Under the push model there is no remote host to ask
-    ## in any case -- the file is on a read-only mount the EE can stat
-    ## directly -- and files/remote_image_size.py was referenced but never
-    ## written.
-    - name: Resolve target image size from image_bundle
+    - name: Check available disk space for {{ inventory_hostname }}
       tags: pre-check, disk_check, image-check, image-copy, install
-      ansible.builtin.assert:
-        quiet: false
-        success_msg: 'image_bundle records file_size for {{ target_image }}.'
-        fail_msg: >-
-          image_bundle for {{ target_image }} has no file_size. NetHub
-          always renders it; a hand-written inventory must supply it too.
-        that:
-          - "'file_size' in image_bundle"
+      ansible.builtin.include_tasks: tasks/check_disk_space.yml
 
-    - name: Set target image size fact
-      tags: pre-check, disk_check, image-check, image-copy, install
-      ansible.builtin.set_fact:
-        target_image_size: "{{ image_bundle.file_size }}"
-
-    - name: Set target image size fact in KB
-      ansible.builtin.set_fact:
-        target_image_size_kb: "{{ (target_image_size | int / 1024) | round(0, 'ceil') | int }}"
-      tags: pre-check, disk_check, image-check, image-copy, install
-
-    - name: Print image sizes
-      ansible.builtin.debug:
-        msg: >-
-          Target image size is {{ target_image_size }} bytes ({{ target_image_size_kb }} KB).
-          Total available in the device is {{ iosxe_facts_flash_dir_info['spacefree_kb'] }} KB
-      tags: pre-check, disk_check, image-check, image-copy, install
-
-    - name: Assert Enough Disk Space Available
+    - name: Stage target image on {{ inventory_hostname }}
       tags: image-copy, install
-      ansible.builtin.assert:
-        quiet: false
-        success_msg: "Enough disk spcae available to accommodate target image."
-        fail_msg: 'Not enough disk space available for the target image!'
-        that:
-          - "iosxe_facts_flash_dir_info['spacefree_kb'] | int > target_image_size_kb | int"
+      ansible.builtin.include_tasks: tasks/stage_image.yml
 
-    ## Check if device has the target image
-    - name: Check if switch has the target image in {{ flash_dir }}
-      tags: pre-check, install, image-check, image-copy
-      cisco.ios.ios_command:
-        commands: "dir {{ flash_dir }}"
-      register: image_check
-
-    - name: Set image check as fact
-      tags: pre-check, install, image-check, image-copy
-      ansible.builtin.set_fact:
-        dir_image_check: "{{ image_check.stdout[0] | regex_search(image_var, multiline=True) }}"
-      vars:
-        image_var: "{{ target_image }}"
-
-    ## NetHub pushes the image to the device's own SCP server, rather than
-    ## having the device fetch it. Design doc 4.3.1 has the reasoning; the
-    ## short version is that a deployment may block outbound SSH from its
-    ## devices entirely, which makes a pull structurally impossible.
-    ##
-    ## The price is that this block MUTATES THE DEVICE CONFIG. It enables
-    ## the SCP server and must put it back. Read the always: section before
-    ## changing anything here.
-    - name: Push IOSXE image if it does not already exist in {{ flash_dir }}
-      block:
-        - name: Assert target image is not already present in {{ flash_dir }}
-          tags: image-copy, install
-          ansible.builtin.assert:
-            quiet: false
-            success_msg: '{{ target_image }} NOT in {{ flash_dir }}'
-            fail_msg: '{{ target_image }} was found in {{ flash_dir }}'
-            that:
-              - "target_image != dir_image_check"
-
-        - name: Would you like to push the IOSXE image via SCP?
-          tags: image-copy, install
-          ansible.builtin.pause:
-            prompt: "[{{ inventory_hostname }}] This ENABLES the SCP server on the device (restored afterwards). Press enter to continue or ctrl-c + a to abort"
-
-        ## Capture before you change. Restoring on a device that
-        ## legitimately runs an SCP server must be a no-op, not a disable.
-        - name: Read prior SCP server state
-          tags: image-copy, install
-          cisco.ios.ios_command:
-            commands: 'show running-config | include ^ip scp server'
-          register: scp_server_prior
-
-        - name: Record whether the SCP server was already enabled
-          tags: image-copy, install
-          ansible.builtin.set_fact:
-            scp_server_prior_enabled: "{{ 'ip scp server enable' in scp_server_prior.stdout[0] }}"
-
-        - name: Enable the device SCP server
-          tags: image-copy, install
-          cisco.ios.ios_config:
-            lines:
-              - 'ip scp server enable'
-          when: not scp_server_prior_enabled
-
-        ## THE TRANSFER MECHANISM IS THE ONE UNSETTLED PART OF THIS DESIGN,
-        ## and it is isolated here so that swapping it is a one-file change.
-        ##
-        ## net_put's SCP path is reported broken against IOS-XE under the
-        ## libssh connection type (pylibssh #673); the paramiko alternative
-        ## works but is deprecated in ansible.netcommon. SFTP is not an
-        ## option in this direction -- IOS-XE has no SFTP server -- so SCP
-        ## is the only wire protocol available for a push.
-        ##
-        ## ansible/net_put_probe.yml settles empirically whether this is
-        ## usable. If it is not, replace this include with
-        ## tasks/push_image_scp.yml (OpenSSH scp invoked inside the EE
-        ## against a rendered known_hosts). Nothing else in this playbook
-        ## or in the data model changes with that swap.
-        - name: Push the image to the device
-          tags: image-copy, install
-          ansible.builtin.include_tasks: tasks/push_image_net_put.yml
-
-      ## The rescue records the failure; the always: puts the device back;
-      ## the end_host after the block is what actually stops the install.
-      ##
-      ## end_host is deliberately NOT called in the rescue: it would race
-      ## the always: block, and leaving the SCP server enabled is a worse
-      ## outcome than a slightly later exit.
-      rescue:
-        - name: Checks Status
-          ansible.builtin.debug:
-            msg: 'Image staging failed for this host -- see output above. Not installing.'
-
-        - name: Mark this host as failed for the batch summary
-          ansible.builtin.set_fact:
-            upgrade_stage_failed: true
-
-      ## Runs whether the push succeeded, failed, or errored partway.
-      ## Design doc 4.3.1 calls this the compensating action, and calls it
-      ## load-bearing: a phase that leaves the SCP server enabled has
-      ## changed a production device and not changed it back, and NetHub
-      ## cannot enumerate the devices that happened to afterwards.
-      always:
-        - name: Restore SCP server to its prior state
-          tags: image-copy, install
-          cisco.ios.ios_config:
-            lines:
-              - "{{ 'ip scp server enable' if scp_server_prior_enabled | default(false) else 'no ip scp server enable' }}"
-          register: scp_server_restore
-          failed_when: false
-          when: scp_server_prior_enabled is defined
-
-        - name: Read back SCP server state
-          tags: image-copy, install
-          cisco.ios.ios_command:
-            commands: 'show running-config | include ^ip scp server'
-          register: scp_server_after
-          failed_when: false
-          when: scp_server_prior_enabled is defined
-
-        - name: Record whether the restore was confirmed
-          tags: image-copy, install
-          ansible.builtin.set_fact:
-            scp_restore_confirmed: >-
-              {{ (scp_server_prior_enabled is not defined)
-                 or (('ip scp server enable' in (scp_server_after.stdout[0] | default('')))
-                     == (scp_server_prior_enabled | bool)) }}
-
-        - name: Warn loudly if the device was not put back
-          tags: image-copy, install
-          ansible.builtin.debug:
-            msg: >-
-              WARNING: {{ inventory_hostname }} SCP server state was NOT
-              restored. This device has been changed and not changed back.
-              Fix it by hand -- NetHub cannot enumerate devices in this
-              state (design doc 2, 4.3.1, 7.4).
-          when: not (scp_restore_confirmed | bool)
-
-    ## A failed stage, OR an unconfirmed restore, stops this host. An
-    ## unconfirmed restore is not a partial success: design doc 4.3.1 makes
-    ## it a failure no matter what else went right, because activate's
-    ## `write memory` would otherwise commit the enable to startup-config
-    ## permanently, where a reload would have discarded it.
-    - name: Stop processing this host if staging failed or the device was not restored
-      tags: image-copy, install
-      ansible.builtin.meta: end_host
-      when: (upgrade_stage_failed | default(false)) or not (scp_restore_confirmed | default(true))
-
-    - name: Preparing to install/upgrade {{ inventory_hostname }}
+    - name: Activate target image on {{ inventory_hostname }}
       tags: install, upgrade
-      ansible.builtin.pause:
-        prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
-      when: ansible_net_version != target_xe_ver
-
-    ## IOSXE Upgrade process starting
-    - name: Install/Upgrade IOSXE Software
-      block:
-        - name: Saving configuration before upgrading
-          tags: install, upgrade
-          cisco.ios.ios_command:
-            commands:
-              - 'write memory'
-
-        - name: Installing Target IOSXE {{ target_xe_ver }}
-          tags: install, upgrade
-          cisco.ios.ios_command:
-            commands:
-              - command: 'install add file {{ flash_dir }}{{ target_image }} activate commit prompt-level none'
-          register: install_output
-          vars:
-            ansible_command_timeout: 1800
-
-        - name: Wait for connectivity to return on {{ inventory_hostname }}
-          tags: install, upgrade
-          ansible.builtin.wait_for_connection:
-            delay: 60
-            sleep: 30
-            timeout: 900
-
-      rescue:
-        - name: Installation status check
-          tags: install, upgrade
-          ansible.builtin.debug:
-            msg: 'Upgrade process is having some trouble ...'
-
-        - name: Mark this host as failed for the batch summary
-          tags: install, upgrade
-          ansible.builtin.set_fact:
-            upgrade_stage_failed: true
-
-      always:
-        - name: Print Install Results
-          tags: install upgrade
-          ansible.builtin.debug:
-            var: install_output.stdout_lines
-
-        - name: Gather post-upgrade facts for {{ inventory_hostname }}
-          tags: post-check, install, upgrade
-          cisco.ios.ios_facts:
-
-        - name: Record upgrade result for the batch summary
-          tags: post-check, install, upgrade
-          ansible.builtin.set_fact:
-            upgrade_result:
-              status: >-
-                {{ 'success' if (ansible_net_version == target_xe_ver and not
-                (upgrade_stage_failed | default(false))) else 'failed' }}
-              current_version: "{{ ansible_net_version }}"
-              target_version: "{{ target_xe_ver }}"
-
-        - name: "Assert switch is running the target IOSXE version after upgrade: {{ target_xe_ver }}"
-          tags: post-check, install, upgrade
-          ansible.builtin.assert:
-            quiet: false
-            success_msg: "{{ inventory_hostname }} has been upgraded to {{ ansible_net_version }}"
-            fail_msg: "Failed to upgrade the {{ inventory_hostname }}, it is still runninng {{ ansible_net_version }}"
-            that:
-              - "ansible_net_version == target_xe_ver"
-
-        - name: Do you want to clean up unnecessary packages ?
-          tags: install, upgrade
-          ansible.builtin.pause:
-            prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
-
-        - name: Cleaning up unnecessary package files
-          tags: install, cleanup, upgrade
-          cisco.ios.ios_command:
-            commands:
-              - command: install remove inactive
-                prompt: Do you want to remove the above files?
-                answer: 'y'
-            wait_for:
-              - result[0] contains SUCCESS
-          register: cleanup_output
-          vars:
-            ansible_command_timeout: 300
-
-        - name: Print Cleanup Results
-          tags: install, cleanup, upgrade
-          ansible.builtin.debug:
-            var: cleanup_output.stdout_lines
-
-        ## Display message for Upgrade process completed.
-        - name: Upgrade completed
-          ansible.builtin.debug:
-            msg: "Upgrade completed."
-          tags: pre-check, install, upgrade
+      ansible.builtin.include_tasks: tasks/activate_image.yml
 
 ## Runs once, after all serial waves of the play above have finished, so
 ## it can report on every targeted host regardless of how many waves
 ## upgrade_serial split them into (a run_once task inside the play above
 ## would only see the current wave).
 - name: IOSXE Upgrade Summary
-  hosts: iosxe
+  hosts: upgrade_batch
   gather_facts: false
   tasks:
     - name: Report batch upgrade summary

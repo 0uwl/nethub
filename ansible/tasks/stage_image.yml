@@ -1,0 +1,113 @@
+---
+## The "stage" phase (design doc §8.1): get target_image into flash_dir and
+## SHA-512-verified, bracketing the device's own SCP server enable around
+## the push and confirming its restore before handing control back.
+##
+## in  -- target_image, target_image_sha512, target_image_size, flash_dir
+## out -- target_image present and verified in flash_dir, or the host is
+##        ended via meta: end_host (staging failed, or the SCP-server
+##        restore could not be confirmed)
+
+## Check if device has the target image
+- name: Check if switch has the target image in {{ flash_dir }}
+  tags: pre-check, install, image-check, image-copy
+  cisco.ios.ios_command:
+    commands: "dir {{ flash_dir }}"
+  register: image_check
+
+- name: Set image check as fact
+  tags: pre-check, install, image-check, image-copy
+  ansible.builtin.set_fact:
+    dir_image_check: "{{ image_check.stdout[0] | regex_search(image_var, multiline=True) }}"
+  vars:
+    image_var: "{{ target_image }}"
+
+- name: Push IOSXE image if it does not already exist in {{ flash_dir }}
+  block:
+    - name: Assert target image is not already present in {{ flash_dir }}
+      tags: image-copy, install
+      ansible.builtin.assert:
+        quiet: false
+        success_msg: '{{ target_image }} NOT in {{ flash_dir }}'
+        fail_msg: '{{ target_image }} was found in {{ flash_dir }}'
+        that:
+          - "target_image != dir_image_check"
+
+    - name: Would you like to push the IOSXE image via SCP?
+      tags: image-copy, install
+      ansible.builtin.pause:
+        prompt: "[{{ inventory_hostname }}] This ENABLES the SCP server on the device (restored afterwards). Press enter to continue or ctrl-c + a to abort"
+
+    ## Capture before you change. Restoring on a device that
+    ## ran an SCP server before must be a skip and not a disable.
+    - name: Read prior SCP server state
+      tags: image-copy, install
+      cisco.ios.ios_command:
+        commands: 'show running-config | include ^ip scp server'
+      register: scp_server_prior
+
+    - name: Record whether the SCP server was already enabled
+      tags: image-copy, install
+      ansible.builtin.set_fact:
+        scp_server_prior_enabled: "{{ 'ip scp server enable' in scp_server_prior.stdout[0] }}"
+
+    - name: Enable the device SCP server
+      tags: image-copy, install
+      cisco.ios.ios_config:
+        lines:
+          - 'ip scp server enable'
+      when: not scp_server_prior_enabled
+
+    - name: Push the image to the device
+      tags: image-copy, install
+      ansible.builtin.include_tasks: push_image_net_put.yml
+
+  rescue:
+    - name: Checks Status
+      ansible.builtin.debug:
+        msg: 'Image staging failed for this host -- see output above. Not installing.'
+
+    - name: Mark this host as failed for the batch summary
+      ansible.builtin.set_fact:
+        upgrade_stage_failed: true
+
+  always:
+    - name: Restore SCP server to its prior state
+      tags: image-copy, install
+      cisco.ios.ios_config:
+        lines:
+          - "{{ 'ip scp server enable' if scp_server_prior_enabled | default(false) else 'no ip scp server enable' }}"
+      register: scp_server_restore
+      failed_when: false
+      when: scp_server_prior_enabled is defined
+
+    - name: Read back SCP server state
+      tags: image-copy, install
+      cisco.ios.ios_command:
+        commands: 'show running-config | include ^ip scp server'
+      register: scp_server_after
+      failed_when: false
+      when: scp_server_prior_enabled is defined
+
+    - name: Record whether the restore was confirmed
+      tags: image-copy, install
+      ansible.builtin.set_fact:
+        scp_restore_confirmed: >-
+          {{ (scp_server_prior_enabled is not defined)
+             or (('ip scp server enable' in (scp_server_after.stdout[0] | default('')))
+                 == (scp_server_prior_enabled | bool)) }}
+
+    - name: Warn loudly if the device was not put back
+      tags: image-copy, install
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ inventory_hostname }} SCP server state was NOT
+          restored. This device has been changed and not changed back.
+          Fix it by hand -- NetHub cannot enumerate devices in this
+          state (design doc 2, 4.3.1, 7.4).
+      when: not (scp_restore_confirmed | bool)
+
+- name: Stop processing this host if staging failed or the device was not restored
+  tags: image-copy, install
+  ansible.builtin.meta: end_host
+  when: (upgrade_stage_failed | default(false)) or not (scp_restore_confirmed | default(true))

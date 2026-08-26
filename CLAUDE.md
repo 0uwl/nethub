@@ -35,7 +35,7 @@ by hand, against a network device inventory not present in this repo:
 ansible-playbook ansible/upgrade_iosxe.yml -e upgrade_serial=1
 ```
 It targets Cisco IOS-XE devices (`cisco.ios` collection, `network_cli`
-connection) and expects each host to define an `image_bundle` var
+connection) and expects each host to define an `software_bundle` var
 (filename, sha512, version, file_size) — see §5/§8 of
 `design-document.md`. `upgrade_serial` controls how many hosts upgrade per wave
 (defaults to 1); with `serial > 1`, hosts in the same wave share this
@@ -149,7 +149,7 @@ per-artifact algorithm support speculatively; it arrives with a platform
 that actually requires it.
 
 **Everything the EE reads is rendered, not supplied** (design doc §3.5).
-`image_registry.yml`, the per-job inventory, and the connection vars are
+`software_registry.yml`, the per-job inventory, and the connection vars are
 all projections of the `artifacts` and `users` tables, written at dispatch
 into a `private_data_dir` that is discarded with the job. On any
 inconsistency between table and file, the table wins (§7.2). The whole
@@ -382,7 +382,7 @@ seems to require one, the design is what needs revisiting, not the rule.
 - **No user-supplied inventories, and no user-supplied Jinja.** A user
   submits a *request document* — hosts, one bundle key each, a small
   closed set of typed knobs — which NetHub validates and compiles. An
-  uploaded inventory carries `image_registry`, which would let a request
+  uploaded inventory carries `software_registry`, which would let a request
   name any filename against any SHA-512 and bypass the `artifacts` table.
   A `{{ ... }}` expression in a submitted field is the playbook hole in a
   different costume.
@@ -597,7 +597,7 @@ of these once the phase split is implemented.
   state moves to `upgrade_run_hosts` under the phase model, which is what
   retires this and the `rescue`/`upgrade_stage_failed` bookkeeping.
 - **Removed: the three-tier image-size cascade.** It used
-  `image_bundle.file_size` → a per-run `localhost` cache via
+  `software_bundle.file_size` → a per-run `localhost` cache via
   `delegate_facts` → a remote stat shelling out to
   `files/remote_image_size.py` (referenced but never present in this
   repo). Design doc §8 always intended it to die once NetHub renders
@@ -611,7 +611,7 @@ of these once the phase split is implemented.
   the distribution host could have been a separate remote machine (design
   doc §3.3). Push addresses the source by filename under a fixed mount
   (`image_mount_dir`) NetHub controls outright, so there's no per-artifact
-  directory to name. `image_bundle.remote_dir` no longer exists in the
+  directory to name. `software_bundle.remote_dir` no longer exists in the
   schema or the rendered registry, and the playbook no longer resolves
   it. Don't reintroduce it.
 - There is no `become` in this playbook and there must not be one.

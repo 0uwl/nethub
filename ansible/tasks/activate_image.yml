@@ -1,0 +1,108 @@
+---
+## The "activate" phase (design doc §8.1): install and activate
+## target_image, confirm the device came back on the target version, then
+## clean up inactive packages. Assumes the stage phase already left
+## target_image present and verified in flash_dir.
+##
+## in  -- target_image, target_version, flash_dir, ansible_net_version
+## out -- upgrade_result fact recorded for the batch summary
+
+- name: Preparing to install/upgrade {{ inventory_hostname }}
+  tags: install, upgrade
+  ansible.builtin.pause:
+    prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+  when: ansible_net_version != target_version
+
+## IOSXE Upgrade process starting
+- name: Install/Upgrade IOSXE Software
+  block:
+    - name: Saving configuration before upgrading
+      tags: install, upgrade
+      cisco.ios.ios_command:
+        commands:
+          - 'write memory'
+
+    - name: Installing Target IOSXE {{ target_version }}
+      tags: install, upgrade
+      cisco.ios.ios_command:
+        commands:
+          - command: 'install add file {{ flash_dir }}{{ target_image }} activate commit prompt-level none'
+      register: install_output
+      vars:
+        ansible_command_timeout: 1800
+
+    - name: Wait for connectivity to return on {{ inventory_hostname }}
+      tags: install, upgrade
+      ansible.builtin.wait_for_connection:
+        delay: 60
+        sleep: 30
+        timeout: 900
+
+  rescue:
+    - name: Installation status check
+      tags: install, upgrade
+      ansible.builtin.debug:
+        msg: 'Upgrade process is having some trouble ...'
+
+    - name: Mark this host as failed for the batch summary
+      tags: install, upgrade
+      ansible.builtin.set_fact:
+        upgrade_stage_failed: true
+
+  always:
+    - name: Print Install Results
+      tags: install upgrade
+      ansible.builtin.debug:
+        var: install_output.stdout_lines
+
+    - name: Gather post-upgrade facts for {{ inventory_hostname }}
+      tags: post-check, install, upgrade
+      cisco.ios.ios_facts:
+
+    - name: Record upgrade result for the batch summary
+      tags: post-check, install, upgrade
+      ansible.builtin.set_fact:
+        upgrade_result:
+          status: >-
+            {{ 'success' if (ansible_net_version == target_version and not
+            (upgrade_stage_failed | default(false))) else 'failed' }}
+          current_version: "{{ ansible_net_version }}"
+          target_version: "{{ target_version }}"
+
+    - name: "Assert switch is running the target IOSXE version after upgrade: {{ target_version }}"
+      tags: post-check, install, upgrade
+      ansible.builtin.assert:
+        quiet: false
+        success_msg: "{{ inventory_hostname }} has been upgraded to {{ ansible_net_version }}"
+        fail_msg: "Failed to upgrade the {{ inventory_hostname }}, it is still runninng {{ ansible_net_version }}"
+        that:
+          - "ansible_net_version == target_version"
+
+    - name: Do you want to clean up unnecessary packages ?
+      tags: install, upgrade
+      ansible.builtin.pause:
+        prompt: "[{{ inventory_hostname }}] Press enter to continue or ctrl-c + a to abort"
+
+    - name: Cleaning up unnecessary package files
+      tags: install, cleanup, upgrade
+      cisco.ios.ios_command:
+        commands:
+          - command: install remove inactive
+            prompt: Do you want to remove the above files?
+            answer: 'y'
+        wait_for:
+          - result[0] contains SUCCESS
+      register: cleanup_output
+      vars:
+        ansible_command_timeout: 300
+
+    - name: Print Cleanup Results
+      tags: install, cleanup, upgrade
+      ansible.builtin.debug:
+        var: cleanup_output.stdout_lines
+
+    ## Display message for Upgrade process completed.
+    - name: Upgrade completed
+      ansible.builtin.debug:
+        msg: "Upgrade completed."
+      tags: pre-check, install, upgrade

@@ -19,7 +19,7 @@ system:
 - **Provisioning** (day-0): a new device phones home, is checked
   against a serial allowlist, and receives its initial config/image.
 - **Software Lifecycle** (day-2): onboarding new IOS-XE software
-  images into the `image_registry` group_vars structure, publishing them
+  images into the `software_registry` group_vars structure, publishing them
   into NetHub's own store, and triggering fleet upgrades via Ansible,
   all through the same admin UI and backend.
 
@@ -392,7 +392,7 @@ cheap.
 system follows: **NetHub renders the inputs its playbooks consume rather
 than accepting them.** The registry file is a projection of the
 `artifacts` table (§7.2). So is the per-job inventory — hosts,
-`image_bundle` references, connection variables — written at dispatch
+`software_bundle` references, connection variables — written at dispatch
 into a `private_data_dir` that is discarded with the job. So is the
 playbook, in the weaker sense that it ships with NetHub and is selected
 by `platform` rather than supplied.
@@ -1371,7 +1371,7 @@ suggestion.
     says so, so an audit query returns "published 2023-04, image pruned
     2026-04" rather than a path that silently no longer resolves.
   - `bundle_key` is what makes the registry renderable: it is the
-    key an `image_bundle` entry appears under, so rendering is a
+    key an `software_bundle` entry appears under, so rendering is a
     projection of rows rather than a merge against whatever the file
     already said. `UNIQUE(platform, bundle_key)` over rows where
     `kind = 'image'` and `state = 'published'` gives one published image
@@ -1387,9 +1387,9 @@ suggestion.
     registry.
   - Indexed on `(kind, platform)` for the browse views and on `sha512`
     for duplicate detection at ingest.
-- `image_registry.yml` (git-tracked), **a rendered projection of the
+- `software_registry.yml` (git-tracked), **a rendered projection of the
   `artifacts` table rather than an independent source of truth.** Its
-  `image_bundle` entries are serialized artifact records field-for-field
+  `software_bundle` entries are serialized artifact records field-for-field
   (`filename`, `sha512`, `version`, `file_size`), and the
   publish job is its sole writer. It remains the
   file the upgrade playbook reads from; it is simply no longer
@@ -1539,7 +1539,7 @@ suggestion.
     each phase renders from the run's own rows and reads `artifacts` not
     at all — which also settles a question the document otherwise leaves
     open, namely whether dispatch consumes the committed
-    `image_registry.yml` or re-renders from the table. A self-contained
+    `software_registry.yml` or re-renders from the table. A self-contained
     run makes the question moot.
   - `version` is the snapshotted *target*, so §7.4's own sentence — that
     these rows record "the version a device reported during that run" —
@@ -2022,7 +2022,7 @@ protecting in the first place.
 ### 7.2 The registry write isn't atomic, so it's made re-derivable
 
 The day-2 publish touches three stores with no transaction spanning
-them: the database row, the rendered `image_registry.yml`, and the git
+them: the database row, the rendered `software_registry.yml`, and the git
 commit recording it. A crash between any two steps leaves a visible
 inconsistency, either a registry entry with no job row, or a job row
 naming a `registry_commit_sha` for a commit that was never made. The
@@ -2033,7 +2033,7 @@ The design doesn't try to make the sequence atomic. It makes it
 *recoverable*, by keeping the file fully derivable from the table:
 
 - **Render whole, never patch.** Every publish regenerates the entire
-  `image_registry.yml` from all `published` artifact rows. A patched file
+  `software_registry.yml` from all `published` artifact rows. A patched file
   depends on its own prior contents being correct; a rendered one depends
   only on the database, so any inconsistency is corrected by rendering
   again.
@@ -2505,7 +2505,7 @@ it); the device credential §9.1 injects for the phase execution is the
 one that matters, and per-phase collection bounds what it is worth after
 the phase ends. It does nothing about what a playbook could do with it
 while the phase is still running, so the rule stands unchanged. A
-user-supplied inventory carries `image_registry`, which would let a
+user-supplied inventory carries `software_registry`, which would let a
 request name any filename against any SHA-512 and bypass the `artifacts`
 table entirely, breaking §3.4's "hashed once at ingest, consumed three
 times" at the third consumption. Connection vars are withheld for a
@@ -2592,7 +2592,7 @@ by construction; a terminal transcript is not an audit record.
 Five things follow from the split:
 
 - **The plan phase dissolves into the UI.** The preview play reads only
-  `image_bundle` inventory vars and opens no connections — and NetHub
+  `software_bundle` inventory vars and opens no connections — and NetHub
   wrote that inventory, so it already holds every host and target. The
   plan renders from the database and the gate is the submit button. The
   same argument retires the summary play at the other end: per-host

@@ -1,0 +1,56 @@
+---
+## Resolves target_bundle and every fact derived from it. Pure templating
+## against inventory vars -- no device connection required, so this is
+## included by both the ungathered preview play and the main upgrade play,
+## and the two can no longer drift apart on how a host's target image is
+## determined.
+##
+## in  -- software_bundle (inventory var), software_registry
+## out -- target_bundle, target_image, target_image_sha512, target_version,
+##        target_image_size, target_image_size_kb
+
+- name: Assert software_bundle is defined
+  tags: pre-check, check-version, install
+  ansible.builtin.assert:
+    quiet: false
+    that:
+      - software_bundle is defined
+    fail_msg: >-
+      No software_bundle defined for {{ inventory_hostname }} -- set it in inventory
+      (host_vars or group_vars) to the software_registry entry to install.
+      See inventory/hosts.yml for an example. Aborting.
+
+- name: Set target_bundle fact
+  tags: pre-check, image-copy, install
+  ansible.builtin.set_fact:
+    target_bundle: "{{ software_registry['software_bundle'] }}"
+
+- name: Resolve target image from target_bundle
+  tags: pre-check, check-version, install
+  ansible.builtin.set_fact:
+    target_image: "{{ target_bundle.file_name }}"
+    target_image_sha512: "{{ target_bundle.sha512 }}"
+    target_version: "{{ target_bundle.version }}"
+
+## file_size is required
+## Must be calculated manually for now but will be done automatically later
+- name: Resolve target image size from target_bundle
+  tags: pre-check, disk_check, image-check, image-copy, install
+  ansible.builtin.assert:
+    quiet: false
+    success_msg: 'target_bundle records file_size for {{ target_image }}.'
+    fail_msg: >-
+      target_bundle for {{ target_image }} has no file_size.
+      A hand-written inventory must supply it. Use the unix command du -d <file>
+    that:
+      - "'file_size' in target_bundle"
+
+- name: Set target image size fact
+  tags: pre-check, disk_check, image-check, image-copy, install
+  ansible.builtin.set_fact:
+    target_image_size: "{{ target_bundle.file_size }}"
+
+- name: Set target image size fact in KB
+  tags: pre-check, disk_check, image-check, image-copy, install
+  ansible.builtin.set_fact:
+    target_image_size_kb: "{{ (target_image_size | int / 1024) | round(0, 'ceil') | int }}"
