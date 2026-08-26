@@ -149,16 +149,27 @@
                    / 1048576) | round(2) }} MB/s)
 
         ## Independent confirmation that the bytes arrived intact. The
-        ## module's exit status is not evidence -- this is.
+        ## module's exit status is not evidence -- this is. A bare
+        ## `contains Verified` would pass on any device message containing
+        ## that word for an unrelated reason (design doc 3.4); match the
+        ## digest itself instead, same fix as tasks/push_image_net_put.yml.
         - name: Verify the pushed image on the device
           cisco.ios.ios_command:
             commands:
               - "verify /sha512 {{ probe_flash_dir }}{{ probe_dest_name }} {{ probe_local.stat.checksum }}"
             wait_for:
-              - result[0] contains Verified
+              - "result[0] contains '{{ probe_local.stat.checksum }}'"
           vars:
             ansible_command_timeout: 600
           register: probe_verify
+
+        - name: Assert the device confirmed the expected digest
+          ansible.builtin.assert:
+            quiet: false
+            success_msg: 'Device confirmed SHA-512 for {{ probe_dest_name }}.'
+            fail_msg: 'Device output did not contain the expected SHA-512 digest.'
+            that:
+              - "probe_local.stat.checksum in (probe_verify.stdout[0] | default(''))"
 
         - name: Report verification result
           ansible.builtin.debug:

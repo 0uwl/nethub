@@ -36,17 +36,37 @@
 
 ## The module's exit status is not evidence that the right bytes arrived.
 ## This is, and it is design doc 3.4's third consumption of the digest
-## computed once at ingest.
+## computed once at ingest -- so the check has to confirm the digest, not
+## the presence of one English word. `contains Verified` would pass on
+## any IOS-XE message that happens to contain "Verified" for an unrelated
+## reason (embedded-hash / digital-signature checks also run during image
+## handling), silently turning the strongest control on this path into a
+## no-op. The exact device message format is unconfirmed against real
+## hardware; if the assert below fires on real output that a human can
+## see does match, the format needs a look rather than assuming the
+## transfer failed.
 - name: Verify the pushed image on the device
   tags: image-validate, install
   cisco.ios.ios_command:
     commands:
       - "verify /sha512 {{ flash_dir }}{{ target_image }} {{ target_image_sha512 }}"
     wait_for:
-      - result[0] contains Verified
+      - "result[0] contains '{{ target_image_sha512 }}'"
   vars:
     ansible_command_timeout: 600
   register: image_validation_result
+
+- name: Assert the device confirmed the expected digest
+  tags: image-validate, install
+  ansible.builtin.assert:
+    quiet: false
+    success_msg: 'Device confirmed SHA-512 {{ target_image_sha512 }} for {{ target_image }}.'
+    fail_msg: >-
+      Device output did not contain the expected SHA-512 digest for
+      {{ target_image }}. Treat this as a failed verification -- do not
+      proceed to install.
+    that:
+      - "target_image_sha512 in (image_validation_result.stdout[0] | default(''))"
 
 - name: Print target image validation result
   tags: image-validate, install

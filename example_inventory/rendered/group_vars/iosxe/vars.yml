@@ -5,41 +5,19 @@
 ## from the original example); file_size values are illustrative.
 ansible_network_os: cisco.ios.ios
 
-## The distribution host is NetHub itself (3.3), and the account the
-## DEVICE uses to pull its image from it over SFTP.
+## There is no distribution account and no dist_* vars at all (4.3.1).
 ##
-## Named dist_* rather than sftp_*: the protocol is an implementation
-## detail of one task in the playbook, the identity of the host is not.
+## NetHub now PUSHES the image to the device over the same network_cli
+## session ansible_user already authenticates -- the device's own SCP
+## server, toggled on for the stage phase and restored after (see the
+## comment in group_vars/all.yml for why ansible_user carries no second
+## meaning here). There is no second account for NetHub to define, no
+## second password to mint or expire, and nothing for a vault to hold.
 ##
-## This is machine-to-machine: the switch opens the session, not a human.
-## 4.2 calls this credential "the access-control gate on who can pull an
-## image", which is an authorization decision about the image store, not
-## about a person -- so the ACCOUNT stays shared.
-##
-## Kept deliberately separate from `ansible_user` in group_vars/all.yml.
-## Reusing ansible_user for both breaks the moment it becomes a human's
-## AAA name: the distribution host would need a local account per
-## engineer, and the human's own password would be the one the device
-## sends.
-dist_server: 127.0.0.1
-dist_user: nethub-dist
-
-## dist_pass is NOT rendered here, and there is no vault.yml behind it.
-##
-## The password is minted per phase execution by the sibling, injected in
-## memory, and expired when that execution reaches a terminal state
-## (4.3.1). Anything written to this file lands in the private_data_dir
-## on disk and is mounted into the EE container -- the same reason
-## ansible_password is absent from all.yml.
-##
-## The account it opens is deliberately cheap to lose: ForceCommand
-## internal-sftp, ChrootDirectory over the published image subtree, no
-## shell, read-only. That is the reason the transfer is SFTP rather than
-## SCP -- serving legacy SCP would need a shell and the scp binary inside
-## the chroot, and ForceCommand breaks it outright. The constraint is only
-## available because NetHub owns the distribution host, and it is what
-## makes the one disclosure 4.3.1 cannot fix -- a submitter naming a
-## machine they control -- worth close to nothing.
+## This is a real simplification versus the earlier pull design, not a
+## renamed version of it: the SSH/SFTP distribution daemon, its chrooted
+## service account, and the per-phase password-minting mechanism this
+## file used to document are gone, not replaced.
 
 ## Projection of the `artifacts` table, re-rendered on every dispatch.
 ##
@@ -53,20 +31,25 @@ dist_user: nethub-dist
 ## device is contacted. This is what retires upgrade_iosxe.yml's
 ## three-tier size cascade -- the localhost fact cache, the scp_server
 ## stat fallback, and files/remote_image_size.py -- per 8. That cascade is
-## now deleted from the playbook: the distribution account has no shell,
-## so there is nothing on the far end to run a remote stat with, and
-## file_size is required rather than discovered.
+## now deleted from the playbook: under push, the source file is on a
+## read-only mount local to the EE doing the pushing, so there is no
+## "remote" to stat on either side of the transfer, and file_size is
+## required rather than discovered.
+##
+## No remote_dir. It addressed a device's own `copy sftp://...` path
+## under the old pull design, a remnant from when the distribution host
+## could have been a separate remote machine (3.3). Push reads the source
+## by filename under a fixed local mount NetHub controls outright, so the
+## column was dropped rather than left vestigial (10).
 image_registry:
   '17.12.06_lite':
     filename: cat9k_lite_iosxe.17.12.06.SPA.bin
     version: '17.12.06'
-    remote_dir: install
     sha512: f254abe69ded4f8f771114d9e430f37d7ccbce1f21f9f86992ec4b35df7ab42a29566824504aa72116e21e8781c0004d152f33e2f231d085ca1026e375773f61
     file_size: 468843657   # illustrative
 
   '17.12.08_lite':
     filename: cat9k_lite_iosxe.17.12.08.SPA.bin
     version: '17.12.08'
-    remote_dir: install
     sha512: 39bbc0a6d96c5056bb29ff97874571d94f598569a0f000c2265613bfddb66be5b7310783c6c6427cf2ac0e6dbdd5e5cc534925658a61b3f13817483f3beff660
     file_size: 471177027

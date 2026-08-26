@@ -4,11 +4,11 @@
 this document might or might not be actually implemented yet. A roadmap will be developed as soon as
 the core architecture has been properly established and a scope has been defined.
 
-*NetHub is a new, standalone project which extends my previous project [Drawbridge](https://github.com/0uwl/drawbridge). 
+*NetHub is a new, standalone project which extends my previous project [Drawbridge](https://github.com/0uwl/drawbridge).
 It takes architectural lessons and components from both the existing
-ZTP system in Drawbridge and the earlier standalone "Network Software Depot" 
-concept which this repo was supposed to be previously and combines them into 
-one unified device lifecycle dashboard. Drawbridge will be deprecated in favor of 
+ZTP system in Drawbridge and the earlier standalone "Network Software Depot"
+concept which this repo was supposed to be previously and combines them into
+one unified device lifecycle dashboard. Drawbridge will be deprecated in favor of
 this project once its provisioning module reaches parity.*
 
 ## 1. Overview
@@ -30,7 +30,7 @@ Software Lifecycle functionality) sits behind an authenticated session.
 
 NetHub is intended for a smaller scale, not enterprise level
 inventories. There are already official platforms from network vendors
-which deliver this kind of service for enterprise scales. NetHub aims to be a much 
+which deliver this kind of service for enterprise scales. NetHub aims to be a much
 smaller scale, FOSS-version of those dashboards to accelerate smaller teams'
 effectiveness at provisioning and upgrading their inventory.
 
@@ -66,14 +66,16 @@ effectiveness at provisioning and upgrading their inventory.
 - Does not perform the device upgrade's actual command sequence itself;
   that logic stays in the existing Ansible playbook.
 - No image transformation/repackaging.
-- **Not a distributed content-delivery system.** NetHub is the
-  distribution host (§3.3); there is no support for image mirrors sited
-  near remote fleets, so every byte of a day-2 upgrade is fetched from
-  the NetHub host. This is a deliberate narrowing rather than an
-  omission: owning the store outright is what lets §4.3.1 constrain the
-  distribution credential to something nearly worthless, and what closed
-  the question of how it is issued. It is also a real limitation for
-  multi-site deployments, and §10 records where it would come back.
+- **Not a distributed content-delivery system.** NetHub is the sole
+  source of day-2 image bytes (§3.3, §3.4); there is no support for
+  image mirrors sited near remote fleets, so every byte of an upgrade is
+  pushed from the NetHub host across whatever link separates it from the
+  device. This is a deliberate narrowing rather than an omission: owning
+  the store outright is what lets the push ride the same
+  already-authenticated connection an upgrade run already holds, with no
+  second credential or distribution account to define at all (§4.3.1).
+  It is also a real limitation for multi-site deployments, and §10
+  records where it would come back.
 - Not multi-vendor on day one. See Vendor Scope.
 
 ## 2.1 Vendor Scope
@@ -86,9 +88,10 @@ Publishing no longer varies by platform at all — with NetHub owning the
 store (§3.3) it is a local file operation, and a file is a file.
 
 Two things a second platform inherits, worth checking early: §4.3.1
-assumes the device can fetch a file over SFTP with the credential
-supplied at a prompt rather than in the command, and §4.3 assumes a
-level-15-equivalent authorization exists at login. Neither is universal.
+assumes the device can run a temporary file-transfer server that NetHub
+can enable, push to, and disable again from the same authenticated
+session it already holds, and §4.3 assumes a level-15-equivalent
+authorization exists at login. Neither is universal.
 
 ## 3. Architecture
 
@@ -190,39 +193,42 @@ trusted to ask:
   decision). No separate dedicated bootstrap container as it was in
   Drawbridge. What the HTTP daemon serves and what NetHub decides are
   two different things — see "the day-0 fetch sequence" below.
-- **Day-2**: images pulled by an already-enrolled device over SFTP
-  (`copy sftp://…` in `upgrade_iosxe.yml`), authenticated with a
-  credential NetHub mints for that phase execution and expires when it
-  ends (§4.3.1).
+- **Day-2**: images pushed to an already-enrolled device over SCP
+  (`ansible.netcommon.net_put` in `upgrade_iosxe.yml`), riding the same
+  `network_cli` session already authenticated with the submitter's own
+  device credential (§4.3.1) — no second credential is minted or held.
 
-**NetHub is the distribution host, and this is no longer modular.**
-Earlier revisions let the target be either a local bundled container or
-an existing remote host, chosen by configuration. That flexibility was
-expensive in a way that only became clear when §4.3.1 tried to price it:
-a distribution host NetHub does not administer is one whose account model
-it cannot constrain, so it can neither issue the credential nor bound
-what that credential opens. Owning the store outright turns both of those
-from open questions into ordinary implementation. There is exactly one
-distribution host, it is the NetHub host, and the transfer account on it
-is NetHub's to define.
+**NetHub is the sole source of the bytes, and that is no longer
+modular.** Earlier revisions let the image source be either a local
+bundled container or an existing remote host, chosen by configuration.
+That flexibility looked cheaper than it was: a source NetHub does not
+administer is one it cannot guarantee holds the artifact NetHub actually
+published, reachable under an account NetHub's own EE authenticates as.
+Owning the store outright turns that into ordinary implementation — the
+EE mounts the published subtree read-only (§3.5) and pushes straight
+from it, over the connection the run already holds. There is no separate
+distribution account to define, because day-2 no longer has a daemon a
+device connects to; "distribution host" now just names the box the bytes
+are read from before the push, not a service the device dials.
 
 The cost is stated rather than hidden. A deployment with branch sites
-cannot put a copy of the image near its devices; every device fetches
-across whatever link separates it from NetHub. That is a real limitation
+cannot put a copy of the image near its devices; every push crosses
+whatever link separates NetHub from the device. That is a real limitation
 for multi-site fleets, it is out of scope for now consistent with §1's
 stated scale, and §10 records where it would come back.
 
-The two daemons do not expose the same subtree. "One store" means one
+The HTTP daemon does not expose the whole store. "One store" means one
 ingest path and one `artifacts` table, which is not the same as one
-docroot: the HTTP daemon serves only the day-0 subtree (artifacts of
-`kind` script/config, and only in the narrow arrangement the next section
-specifies), with directory indexing disabled, while day-2 images live
-under a subtree only the SSH/SFTP daemon can reach. Without that split
-the HTTP adapter would be an unauthenticated read path over the image
-store, and the credential §4.2 calls the authorization gate for day-2
-would be bypassable by anyone who can guess a filename. The point of the shared
-store is to make the protocol split cheap; a shared docroot would make
-that split meaningless.
+docroot: the daemon serves only the day-0 subtree (artifacts of `kind`
+script/config, and only in the narrow arrangement the next section
+specifies), with directory indexing disabled. Day-2 images are never
+served by a daemon at all — they live under a subtree the HTTP docroot
+never includes, mounted read-only into the EE container that pushes them
+(§3.5), reachable only by a process the sibling started. Without that
+split the HTTP adapter would be an unauthenticated read path over the
+image store, bypassable by anyone who can guess a filename. The point of
+the shared store is to make the day-0/day-2 split cheap; a shared docroot
+would make that split meaningless.
 
 **A static daemon cannot enforce day-0's controls, so it is never asked
 to.** §3.4 requires that day-0 resolve what to serve from an allowlisted
@@ -253,22 +259,47 @@ fetch is resolved by NetHub:
    consumption (§4.1), performed by the one component that can perform
    them.
 3. Flask answers with per-device fetch URLs: high-entropy, TTL-bounded,
-   one-shot paths minted for that provisioning attempt and recorded on
-   the allowlist row. Minting writes a symlink into a `mint/` subtree of
-   the day-0 docroot pointing at the artifact blob, which is §3.5's
+   paths minted for that provisioning attempt and recorded on the
+   allowlist row. Minting writes a symlink into a `mint/` subtree of the
+   day-0 docroot pointing at the artifact blob, which is §3.5's
    render-don't-accept rule applied to a filesystem — the subtree is a
-   projection of live allowlist rows, reaped on consumption, on TTL
-   expiry, and on the startup reconcile.
+   projection of live allowlist rows, reaped when the provisioning
+   window closes (§4.1), on TTL expiry, and on the startup reconcile.
+   **Not on first fetch.** §4.1 is explicit that the *window*, not the
+   individual `GET`, is the one-shot unit — a real ZTP flow is several
+   fetches, and reaping after the first would turn a retried or partial
+   fetch into a failure. A minted path is therefore a bearer capability
+   for the life of its window, not a single-use token; that trade is
+   made deliberately, not left ambiguous between this section and §4.1.
 4. The device fetches those paths from the same HTTP daemon, which is
    now serving an unguessable path it was handed rather than deciding
    who may read what.
 
 The daemon stays a daemon; the authorization stays in NetHub. The minted
-path is a capability with the same TTL/one-shot shape §4.1 already
-defines for the allowlist entry, so this is a reuse rather than a fourth
-pattern. Known and unknown serials receive the same response shape at
-step 3 (§4.1): an unknown serial is answered with syntactically
+path is a capability with the same TTL/one-shot-window shape §4.1
+already defines for the allowlist entry, so this is a reuse rather than
+a fourth pattern. Known and unknown serials receive the same response
+shape at step 3 (§4.1): an unknown serial is answered with syntactically
 identical URLs that were never minted and resolve to nothing.
+
+**That equivalence has to survive the next hop, or it's decorative.** An
+attacker who POSTs a candidate serial and then `GET`s the URL step 3
+returned learns nothing from step 3 alone — but the daemon's own
+response to that `GET` is a second distinguisher: a minted path resolves
+(`200`, the blob), an unminted one does not (`404`). That is the same
+enumeration oracle §4.1 rules out at the phone-home route, reappearing
+one hop later on a component that — by §3.3's own design — consults
+nothing, counts nothing, and writes no `provisioning_log` row. Closing
+step 3 without closing this makes the daemon the place an attacker
+actually probes. The `mint/` location therefore answers *any*
+well-formed request under it with the same shape: a resolved path
+serves the blob, an unresolved one serves a fixed-size decoy body at
+`200` rather than a `404` — a static rewrite rule at the daemon
+(`error_page 404 =200 /mint/.decoy;` or equivalent), not application
+logic, so the "the daemon decides nothing" property (§3.3, §9) still
+holds. The daemon's access log is routed into §4.2's per-source counters
+for the same reason: it is part of the authorization-relevant surface
+even though it makes no authorization decision itself.
 
 One honesty note the sequence forces, because it is the same gap §4.1
 names. NetHub observes step 3, not step 4. The provisioning log records
@@ -286,7 +317,7 @@ only at the very last step. Everything is a single pipeline:
 ingest (upload → hash → size → store → record)
    │
    ├─ egress A (day-0): device pulls, HTTP, allowlist-gated, device-initiated
-   └─ egress B (day-2): device pulls, SFTP, credentialed,   admin-initiated via Ansible
+   └─ egress B (day-2): NetHub pushes, SCP, credentialed,    admin-initiated via Ansible
 ```
 
 There is one artifact record. A day-0 config, the ZTP script itself, and
@@ -377,12 +408,18 @@ Connection variables come from the submitting admin's identity (§4.3),
 and the one secret a run needs is passed in memory rather than written
 into the directory the EE mounts.
 
-The image bytes are the one thing the EE never handles, and that falls
-out of the same rule rather than being an exception to it. The device
-fetches its own image directly from the store (§3.3), so what NetHub
-renders is the *reference* — filename, digest, size, directory — and the
-bytes stay where they were ingested. Nothing in the `private_data_dir`
-is ever larger than a few kilobytes.
+The image bytes themselves never enter the *rendered inventory*, and
+that falls out of the same rule rather than being an exception to it:
+what NetHub renders is the *reference* — filename, digest, size — not
+the file. The EE does handle the bytes now, under push (§4.3.1): it
+mounts the published subtree read-only and reads the file directly off
+that mount to push it, rather than the file being copied into or
+generated inside `private_data_dir`. So the invariant this section
+actually needs still holds — nothing *written into* `private_data_dir`
+(the rendered `env/`, `inventory/`) is ever larger than a few
+kilobytes — it just no longer implies the EE is blind to the bytes, the
+way it did under the earlier pull design this paragraph was written
+for.
 
 ## 4. Security Model
 
@@ -459,6 +496,28 @@ keeps per-device artifacts off an open docroot: network isolation is
 carrying this payload's confidentiality by itself, so anything widening
 who may request the file widens who reads those secrets.
 
+**The authentication argument and the confidentiality argument are not
+the same argument, and only the first one is actually settled here.** No
+trust anchor exists to authenticate a certificate on first contact — that
+reasoning is sound and it is specific to authentication. It does not
+follow that nothing can be encrypted: unauthenticated encryption needs no
+trust anchor at all, and §3.3's own sequence supplies a candidate one —
+the generic script NetHub ships is what performs every fetch after it, so
+a certificate pinned *inside that script* would let the sensitive
+second-hop payloads (config, image) cross the VLAN encrypted against a
+key the first hop established, without requiring the device to validate
+anything against an external CA. That downgrades the passive-listener
+exposure above to "an active on-path attacker must substitute the first
+script," a materially higher bar. Whether that's worth building is left
+open (§10) rather than decided here, because it is not free: it adds a
+certificate NetHub must generate, rotate, and re-embed in the script it
+ships, and a rotation that isn't itself pinned to something reopens the
+same first-contact problem one level up. The point of stating it here is
+narrower — the "adds complexity without adding real protection" cost/
+benefit line in the paragraph above is true for authentication and is
+not yet shown to be true for confidentiality, so it should not be read as
+having settled both.
+
 It also does not protect against NetHub itself being wrong, which is the
 easiest thing for a section like this to overclaim. The same server
 supplies both the payload and the digest it is checked against, so a
@@ -488,8 +547,21 @@ the operator already runs:
   devices, so an unregistered device on the VLAN is never pointed at the
   provisioning endpoint in the first place. The phone-home check then
   becomes the second gate rather than the only one, and the two gates key
-  on different attributes (MAC and serial) that an attacker has to get
-  right simultaneously.
+  on different attributes (MAC and serial). That is defense in depth
+  against a mistyped reservation or a stale entry, not two independent
+  barriers against an adversary — §4's own honesty paragraph about the
+  three transport-level controls applies here too: both MAC and serial
+  are readable from the position an attacker must already occupy to
+  reach either gate (MAC via an ordinary DHCP `DISCOVER` on the VLAN,
+  serial via the chassis label, packing slip, or CDP/LLDP from an
+  adjacent port), so getting both right is not two separate secrets, it
+  is one position with two readable attributes. Worth noting for the
+  same reason: "802.1X" as the VLAN-isolation mechanism (§4) is written
+  for a population of devices with no configuration and no credentials
+  yet, which in practice means MAC Authentication Bypass rather than a
+  certificate or credential exchange — the same spoofable MAC this
+  bullet already relies on, not an independent control layered on top
+  of it.
 - **Allowlist entries are one-shot and time-bounded.** An entry is
   created for an expected enrollment, expires on a TTL if it goes unused,
   and is consumed on first successful provision rather than staying
@@ -587,6 +659,23 @@ retention promise is made:
   limiting a serial on denials alone lets an attacker lock out a genuine
   enrollment by burning that serial's budget before the device boots.
 
+**Buffering the counters and not the rest of the write was an
+incomplete fix.** Every phone-home — including every denial — still
+writes a `provisioning_log` row synchronously (plus junction rows on a
+successful claim), and a claim additionally opens `BEGIN IMMEDIATE`.
+Those are the larger writes on the same hostile path the paragraph above
+was written to protect, against a WAL database the sibling concurrently
+writes during publish and retention purges. `provisioning_log` rows are
+therefore buffered and flushed the same way the counters are — sampled
+under sustained load rather than written one-for-one — while the
+`BEGIN IMMEDIATE` claim transaction stays synchronous, since it is the
+one write that has to be durable to mean anything (§4.1's rowcount-as-
+authorization-result). §5's "a few seconds" `busy_timeout` is, on its
+own, larger than §3.2's 2-second p99 budget, so a single contended write
+already misses that budget by construction; the phone-home route sets
+its own `busy_timeout` below the p99 target with an explicit fast-fail,
+rather than inheriting the connection-wide default.
+
 **A successful spoof looks like nothing, and that is the event worth
 alerting on.** An attacker who wins the claim in §4.1 is answered
 normally: the entry is consumed, a log row is written, no counter moves.
@@ -594,10 +683,13 @@ The genuine device then arrives minutes later and is denied — one
 ordinary "unknown or already-consumed serial" row among however many the
 flood produced. But *a denial for a serial that was consumed inside its
 own TTL window* is the highest-signal event this endpoint can produce,
-it costs one indexed query on the denial path, and nothing else in the
-system will ever notice it. NetHub raises it as its own alert, distinct
-from the volume-based ones. This is the same shape as the silence case
-below: the attack that succeeds is the one that generates no failure.
+it costs one indexed query on the denial path — `provisioning_log` is
+indexed on `(serial_claimed, occurred_at)` specifically so this query
+and the per-serial counter lookup above it share an index rather than
+scanning — and nothing else in the system will ever notice it. NetHub
+raises it as its own alert, distinct from the volume-based ones. This is
+the same shape as the silence case below: the attack that succeeds is
+the one that generates no failure.
 
 Silence is also a signal. A rogue DHCP relay or a redirected option 67
 shows up as a device that simply never arrives: no failed provisioning
@@ -608,27 +700,42 @@ window closes raises a notice. Without that, the entry just expires and
 nobody learns anything. This is the only detection NetHub has for an
 attack that succeeds by keeping the device away from it.
 
-Day-2 image delivery deliberately stays credentialed (SFTP), unlike
-day-0. The `upgrade_iosxe.yml` playbook has the device pull its image via
-`copy sftp://...`, authenticated with a credential minted for that phase
-execution (§4.3.1), rather than the plain HTTP used for the day-0 script
-fetch (§3.3). The two paths are in different trust situations, so this is
-not an inconsistency. A day-0 device has no credentials to offer
-regardless of transport, so plain HTTP costs nothing extra there. A day-2
-device is already enrolled, and the transfer credential is the
-access-control gate on who can pull an image rather than merely transport
-encryption.
-Dropping them for protocol uniformity would remove real authorization
-that hash verification does not replace: hash verification confirms the
-fetched bytes weren't tampered with, and says nothing about who was
-allowed to fetch them in the first place.
+**This section's apparatus is not phone-home-specific, and §6.1 used to
+claim it was the only unauthenticated route.** It isn't: the local login
+form, the OIDC redirect/callback, and one-shot enrollment-token
+redemption (§4.4) are all reachable before a session exists, and in a
+deployment with `local_accounts_enabled` the login form is the
+highest-value pre-session target in the system — a seeded admin account
+sits behind it. None of that traffic is phone-home, so none of it gets
+this section's rate budgets, counters, or alerting by default. The same
+machinery applies with a different key: per-username-plus-source-prefix
+counters instead of per-serial-plus-source, the same buffered-write
+discipline, and an equivalent high-signal alert — a successful login
+from a source that just exhausted a failure budget, or an enrollment
+token redeemed from a source other than the one it was issued to. §6.1
+is corrected to say so explicitly, since it is the sentence an
+implementer reads to decide which routes need this treatment.
 
-What that gate is worth depends entirely on how the credential is
-issued and what it opens, which is §4.3.1's subject rather than this
-section's. The short version is that it is minted per phase execution
-against an account NetHub itself defines — no shell, read-only, confined
-to the image subtree — so the authorization is real while the credential
-is nearly worthless to steal.
+Day-2 image delivery deliberately stays credentialed, unlike day-0. The
+`upgrade_iosxe.yml` playbook pushes the image over the `network_cli`
+session already authenticated with the submitter's own device credential
+(§4.3.1), rather than the plain HTTP used for the day-0 script fetch
+(§3.3). The two paths are in different trust situations, so this is not
+an inconsistency. A day-0 device has no credentials to offer regardless
+of transport, so plain HTTP costs nothing extra there. A day-2 device is
+already enrolled, and the same credential that authenticates every other
+command in the run is what gates who may write an image to it. Dropping
+it for protocol uniformity would remove real authorization that hash
+verification does not replace: hash verification confirms the pushed
+bytes weren't tampered with, and says nothing about who was allowed to
+push them in the first place.
+
+There is no second, distribution-specific credential whose worth needs
+pricing separately, the way an earlier design's minted distribution
+password did — push collapsed that into the one credential §4.3 and
+§4.3.1 already cover. The residual cost of push lives elsewhere: in the
+device configuration change that makes the push possible, which
+§4.3.1 covers.
 
 ### 4.3 Admin identity, and who the device sees
 
@@ -662,9 +769,10 @@ because §8.1 lets a run park at an approval gate for days, and "held for
 the life of the run" would mean a plaintext password resident in some
 process's memory across a weekend. So it is collected with each approval
 and dropped when the execution that approval released reaches a terminal
-state — the same lifetime §4.3.1 gives the distribution password, for
-the same reason. §9.1–§9.2 cover how it crosses from the browser to the EE
-without touching disk, and what that costs the operator.
+state. §4.3.1 covers why push no longer needs a second credential with a
+lifetime of its own; §9.1–§9.2 cover how this one crosses from the
+browser to the EE without touching disk, and what that costs the
+operator.
 
 Every `users` row also carries a `role` (`admin` | `operator`). An admin
 manages other users, the allowlist's steady-state config, and any
@@ -714,26 +822,70 @@ operator lacked that access already.
 
 Two operational consequences follow:
 
-- **A wrong credential must not become a lockout.** A stale password
-  against a fifty-host activation wave is fifty failed authentications
-  at the AAA server, which is how an engineer loses access to the entire
-  estate. The credential is validated once before dispatch and the run
-  refuses to start on failure, rather than discovering the problem one
-  device at a time.
-- **The device proves who it is before the credential is sent.**
-  `network_cli` authenticates by sending the password after key
-  exchange, and `hosts[].ansible_host` is submitter-supplied (§8.1), so
-  without host-key verification an operator can name a machine they
-  control and be handed a colleague's AAA credential — or an on-path
-  attacker on the management network can take it. §4.3.1 concludes that
-  the *distribution* password's exposure is structural and mitigates it
-  with lifetime; this one is not structural and does not get that
-  excuse. NetHub renders a `known_hosts` into the `private_data_dir`
-  from the fingerprints in `device_host_keys` (§5) and fails closed on
-  mismatch. First contact is trust-on-first-use with the fingerprint
-  shown at the submit gate and recorded against the approver, which is
-  weaker than out-of-band verification and stronger than nothing; a
-  changed key thereafter stops the run rather than prompting.
+- **A wrong credential must not become a lockout, and "validated once
+  against the AAA server" has to name an actual mechanism.** A stale
+  password against a fifty-host activation wave is fifty failed
+  authentications at the AAA server, which is how an engineer loses
+  access to the entire estate. What NetHub does about this is a
+  single-connection credential probe: before dispatch, the sibling opens
+  one `network_cli` connection — to the first host in the run's target
+  set — with the submitted credential and confirms it authenticates. A
+  full AAA-client integration (NetHub itself speaking to the TACACS+/
+  RADIUS server) was considered and rejected as out of proportion: it
+  would add a standing trust relationship and a shared secret of its own
+  to a design whose whole point is minimising exactly that. The probe's
+  known limitation is stated rather than implied: Cisco AAA commonly
+  authorizes by device group or VTY access class, so a credential
+  confirmed against host 1 is evidence the *password* is correct, not
+  proof it is *authorized* on host 30 in the same wave — a
+  group-scoped denial can still surface mid-wave. Closing that gap
+  further (e.g. probing one host per distinct AAA policy group named in
+  the request) is left open (§10); the one-host probe is the floor, not
+  a claim of completeness.
+- **The device proves who it is before the credential is sent — and
+  that proof must be confirmed by someone other than whoever is about to
+  benefit from skipping it.** `network_cli` authenticates by sending the
+  password after key exchange, and `hosts[].ansible_host` is
+  submitter-supplied (§8.1) and must be an IPv4/IPv6 literal, checked
+  against the target CIDR (§8.1) by numeric comparison rather than
+  after a DNS lookup — a hostname would let the CIDR check and the
+  eventual connection resolve to different addresses at different times,
+  and would key `device_host_keys` on a string whose meaning can change
+  after the fact. Even with that closed, without host-key verification
+  an operator can name a machine they control and be handed a
+  colleague's AAA credential, or an on-path attacker on the management
+  network can take it. §4.3.1 concludes that the old *distribution*
+  password's exposure was structural and mitigated it with lifetime;
+  this one is not structural and does not get that excuse. NetHub
+  renders a `known_hosts` into the `private_data_dir` from the
+  fingerprints in `device_host_keys` (§5) and fails closed on mismatch.
+
+  **First contact is where the excuse runs out, and the design used to
+  get this wrong.** TOFU pinning fails closed only on a *changed* key —
+  every instance of "an operator names a machine they control" is a
+  *first* contact, the one case the pin doesn't cover, because pinning
+  a first-seen key and using it are the same event with nobody in a
+  position to say no. The earlier text here — "shown at the submit gate
+  and recorded against the approver" — assumed first contact happens at
+  an approval gate, but §8.1's own phase table runs pre-check
+  immediately on submit, with no gate, using the submitter's own
+  credential; by the time anyone *else* is asked to approve a later
+  phase and supply a different credential, the key for that address is
+  already pinned, silently, by the same person who chose the address.
+  So: **an address with no already-confirmed `device_host_keys` row
+  cannot be named as `ansible_host` by any run at all.** Confirming a
+  new address is a separate, explicit admin action — connect (no device
+  credential needed; the host key is exchanged before authentication),
+  show the fingerprint, record `confirmed_by` — decoupled from any
+  particular run's submit or approval flow. This doesn't make the pin
+  out-of-band verification; an attacker can still confirm their own box
+  under their own name. What it removes is the *silent* version of the
+  attack: every approval screen shows each target host's confirmed-by
+  identity and confirmation date, so an approver asked to release their
+  own credential against an address confirmed minutes ago by someone
+  else, for a run someone else submitted, has the information in front
+  of them to notice it. What this costs a first-time fleet onboarding is
+  left open (§10).
 - **NetHub requires privilege level 15, and that is a policy rather than
   a platform quirk.** Every command an upgrade runs — `write memory`,
   `copy` to flash, `install add … activate commit` — needs level 15 on
@@ -758,154 +910,226 @@ Two operational consequences follow:
   clearly instead of part-way through a wave.
 
   **The full list of what NetHub requires of a device is short, and it
-  should stay short.** Privilege 15 at login, and `ip ssh
-  source-interface` configured for the SFTP client (§4.3.1). That is all.
-  NetHub does not enable services, does not write configuration outside
-  the upgrade itself, and asserts both requirements at pre-check rather
-  than discovering them mid-wave. Anything that would lengthen this list
-  should be weighed against what it buys — the push transfer model was
-  rejected partly because it would have added a third item that NetHub
-  had to set and then un-set (§4.3.1).
-- **The distribution account stays shared; its password does not.** The
-  device pulls its own image from the distribution host; no human is in
-  that session. §4.2 calls that credential an authorization gate on the image
-  store, which is a statement about the store and not about a person. So
-  the account stays shared and stays separate from `ansible_user` —
-  reusing one for both would require a local account on the distribution
-  host for every engineer. What changes is its lifetime, and what makes
-  that change cheap is that NetHub owns the distribution host outright
-  (§3.3). §4.3.1 is why.
+  should stay short.** Privilege 15 at login is the one thing NetHub asks
+  a device to already have configured. The pre-check's earlier
+  `ip ssh source-interface` assertion is gone: it was a pull-era
+  requirement for the device's SFTP *client*, and push has confirmed it
+  does not gate the device's SCP *server* — the two are unrelated
+  services on the device. NetHub does not otherwise write configuration
+  outside the upgrade itself, and asserts privilege 15 at pre-check
+  rather than discovering it mid-wave. One exception is deliberate and
+  bracketed rather than standing: the
+  stage phase enables the device's own SCP server for the duration of the
+  push and restores whatever it found — enabled or not — in an `always:`
+  block, confirmed by re-reading the running-config rather than trusted
+  from the module's exit status (§4.3.1). That confirmation is why "does
+  not write configuration outside the upgrade itself" still holds: the
+  toggle is scoped to one phase execution on one host, not a standing
+  device change.
+- **There is no distribution account, because there is no longer a
+  distribution daemon.** §4.3.1 explains why: the push rides the same
+  `network_cli` session already authenticated with the submitter's own
+  device credential, so there is no second account to keep shared, no
+  second password to rotate, and nothing left for §3.3's "owns the store"
+  argument to price beyond the store itself.
 
-#### 4.3.1 Why the distribution password is per-run, and what it is worth
+#### 4.3.1 Why the image is pushed, not pulled, and what that costs
 
-`upgrade_iosxe.yml` has the device fetch its own image, authenticating to
-the distribution host as it goes. The obvious way to write that task —
-and the way it was written — embeds the password in the command:
+`upgrade_iosxe.yml` used to have the device fetch its own image over
+SFTP, authenticating to a distribution account NetHub minted a password
+for on every phase execution. **That design assumed the device could
+open an outbound connection to NetHub, and a nontrivial fraction of real
+deployments block exactly that.** Outbound SSH from a network device is
+a common perimeter rule — it is the same jump-host concern that motivates
+restricting SSH egress from servers generally, applied to infrastructure
+that is even more attractive to pivot through. Where that rule is in
+force, pull does not degrade, it does not work: there is no fallback and
+no partial credit, only a device that can never reach the distribution
+host regardless of anything NetHub does on its own side. That is a
+harder failure than the cost trade-off the rest of this section is about,
+and it is the fact that overturned the earlier "why not push instead"
+conclusion — the concerns below aren't new, but a broken pull path is a
+stronger reason to accept them than the modest overhead pull used to
+save.
 
-```
-- command: 'copy sftp://{{ dist_user }}:{{ dist_pass }}@{{ dist_server }}/...'
-  no_log: true   # suppresses Ansible's log — not the wire
-```
+**Push inverts the connection, and that inversion pays for itself
+immediately.** Every device in a run already has an inbound,
+admin-initiated `network_cli` (SSH) session open for pre-check, activate,
+verify and cleanup, authenticated with the submitter's own device
+credential (§4.3). The stage phase pushes under **that same identity**
+rather than opening a second, device-initiated connection the other way
+— that claim needs to be stated at that precision and no stronger.
+`net_put`'s SCP path for a `network_cli`-backed connection most likely
+opens its own transport rather than multiplexing through the persistent
+session already in use for command execution, so "the same session" is
+probably better read as "the same credential, over a second connection"
+than as one continuous channel. The credential claim below is unaffected
+either way — nothing new is minted, so this is still a real
+simplification, not a wash — but the connection-count claim has real
+consequences a single-session model wouldn't: a second SSH/AAA
+authentication event gives command-authorization policy a second chance
+to diverge between an exec session and a transfer session, and some
+IOS-XE deployments cap concurrent sessions per user, which a second
+simultaneous connection under the same identity could trip. Tracked
+alongside the `net_put`-viability question below (§10) rather than
+assumed settled.
 
-`no_log` keeps it out of NetHub's job log. It cannot keep it out of
-anywhere else, and there are two places it goes.
+Nothing new is minted regardless: there is no distribution account, no
+distribution password, no per-phase credential lifecycle beyond the one
+§4.3 and §9.1 already define for the device credential itself. Everything
+§4.3.1 used to specify about the old model — a minted password's
+lifetime, its purpose-built low-privilege account, the SSH/SFTP daemon
+serving it, the `ForceCommand internal-sftp` chroot hardening it needed,
+the socket bullet in §9.1 that carried it across process boundaries — no
+longer exists, because there is no second credential to specify any of
+that for. The surface §9's same-uid, one-worker, no-standing-secret
+argument has to hold is strictly smaller than it was under pull.
 
-**The device, and this one is fixable.** A string that arrives as a
-command lands in command history and in TACACS+/RADIUS command
-accounting, once per host per run. That is not an incidental leak: §4.3's
-two-sided attribution property *depends* on per-user AAA with command
-accounting enabled, so the very setting that produces the audit evidence
-would also write a live credential in cleartext to the AAA server.
-Accounting records commands and not prompt responses, so moving the
-password out of the command string into the **prompt-answer form**
-removes this disclosure completely rather than mitigating it. The
-playbook does that: `copy sftp://user@host/...` with the password
-supplied as an answer to the device's `Password:` prompt. It is worth being precise
-about what this costs — `no_log` stays, because the answer list still
-carries the secret and Ansible offers no finer granularity, so a failed
-transfer is still an opaque one.
+**What push costs instead is a device configuration change, and the
+playbook is explicit about the price.** Pulling left the device
+untouched; pushing requires the device's own SCP server to be listening,
+which means NetHub has to enable it, use it, and turn it back off. The
+stage phase in `upgrade_iosxe.yml` does this narrowly and defensively:
 
-**Whatever answered the connection, and this one is not fixable.**
-`hosts[].ansible_host` is submitter-supplied, so an operator naming a
-machine they control has that machine handed the credential. Withholding
-connection vars (§8.1) does not close it: the address is enough on its
-own, and any Flask-side compromise gets the same primitive by forging a
-queued row. The credential is going to be disclosed, so the useful lever
-is not confidentiality but **what it is worth when it is.**
+- It reads the device's current `ip scp server enable` state *before*
+  changing anything, so a device that legitimately runs its own SCP
+  server is left alone rather than having NetHub's restore turn it off
+  underneath whatever else depends on it.
+- It enables the server only if it was not already enabled, pushes the
+  image via `ansible.netcommon.net_put` (isolated in
+  `tasks/push_image_net_put.yml` so the transfer mechanism is a
+  one-file swap, not a playbook rewrite), and re-verifies the pushed
+  bytes on the device with `verify /sha512` — §3.4's third consumption of
+  the ingest digest, unchanged by which direction the bytes travelled.
+- It restores the prior state in an `always:` block that runs whether the
+  push succeeded, failed, or errored partway, and it does not trust the
+  restore module's exit status: it reads the running-config back and
+  compares it explicitly. A host whose restore cannot be confirmed is
+  failed outright (`end_host`, not a logged warning), because an
+  unconfirmed enable would otherwise ride into startup-config on the
+  activate phase's own `write memory` — a state a reload does not clear,
+  unlike the running-config change on its own.
 
-Two things make it worth very little, and they only became available when
-§3.3 settled that NetHub *is* the distribution host.
+**What that mechanism does not cover is the honest gap, and it is worth
+stating rather than implying it away.** The confirm-and-fail-host logic
+only runs if the play reaches its `rescue:`/`always:` blocks at all. A
+killed process, an abandoned run, or a crashed EE container mid-transfer
+never gets there, and can leave a device with its SCP server enabled and
+nothing in NetHub recording it — exactly the "cannot enumerate afterward"
+problem the design once used to reject push outright. Closing it fully
+would mean either a device-side timeout on the enabled state (IOS-XE does
+not offer one for this knob) or a periodic reconciliation pass that
+connects to every device that was ever mid-stage and checks, which is the
+per-device current-state view §2 and §7.4 refuse to build for anything
+else in the system. This is recorded as an accepted residual risk, not a
+solved one.
 
-- **Lifetime.** NetHub owns the box, so it can issue the credential
-  rather than hold a copy of a standing one. A minted password is valid
-  for one phase execution, expires when that execution reaches a terminal
-  state (§7.3) including on timeout and on the startup sweep, and is
-  injected in memory rather than rendered into the `private_data_dir`
-  (§9.1). What leaks into an attacker's listener is a string that no
-  longer opens anything.
-- **Scope.** The account it opens is purpose-built and constrained by
-  construction: no shell, no interactive login, read-only, and confined
-  to the published image subtree. What an attacker gains inside the
-  window is the ability to download IOS-XE binaries — vendor files whose
-  digests NetHub publishes anyway, to an operator who could already fetch
-  them from Cisco. That is close to nothing, and it is only close to
-  nothing because NetHub controls the account model. Against an existing
-  remote host NetHub did not administer, none of these constraints could
-  be assumed, which is exactly why §3.3 stopped treating the distribution
-  target as modular.
+**That gap is reachable through two paths this design controls, not only
+through a crash, and both are closeable without the reconciliation pass
+above.** §8 gives the stage phase a per-host wall-clock bound derived
+from `file_size`, described as the run being "killed on expiry" — if
+that kill is a process-level `SIGKILL`, a slow link (exactly the
+condition a multi-site deployment hits, §3.3) routinely ends the EE
+mid-transfer without ever reaching `always:`, making the "exceptional"
+case the *frequent* one for the deployments that need push most. Fixed
+by scoping the bound to the transfer task itself
+(`ansible_command_timeout`, or `async:`/`poll:`) so expiry raises inside
+the play and falls into `rescue:`/`always:` like any other task failure;
+the job-level wall clock (§8) remains as an outer backstop for
+everything else, not the mechanism for this one bound. Separately, §8.1
+calls cancelling a stage "safe, non-disruptive by construction" — true
+for the fleet's traffic, not for a device mid-SCP-toggle: stage is the
+only phase that mutates device config, and the stage concurrency cap
+(§8.1) means several hosts can be mid-push when a cancel lands. That
+sentence is corrected to **"cancelling a stage is safe for the fleet;
+an in-flight host may still need its SCP server restored,"** and the
+cancel handling waits for in-flight transfers to reach their own
+`rescue:`/`always:` before honoring the cancel, rather than dropping the
+EE process outright.
 
-The hardening in that second bullet is load-bearing rather than
-hygienic. A shell on that account turns a near-worthless credential into
-SSH access to the host running the only unauthenticated route in the
-system (§9). It is stated here, not left to deployment.
+Both of those keep the mechanism above intact — they stop it from being
+bypassed by two things this design chooses to do on purpose — so the
+tracking this needs is a state to distinguish "restore confirmed" from
+"restore owed," not the per-device inventory §2 refuses to build. A
+nullable `scp_restore_confirmed` boolean on the stage row in
+`upgrade_host_phase_results` (§5) — the persisted counterpart of the
+same-named fact the playbook already computes locally — is that state:
+null or `false` means the run ended (by any means, including a hard
+kill outside this design's control) without a confirmed restore for
+that host, which is exactly the row a future reconciliation mechanism
+(§10) would need to act on if one is ever built — and, short of that,
+is a queryable answer to "which devices might still be exposed" that
+today's design has no column for at all.
 
-**And it is why the transfer is SFTP rather than SCP.** The two protocols
-are interchangeable for what this system does — NetHub renders an exact
-path and never lists a directory (§3.4), and neither gives IOS-XE's
-`copy` a resume — so the choice is decided entirely on the server side,
-where they are not alike at all. `ForceCommand internal-sftp` with a
-`ChrootDirectory` is a complete answer to the paragraph above: no shell,
-no binaries in the chroot, nothing to execute. Legacy SCP is the `scp`
-binary invoked *through a shell*, so serving it requires putting both
-inside the chroot, and `ForceCommand internal-sftp` breaks it outright.
-The hardening that carries the whole "what it is worth" argument is
-nearly free one way and awkward the other. OpenSSH has also deprecated
-the legacy SCP protocol, so the awkward option is the one with a
-maintenance horizon.
+**The transfer library is the one part of this design not settled on
+paper.** `ansible.netcommon.net_put`'s SCP path is reported broken
+against IOS-XE under the `libssh` connection type, and its `paramiko`
+fallback is deprecated with a scheduled removal. IOS-XE has no SFTP
+server — Cisco documents the SFTP client as always enabled and the
+server as unsupported, consistently across trains — so under push, SCP
+is the only wire protocol available regardless of which library carries
+it; switching to SFTP the way pull could is not an option in this
+direction. The same technique — `net_put` over `network_cli`, SCP — has
+moved a small text file successfully in a different playbook, which says
+the mechanism works but not that it holds up at image size; a few bytes
+finishes before whatever fails on a multi-hundred-megabyte transfer would
+show up. `net_put_probe.yml` is a standalone diagnostic, run separately
+against a real image-sized file under both connection types, that closes
+that gap properly before this is trusted against a fleet (§10); if it
+fails, `tasks/push_image_net_put.yml` is written so that swapping in
+OpenSSH `scp` invoked inside the EE is a one-file change at the level of
+*which task runs* — not, on inspection, a change-nothing-else swap in
+security terms, so its contract is specified here now rather than
+improvised under time pressure after a failed probe:
 
-The cost is one device-side prerequisite: Cisco documents `ip ssh
-source-interface` as required for SFTP client functionality, which
-`copy scp://` does not need. That is a real addition to §4.3's
-device-configuration requirements rather than a free swap, and the
-playbook asserts it at pre-check for the same reason it asserts privilege
-15 — so a missing global command fails once and clearly instead of
-part-way through a wave.
+- It is a **second SSH connection**, independent of the `network_cli`
+  session, with its own host-key answer to get right. It must be given
+  `-o StrictHostKeyChecking=yes -o UserKnownHostsFile=<the same rendered
+  `known_hosts` §4.3 already produces>` explicitly — `scp`'s default
+  behavior on an unrecognized host does not fail closed on its own, and
+  inheriting that default would quietly reopen the first-contact problem
+  §4.3 just closed.
+- It needs the device password on an interface `net_put` didn't need one
+  for. The obvious wrappers — `sshpass`, an expect script, a naive
+  `SSH_ASKPASS` — put the credential on a command line, landing in
+  `/proc/<pid>/cmdline`, which is exactly what §9.2 forbids for
+  `envvars` and for the identical reason. The credential is delivered to
+  the `scp` subprocess over a pipe on `stdin` via a small wrapper, the
+  same shape §9.2 already requires for the socket-delivered credential
+  reaching `ansible-runner`.
+- Its per-host timeout is a killed child process either way, which is
+  the same failure mode the restore-gap fix above addresses for
+  `net_put` — the task-level timeout / `rescue:`/`always:` structure
+  around it does not change with the swap.
 
-Two consequences worth stating plainly:
+**The concern that image encryption "moves onto the process that must
+not stall" does not survive contact with where the code actually runs.**
+The earlier rejection worried that push would relocate every image's
+crypto into NetHub's own process on the host §3.2 protects from
+stalling. `net_put` runs inside the EE, dispatched by the sibling exactly
+where every other device-touching phase already runs (§8, §9) — never in
+Flask, either direction. Only *which side of the wire* performs the SSH
+work changed; where that work happens did not.
 
-- **Minting is now a settled mechanism rather than an open question.**
-  Earlier revisions listed rotated passwords, short-lived certificates
-  and per-phase `authorized_keys` entries as candidates and could not
-  choose between them, because the choice depended on a distribution
-  host whose OS and account model §3.3 deliberately left unspecified.
-  With the host NetHub's own, the credential is simply a value NetHub
-  sets on an account it owns and clears when the phase ends. The
-  authorization gate §4.2 describes is preserved intact: an
-  unauthenticated puller still cannot fetch an image, because minting
-  happens on NetHub's side of a dispatch that already required an
-  authenticated submitter and an approved gate.
-- **Only the phase that copies bytes gets one.** Under §8.1's split,
-  stage is the phase that runs `copy sftp://…`; pre-check, activate,
-  verify and cleanup never touch the distribution host. A run parked at
-  the reload gate from Monday to Saturday holds no credential, which is
-  the same property §8.1 claims for the EE process itself. It also leaves
-  the rendered inventory with no long-lived secret in it at all, which is
-  what lets Ansible Vault be removed rather than managed (§10).
+Two consequences carry over from the credential model unchanged, because
+push did not touch them:
 
-**Why not push instead.** Inverting the transfer — NetHub enabling the
-device's own SCP server and pushing the image to it — removes the second
-credential entirely and was seriously considered. It was rejected on
-cost, not on principle. It requires NetHub to modify the running
-configuration of production hardware and put it back, and the restore is
-skipped whenever a phase is killed, abandoned or cancelled mid-host,
-leaving devices with a file-transfer service enabled that NetHub cannot
-enumerate afterwards without building the per-device current-state view
-§2 and §7.4 refuse. It moves every image's encryption from the device
-into NetHub's own process, on the host that must not stall (§3.2). And it
-depends on Ansible's `net_put`, whose SCP path is reported broken against
-IOS-XE under `libssh` and whose `paramiko` alternative is deprecated with
-a removal date — so the transfer would rest on a pinned image for
-functional reasons or on shelling out to `scp`. Switching that transfer
-to SFTP does not rescue it: **IOS-XE has no SFTP server.** Cisco
-documents the SFTP client as always enabled and the server as
-unsupported, consistently across trains. So under push, SCP is the only
-wire protocol available and its Ansible path is the broken one. Pull has
-the opposite shape — the device is a *client* in both protocols, so the
-choice is free and falls to whichever hardens better. Pull keeps the transfer
-inside `ios_command`, leaves device configuration untouched, and costs
-one credential that the two levers above make nearly worthless. The
-trade only looks like this because NetHub owns the distribution host; if
-that ever changes, this section changes with it.
+- **The authorization gate §4.2 describes is preserved intact.** An
+  unauthenticated party still cannot cause an image to be pushed anywhere
+  — that requires an authenticated submitter, an approved gate, and the
+  submitter's own valid device credential, exactly as every other phase
+  does.
+- **Only the phase that moves bytes touches the device's transfer
+  service.** Under §8.1's split, stage is the phase that toggles and uses
+  the SCP server; pre-check, activate, verify and cleanup never do. A run
+  parked at the reload gate from Monday to Saturday holds no device
+  credential in memory (§9.1) and has made no standing change to any
+  device — the same property §8.1 claims for the EE process itself.
+
+**Ansible Vault has nothing to hold either way.** It existed to carry the
+old distribution password; that password is gone, and the device
+credential was already injected in memory rather than vaulted (§9.1).
+§10 records this as a removal, not an open question.
 
 
 ### 4.4 Local accounts, for teams without an IdP
@@ -1011,9 +1235,9 @@ outright. **Shared account mode** is an explicit, deployment-level
 setting (not a per-user fallback, and not implied by choosing the local
 auth backend) that fixes `ansible_user` to one admin-configured value
 for every upgrade run in that deployment, instead of reading
-`users.device_username`. It costs exactly what was just priced above
-for the distribution account: every device-side change attributed to one
-name,
+`users.device_username`. It costs exactly what §4.3's two-sided
+attribution argument warned against for a shared `ansible` service
+account: every device-side change attributed to one name,
 answerable only from NetHub's own audit trail rather than corroborated
 by the device's own AAA/syslog. That's a decision an admin makes once
 and visibly, not a default a missing IdP quietly falls back to.
@@ -1039,20 +1263,51 @@ user happens to log in again, which may be never.
 So sessions are **server-side rows in SQLite**, and the decision is
 re-checked rather than remembered:
 
+- `sessions.id` is stored as `sha256(token)`, not the token itself — the
+  cookie carries the token, the table never does. The table is
+  read/write from every route including the phone-home-adjacent surface
+  discussed below, so a database read (a backup, a copied file, an
+  operator's `sqlite3` session) must not be equivalent to holding live
+  sessions for every logged-in admin, which a plaintext `sessions.id`
+  would make it.
+- A fresh session id is minted at login, not reused from any pre-auth
+  state (a pending OIDC `state`/nonce row, a pre-login placeholder).
+  Carrying a pre-auth identifier across the authentication boundary is
+  how session fixation happens; minting fresh is the one-line fix.
 - Every authenticated request re-reads `is_active` and `role` from the
-  `users` row. Deactivation takes effect on the next request;
-  a role change takes effect on the next request. The cookie carries a
-  session id and nothing authoritative.
+  `users` row. Deactivation takes effect on the next request. **A role
+  change takes effect on the next request only for `local` rows** — for
+  `oidc` rows, §4.4 computes `role` *at login* and writes it onto the
+  row, so re-reading the row on every request re-reads a value that only
+  changes when the person next authenticates. The real bound on an
+  IdP-side demotion is therefore the *absolute session timeout* below,
+  not "the next request" — restated at that strength rather than left to
+  imply the stronger one. A deployment should size its absolute timeout
+  against how quickly an IdP-side group change needs to take effect
+  (§10), and the cookie itself carries a session id and nothing
+  authoritative either way.
 - Absolute and idle timeouts, both bounded. The absolute one exists
   because §4.3's activation waves outlive any sensible idle window and
-  should not extend the session by being watched.
+  should not extend the session by being watched — and, per the point
+  above, is now also the OIDC role-revocation SLA.
 - A password reset, a role change, or deactivation invalidates that
   user's other sessions. An admin recovering an account should not be
-  racing whoever else holds a cookie for it.
-- Cookies are `Secure`, `HttpOnly`, and `SameSite=Lax` generally,
-  `SameSite=Strict` on the approval routes. `SECRET_KEY` rotation
-  invalidates sessions by design, which is acceptable once the store is
-  server-side because the sessions themselves survive nothing else.
+  racing whoever else holds a cookie for it. Whether a user may hold more
+  than one concurrent session at all — this bullet presumes they can —
+  is a deployment policy left open (§10) rather than decided here.
+- Cookies are `Secure`, `HttpOnly`, `SameSite=Lax`. **"`SameSite=Strict`
+  on the approval routes" was never expressible with one cookie** —
+  `SameSite` is a property of a cookie, not a route, so a single session
+  cookie is one or the other for the whole origin. The fix is a second,
+  narrower cookie: approval routes additionally require a `Strict`,
+  `HttpOnly` companion cookie set only by same-site navigation, checked
+  alongside the session cookie and the CSRF token below. The OIDC
+  redirect-back is the one flow this affects, and it's closed with a
+  same-site landing page between the IdP redirect and the dashboard
+  rather than by weakening the approval routes' cookie. `SECRET_KEY`
+  rotation invalidates sessions by design, which is acceptable once the
+  store is server-side because the sessions themselves survive nothing
+  else.
 
 **CSRF is not a checkbox item here, because of what the buttons do.**
 Every state-changing route takes a CSRF token, and the approval gates
@@ -1086,17 +1341,28 @@ suggestion.
 
 - `artifacts` table, the single ingest record behind both days (§3.4):
   `id`, `kind` (script/config/image), `platform`, `bundle_key`,
-  `filename`, `sha512`, `file_size`, `remote_dir`, `storage_path`,
+  `filename`, `sha512`, `file_size`, `storage_path`,
   `version`, `state`, `superseded_by_id`, `bytes_state`,
   `bytes_pruned_at`, `uploaded_by`, `uploaded_at`. Every byte NetHub
   serves, on either day, has exactly one row here.
-  - `storage_path` is where the blob actually lives on disk, and
-    `remote_dir` is how a *device* addresses it in a `copy sftp://…`
-    path.
-    They are not the same thing and both are needed: the first is what
-    §7.3's retention purge collects by, the second is what the rendered
-    registry entry carries into the playbook. Keeping them distinct is
-    what stops the purge reasoning from a filename and a convention.
+  - `storage_path` is where the blob actually lives on disk, and is what
+    §7.3's retention purge collects by. There is no `remote_dir`: that
+    column addressed a device's own `copy sftp://…` path under the old
+    pull design, a remnant from when the distribution host could have
+    been a separate remote machine (§3.3). Push reads straight from the
+    EE's read-only mount of `storage_path` (§3.5, §4.3.1) by filename,
+    under a fixed local directory NetHub controls outright, so there is
+    no per-artifact directory left to name — the column was dropped
+    rather than carried forward unread. `UNIQUE(filename) WHERE state IN
+    ('staged', 'published')` is the constraint that makes "push reads by
+    filename" safe: without it, two artifacts uploaded under the same
+    original filename can promote to the same on-disk path and silently
+    overwrite one artifact's bytes with another's, and every downstream
+    hash check still passes — each one compares a row's own `sha512`
+    against whatever currently sits at that path, not confirming the row
+    and the disk agree on *which* artifact this is. That would quietly
+    break the "hashed once, consumed three times" chain of custody §3.4
+    is built on, so the constraint is load-bearing rather than tidy.
   - `bytes_state` / `bytes_pruned_at` split blob retention from row
     retention, which §7.4 otherwise conflates. "Retained while
     referenced, regardless of age" is the right rule for the *row* and
@@ -1124,7 +1390,7 @@ suggestion.
 - `image_registry.yml` (git-tracked), **a rendered projection of the
   `artifacts` table rather than an independent source of truth.** Its
   `image_bundle` entries are serialized artifact records field-for-field
-  (`filename`, `sha512`, `version`, `remote_dir`, `file_size`), and the
+  (`filename`, `sha512`, `version`, `file_size`), and the
   publish job is its sole writer. It remains the
   file the upgrade playbook reads from; it is simply no longer
   hand-maintained, so the two cannot drift. Because it is derived, it is
@@ -1133,12 +1399,12 @@ suggestion.
   recovery path in §7.2 possible.
 - `registry_jobs` table: `id`, `artifact_id`, `supersedes_artifact_id`,
   `platform`, `bundle_key`, `version`, `filename`, `sha512`,
-  `remote_dir`, `file_size`, `submitted_by`, `status`, `failure_stage`,
+  `file_size`, `submitted_by`, `status`, `failure_stage`,
   `error_summary`, `render_state`, `created_at`, `started_at`,
   `heartbeat_at`, `deadline_at`, `finished_at`, `runner_instance_id`,
   `job_log_path`, `registry_commit_sha`.
   - `artifact_id` is the foreign key to the row being published. The
-    `version`/`filename`/`sha512`/`remote_dir`/`file_size` columns
+    `version`/`filename`/`sha512`/`file_size` columns
     sitting alongside it duplicate it on purpose: they are an immutable
     snapshot of what this job published *at the time it ran*, which has
     to survive the artifact later being superseded. The FK answers
@@ -1227,26 +1493,48 @@ suggestion.
     rather than a served byte.
 - `upgrade_run_hosts` table: `run_id`, `hostname`, `ansible_host`,
   `artifact_id`, `bundle_key`, `filename`, `sha512`, `version`,
-  `remote_dir`, `file_size`, `flash_dir`, `reported_version_pre`,
+  `file_size`, `flash_dir`, `config_backup_path`, `reported_version_pre`,
   `reported_version_post`, `state`, `last_phase`, `error_summary`, with
   `PRIMARY KEY (run_id, hostname)`. One row per targeted device, using
   the same foreign-key-plus-snapshot arrangement as `registry_jobs`.
   Per-host state living here rather than in the play is what retires the
   `rescue`/`upgrade_stage_failed` bookkeeping §8.1 describes moving into
   the backend.
+  - `config_backup_path` gives the pre-reload `ios_config: backup: true`
+    task a home the phase model actually accounts for. As written, that
+    task runs once at pre-check and writes to a relative path that
+    resolves inside the tmpfs-backed `private_data_dir` (§8, §9.2) — so
+    the one artifact worth keeping is destroyed with the execution that
+    made it, and even a surviving copy would be stale by the time
+    activate reloads the device days later (§8.1). Under the phase
+    model the backup moves to immediately before the reload — inside
+    the *activate* phase, not pre-check — and is written outside the
+    destroyed tmpfs tree, to a NetHub-owned directory this column
+    records the path into. It gets the same retention horizon as the
+    run it belongs to (365 days, §7.4), purged as a unit with it, since
+    a config backup with no expiry would be exactly the persistent
+    per-device record §2 refuses to keep, and one that outlives its own
+    run's audit trail is a backup nobody can date. `stdout`/`job_events`
+    scrubbing (§8, §7.3) is likewise scoped beyond the device credential
+    it was written for: retained install logs will contain full `show`
+    output, and a device's running-config is the same class of secret
+    §4 spends a page on (AAA keys, SNMP communities, enable hashes).
   - The primary key is load-bearing rather than tidy. A request document
     naming the same host twice is trivially producible in hand-written
     YAML, and without the key it yields two inventory entries and two
     reloads.
-  - `remote_dir` and `file_size` complete the snapshot for the same
-    reason they do on `registry_jobs`, and here the consequence is
-    operational rather than archival. The playbook needs `remote_dir` for
-    the `copy sftp://…` path and `file_size` for both the disk-space
-    assertion and the `wait_for` byte-count condition — and §8 retires
-    the remote-size discovery cascade specifically on the promise that
-    NetHub always populates `file_size`. Without both columns the stage
-    phase either cannot render its inventory from this table, or has to
-    re-read `artifacts` at dispatch, which makes the snapshot decorative
+  - `file_size` completes the snapshot for the same reason it does on
+    `registry_jobs`, and here the consequence is operational rather than
+    archival: the playbook needs it for both the disk-space assertion and
+    the `wait_for` byte-count condition, and §8 retires the remote-size
+    discovery cascade specifically on the promise that NetHub always
+    populates it. There is no `remote_dir` snapshot here for the same
+    reason there is no `remote_dir` column on `artifacts` (§5 above):
+    push addresses the source by filename under a fixed local mount and
+    never needed one. Without `file_size` the stage phase either cannot
+    render its inventory from this table, or has to re-read `artifacts`
+    at dispatch, which makes the snapshot
+    decorative
     and lets a mid-run supersede silently re-target the run. With them,
     each phase renders from the run's own rows and reads `artifacts` not
     at all — which also settles a question the document otherwise leaves
@@ -1264,21 +1552,59 @@ suggestion.
     activation on Saturday" — exactly the question the phase split
     exists to answer — becomes unanswerable from this table alone.
 - `upgrade_host_phase_results` table: `run_id`, `hostname`, `phase`,
-  `attempt`, `status`, `failure_stage`, `error_summary`, `started_at`,
-  `finished_at`, keyed `(run_id, hostname, phase, attempt)`. One row per
-  host per phase execution, which is what makes the per-host history
-  above legible. `upgrade_run_hosts`' cursor columns stay as a derived
-  convenience for the dashboard's default view rather than as the record
-  of what happened.
+  `attempt`, `status`, `failure_stage`, `error_summary`,
+  `scp_restore_confirmed`, `started_at`, `finished_at`, keyed `(run_id,
+  hostname, phase, attempt)`, with `FOREIGN KEY (run_id, phase, attempt)
+  REFERENCES upgrade_phase_jobs (run_id, phase, attempt)` and `FOREIGN
+  KEY (run_id, hostname) REFERENCES upgrade_run_hosts (run_id,
+  hostname)`. One row per host per phase execution, which is what makes
+  the per-host history above legible. `upgrade_run_hosts`' cursor
+  columns stay as a derived convenience for the dashboard's default view
+  rather than as the record of what happened.
+  - The two foreign keys were missing even though both parents were
+    already built to be referenced this way — `upgrade_phase_jobs`
+    carries `UNIQUE(run_id, phase, attempt)` and `upgrade_run_hosts`
+    carries `PRIMARY KEY(run_id, hostname)` for exactly this. Without
+    them, nothing stops a per-host result row from being written for a
+    phase execution that was never approved or dispatched, or for a
+    hostname never in the run's target list, and "purged as a unit with
+    the run" (§7.4) has no declared mechanism keeping this table in
+    lockstep with its parents beyond a shared `run_id`.
+  - `scp_restore_confirmed` is nullable — set only on the stage row, the
+    only phase that touches the device's SCP server (§4.3.1) — and is
+    the persisted counterpart of the fact the playbook already computes
+    locally in its `always:` block. It is how a future reconciliation
+    pass, or an operator running an ad hoc query today, finds "which
+    devices might still have their SCP server enabled" without NetHub
+    needing to keep a persistent per-device inventory to answer it
+    (§4.3.1, §10).
 - `device_host_keys` table: `ansible_host`, `key_type`,
   `fingerprint_sha256`, `first_seen_at`, `confirmed_by`,
-  `confirmed_at`. One row per address NetHub has connected to,
-  supporting §4.3's fail-closed host-key check. It is keyed on the
-  address rather than on a device identity on purpose: NetHub is not
-  tracking devices (§2), it is remembering what answered at an address
-  so that a change in the answer is visible. `confirmed_by` records the
-  human who accepted the key on first contact, which is what makes a
-  later mismatch attributable rather than merely surprising.
+  `confirmed_at`, `UNIQUE(ansible_host)`. One row per address NetHub has
+  connected to, supporting §4.3's fail-closed host-key check. It is
+  keyed on the address rather than on a device identity on purpose:
+  NetHub is not tracking devices (§2), it is remembering what answered
+  at an address so that a change in the answer is visible.
+  - Uniqueness is on `ansible_host` alone, with one pinned `key_type`
+    per address, not `(ansible_host, key_type)`. The two read
+    differently against the fail-closed goal: keyed on the pair, an
+    address offering a different — but still valid — algorithm on a
+    later connection (an ordinary SSH negotiation-order change, not an
+    attack) reads as a mismatch and false-positives a run; keyed on the
+    address alone, an attacker who wants a fresh TOFU prompt can't get
+    one just by offering an unpinned algorithm. A device whose preferred
+    algorithm genuinely changes needs an explicit admin re-accept, the
+    same action first contact requires — not a silent second pin.
+  - `confirmed_by` is no longer something a run's own first connection
+    can set implicitly. §4.3.1 requires it be written by a deliberate,
+    separate admin action — connecting once with no device credential
+    (the host key is exchanged before authentication) to fetch and show
+    the fingerprint — *before* any run may name that address as
+    `ansible_host` at all, which is what makes a later mismatch
+    attributable to a change rather than to whoever happened to submit
+    first. `first_seen_at` still records the raw first contact,
+    separately from `confirmed_at`, for the audit trail to distinguish
+    "we saw this key" from "a human accepted it."
 - `upgrade_phase_jobs` table: `id`, `run_id`, `phase`, `attempt`,
   `approved_by`, `approved_at`, `status`, `failure_stage`,
   `error_summary`, `created_at`, `started_at`, `heartbeat_at`,
@@ -1328,15 +1654,45 @@ suggestion.
     an admin's deliberate re-arm as a new row pointing at the old one,
     rather than resetting `state` in place and erasing the fact that a
     first attempt happened.
+  - **A plain foreign key only proves the artifact row exists, not that
+    it's the right kind or in a usable state.** Nothing as written stops
+    `image_artifact_id` from pointing at a `kind='config'` row, or at a
+    `staged`, unpublished one that a day-0 device would then be handed —
+    a live provisioning bug, not a data-quality nit, given §4.1's whole
+    argument is that "everything that differs per device lives in the
+    artifact the allowlist maps to." A `BEFORE INSERT`/`BEFORE UPDATE`
+    trigger validates that each of the three FKs points at
+    `artifacts.kind` matching its own role. State is looser by design
+    rather than unspecified: day-0 config/script artifacts don't
+    necessarily go through the `staged → published` promotion gate
+    §3.4/§5 define for the image-registry publish flow — an
+    admin-uploaded per-device config is not "published" to a fleet the
+    way an IOS-XE image is — so the trigger's bar is only `state !=
+    'superseded'` and `bytes_state` not yet pruned, i.e. "still the
+    current, still-retrievable bytes for this row," not "went through
+    publish." Whether day-0 artifacts should get their own
+    review/promotion gate instead of relying on upload-time correctness
+    alone is left open (§10).
+  - `script_artifact_id` is audit-only, and worth being explicit about
+    because §3.3 and this table read as though they disagree otherwise.
+    §3.3 is clear the generic script is identical for every device and
+    served at one fixed path before any per-serial decision is made — it
+    is not part of the minted, per-attempt fetch set the way config and
+    image are. This column does not change that: it records which
+    script version was current when the entry was armed, for symmetry
+    with `provisioning_log_artifacts` logging what was offered, and is
+    never consulted by the day-0 fetch sequence to decide what to serve.
 - `provisioning_log` table: `id`, `occurred_at`, `serial_claimed`,
   `mac_seen`, `source_ip`, `outcome`, `allowlist_entry_id`,
-  `fetched_at`. §4.2 makes this the evidentiary record for the system's
-  only unauthenticated route, so it needs more than a boolean.
+  `fetched_at`, indexed on `(serial_claimed, occurred_at)`. §4.2 makes
+  this the evidentiary record for the system's only unauthenticated
+  route, so it needs more than a boolean.
   - `outcome` is an enum, because "unknown serial", "expired entry",
     "already consumed", "rate-limited", and "resolved and offered" are
     five different facts an investigator needs to tell apart — and
     §4.2's highest-signal alert is precisely the pair *consumed* then
-    *denied* for one serial inside one TTL window.
+    *denied* for one serial inside one TTL window, which is what the
+    index above exists to serve without a scan.
   - `serial_claimed` and `mac_seen` are denormalized onto the row rather
     than reached through the FK. Entries expire on a per-entry TTL while
     this log lives 90 days (§7.4), so a foreign key would either block
@@ -1345,11 +1701,32 @@ suggestion.
   - `fetched_at` records whether the minted paths were actually
     collected, which §3.3 is careful to distinguish from the device
     having booted the file.
-- `provisioning_log_artifacts` junction: `(log_id, role, artifact_id)`.
+  - **A 90-day horizon bounds age, not volume, and both keys on this
+    route are attacker-chosen (§4.2).** The same unbounded-key-space
+    concern §4.2 already prices for the denial *counters* applies to
+    this *log*: a flood spread across many distinct serials or sources,
+    each individually under its own rate budget, still writes one row
+    per attempt for up to 90 days. §4.2's buffered-write fix (this
+    section) addresses the write-cost half; the row-volume half is
+    addressed the same way the counters are — high-volume unknown-serial
+    floods collapse into a coarser aggregate row rather than one row per
+    attempt, so a flood shows up as a large count on one row instead of
+    as rows enough to matter.
+- `provisioning_log_artifacts` junction: `(log_id, role, artifact_id)`,
+  with `log_id REFERENCES provisioning_log(id) ON DELETE CASCADE`.
   §3.4 says the log records "the `artifacts.id` it served", singular,
   and the flow serves several. The junction is what makes "which bytes
   was this device offered" answerable for a config *and* an image
   without a column per role on the log row.
+  - The cascade is not optional under §5's own `foreign_keys=ON`
+    pragma: without `ON DELETE CASCADE` on the `log_id` side, purging a
+    `provisioning_log` row that still has junction children raises a
+    constraint violation instead of succeeding, which is nearly every
+    "resolved and offered" row §7.4's 90-day purge is supposed to
+    collect. The `artifact_id` side stays `RESTRICT` (the default) —
+    artifact rows are retained-while-referenced (§7.4), and a dangling
+    junction row pointing at a purged artifact would be the opposite
+    bug, silently answering "which bytes" with nothing.
 - The provisioning log and `registry_jobs` share a row shape and
   retention helper per §3.4, distinguished by kind rather than merged.
 - `settings` table: `key`, `value`, `updated_by`, `updated_at`, plus an
@@ -1367,14 +1744,34 @@ suggestion.
     shared-account password are supplied as systemd credentials or
     environment, not rows, or the settings page becomes a plaintext
     secret store readable by any admin.
+  - **"Append-only" needed to be a constraint, not a description.**
+    `users.auth_backend`'s field pairing is enforced with a real `CHECK`
+    specifically because, in this document's own words, "a rule that
+    lives only in the paragraph describing it is a rule the first
+    migration breaks" — `settings_audit` was held to a lower bar than
+    that until now. `BEFORE UPDATE` and `BEFORE DELETE` triggers that
+    raise unconditionally back the append-only claim at the database
+    level, closing the gap between a Flask-side compromise being able to
+    forge a queued row (§9.2's stated baseline) and being able to
+    silently rewrite the record an admin would check *after* an
+    incident to find out what happened — which is a materially larger
+    yield than the baseline currently prices (§7.2 extends the same
+    reasoning to `device_host_keys` and this table's own security-
+    relevant rows).
 - `user_admin_audit` table: `id`, `occurred_at`, `actor_user_id`,
-  `target_user_id`, `action`, `detail`. Who created an account, who
+  `target_user_id`, `action`, `detail`, guarded by the same
+  unconditional `BEFORE UPDATE`/`BEFORE DELETE` triggers as
+  `settings_audit`, for the identical reason. Who created an account, who
   changed a role, who issued or revoked an enrollment token, who
   deactivated whom. §4.4's mixed-backend confused deputy is exactly the
   kind of event that should not be reconstructable only from inference,
   and a system whose stated purpose is an audit trail should not have
   user administration as its one unrecorded operation. Never purged; it
-  is a few rows per person per career.
+  is a few rows per person per career. The `nethub-admin` break-glass CLI
+  (§4.4) writes here too — it grants nothing host access didn't already
+  imply, but it is still the one path that creates or reactivates an
+  admin outside the UI, and that is precisely the kind of action this
+  table exists so that it is never the unrecorded one.
 - `users`, the accounts backing the authenticated session §3.2
   requires: `id`, `auth_backend`, `username`, `oidc_issuer`,
   `oidc_subject`, `password_hash`, `must_reset_password`,
@@ -1420,10 +1817,12 @@ suggestion.
   `absolute_expires_at`, `revoked_at`. §4.5 explains why the session had
   to become a row: a client-side signed cookie makes `is_active` and
   §4.4's role re-derivation advisory, because neither has anything to
-  act on until the cookie expires on its own. The cookie carries this
-  id; authority is re-read from `users` on every request. Purged on
-  expiry, and not an audit record — `user_admin_audit` above is where
-  the durable statements live.
+  act on until the cookie expires on its own. Purged on expiry, and not
+  an audit record — `user_admin_audit` above is where the durable
+  statements live. `id` is `sha256(token)`, not the token (§4.5): the
+  cookie carries the token and this table never does, so a read-only
+  exposure of the database is not equivalent to holding every admin's
+  live session.
 - Local-account enrollment tokens carry the TTL/one-shot shape §4.1
   already defines for the allowlist: a token tied to one `users.id`,
   consumed exactly once, expiring unused. Not a new pattern, so not
@@ -1463,17 +1862,25 @@ that makes the two harder to confuse rather than easier.
 
 **Day-2, upgrade** (behind admin auth): admin uploads an upgrade request
 → request validated (supported platform, every bundle key resolving to a
-`published` artifact row, `ansible_host` inside the target CIDR, no
-other connection variables and no template expressions) → run and
-per-host rows written, request document and digest recorded → device
-credential collected at the submit gate and validated once against the
-AAA server before dispatch → pre-check phase dispatched against a
-NetHub-rendered inventory, asserting privilege 15 among its checks (§4.3)
-→ per-host results recorded and the run parks at `awaiting_approval` →
-admin approves staging, supplying the credential for that execution →
-distribution password minted for that execution (§4.3.1) → each device
-pulls its image over SFTP and verifies it against its SHA-512 → minted
-password expired → admin approves activation → devices reloaded in serial
+`published` artifact row, every request field within its character
+allowlist, `ansible_host` an IP literal inside the target CIDR *with an
+already-confirmed `device_host_keys` row* — an unconfirmed address is
+rejected at this step rather than accepted and TOFU'd later, no other
+connection variables and no template expressions) → run and per-host
+rows written, request document and digest recorded → device credential
+collected at the submit gate and probed against one host in the target
+set before dispatch, refusing to start on failure rather than
+discovering a bad password one device at a time → pre-check phase
+dispatched against a NetHub-rendered inventory, asserting privilege 15
+among its checks (§4.3) → per-host results recorded and the run parks at
+`awaiting_approval` → admin approves staging, supplying the credential
+for that execution, with each target host's confirmed-by identity and
+confirmation date shown on the approval screen → device's SCP server
+enabled if not already (prior state captured first) → image pushed via
+`net_put`, under the same credential over what is most likely a second
+connection, and verified against its SHA-512 on the device → SCP server
+restored to its prior state and the restore confirmed, or the host fails
+(§4.3.1) → admin approves activation → devices reloaded in serial
 waves → verification runs without a gate →
 optionally, admin approves cleanup, or declines it and closes the run →
 per-host outcomes and phase logs surfaced in the dashboard.
@@ -1498,24 +1905,40 @@ error looks like. This is not a full specification — request and
 response bodies belong with the implementation — but the shape is a
 design decision and belongs here.
 
-**One unauthenticated route, named exactly.** `POST /provision` takes
-the claimed serial and whatever the device reports about itself, and
-answers `200` with the minted fetch URLs (§3.3) whether or not the
-serial was allowlisted, because §4.1 requires known and unknown serials
-to receive the same response shape. It never returns `403`, never
-returns a different body length for a known serial, and never varies
-measurably in time. `429` is the one other status it emits, on the rate
-limit. Nothing else in the system is reachable without a session.
+**`POST /provision` is the only route with no session and no login
+form.** It takes the claimed serial and whatever the device reports
+about itself, and answers `200` with the minted fetch URLs (§3.3)
+whether or not the serial was allowlisted, because §4.1 requires known
+and unknown serials to receive the same response shape. It never returns
+`403`, never returns a different body length for a known serial, and
+never varies measurably in time. `429` is the one other status it emits,
+on the rate limit.
+
+**It is not, however, the only route reachable without an authenticated
+session — the earlier claim that it was overstated the case.**
+`POST /login`, the OIDC `/auth/callback`, and enrollment-token
+redemption (§4.4) are pre-session by construction, since their entire
+purpose is to establish one. §4.2's rate-limit/counter/alert apparatus
+is scoped to phone-home and does not cover them by default, and in a
+deployment with `local_accounts_enabled` the login form is the
+highest-value pre-session target in the system. §4.2 is corrected to
+extend that machinery — buffered, bounded-key-space counters and a
+high-signal alert — to these routes as well, keyed on username plus
+source prefix rather than on serial plus source.
 
 **Everything else is session-authenticated, CSRF-protected on writes
 (§4.5), and falls into four groups.** Allowlist management (`GET`/`POST`
-`/allowlist`, `POST /allowlist/<id>/rearm`, `DELETE /allowlist/<id>`).
-Artifacts and publishing (`POST /artifacts` for the streaming upload,
-`POST /publish` returning `202` with a job id, `GET /registry`). Upgrade
-runs (`POST /runs`, `GET /runs/<id>`, `POST /runs/<id>/approve` carrying
-the phase and the device credential, `POST /runs/<id>/decline`, `POST
-/runs/<id>/cancel`). Administration (users, settings, the audit views).
-Role gates the last group to `admin`; the rest accept `operator`.
+`/allowlist`, `POST /allowlist/<id>/rearm`, `DELETE /allowlist/<id>`),
+now joined by `POST /allowlist/hosts/<address>/confirm` for the
+device-host-key confirmation §4.3.1 requires before an address can be
+targeted by any run — a deliberately separate action from anything a
+run's own submit or approval does. Artifacts and publishing
+(`POST /artifacts` for the streaming upload, `POST /publish` returning
+`202` with a job id, `GET /registry`). Upgrade runs (`POST /runs`,
+`GET /runs/<id>`, `POST /runs/<id>/approve` carrying the phase and the
+device credential, `POST /runs/<id>/decline`, `POST /runs/<id>/cancel`).
+Administration (users, settings, the audit views). Role gates the last
+group to `admin`; the rest accept `operator`.
 
 **Long operations return `202` and a job id, never a held connection.**
 That is §3.2's rule as an API contract. The dashboard polls `GET
@@ -1628,18 +2051,40 @@ The design doesn't try to make the sequence atomic. It makes it
   disappears into a diff nobody reads.
 
 **Tamper-evidence currently stops at the file, and it is worth saying
-where the line falls.** The clean-tree check and the whole-file re-render
+where the line falls — and being precise about which tables actually
+sit on that line.** The clean-tree check and the whole-file re-render
 make a modified *file* detectable and correctable. The *table* is
-covered by neither, and it is the source of truth for the digest devices
-verify against (§3.4) — anyone with write access to the SQLite file,
-including a Flask-side RCE, edits `artifacts.sha512` and every
-downstream control agrees with them, because every downstream control
-derives from that row. Two partial mitigations are worth their cost and
-neither closes it: registry commits are signed with a key Flask does not
-hold, so the audit copy cannot be rewritten from the web tier alone; and
-the reconcile's divergence record gives the change a witness outside the
-file. The honest statement is that NetHub detects drift between its
-stores and does not detect a consistent lie told across all of them.
+covered by neither. Framed only around `artifacts.sha512` (the digest
+devices verify against, §3.4), this understates the exposure: the same
+Flask process that could edit that row also writes `device_host_keys`
+(§4.3, §5) and the security-relevant rows in `settings` (the target
+CIDR, shared-account mode, the OIDC admin group). A Flask-side RCE's
+real yield is not "forge a queued row" (§9.2's stated baseline) or even
+"substitute an image digest" — it is silently repointing the host-key
+pin an approver's browser will show them at the next approval screen, or
+widening the target CIDR, ahead of the exact moment §9.1's socket
+releases that approver's own AAA password. That is a materially larger
+yield than the baseline currently prices, and it is priced correctly
+only once the tamper gap is understood to cover those tables and not
+only the digest.
+
+Two partial mitigations were already in place for the registry file, and
+one is worth extending rather than adding a third mechanism next to it:
+registry commits are signed with a key Flask does not hold, so the audit
+copy cannot be rewritten from the web tier alone, and the reconcile's
+divergence record gives a file change a witness outside the file. The
+same signed-projection pattern extends to `device_host_keys` and the
+security-relevant `settings` keys — both are already rendered-and-
+reconciled data in spirit (§3.5's render-don't-accept rule), just never
+signed — with the sibling re-checking, immediately before dispatch, that
+each target host's pinned fingerprint and the relevant settings match
+the last signed commit, refusing to proceed on mismatch. That is
+strictly cheaper than the append-only hash chain considered for
+`artifacts` alone (§10) and closes the higher-value gap first. The
+honest statement, even after that extension, is unchanged in kind: NetHub
+detects drift between its stores and does not detect a consistent lie
+told across all of them — it is now a materially smaller lie a
+compromise can tell undetected, not a closed gap.
 
 Git is an audit copy rather than a synchronization partner. Its job is
 to answer "what did this file look like on Tuesday", and a missing or
@@ -1670,6 +2115,16 @@ with different follow-ups — a crash is investigated, a cancellation is
 not — and it would do so in the column an operator scans first.
 Splitting the vocabulary is what keeps `abandoned` diagnostic.
 
+**A row in a terminal `status` doesn't get written to again, and that
+needs a trigger behind it, not just a habit.** `registry_jobs` and
+`upgrade_phase_jobs` both get a `BEFORE UPDATE` trigger that raises if
+the row being replaced already had a terminal `status`
+(`succeeded`/`failed`/`timed_out`/`abandoned`/`cancelled`/`expired`).
+Without it, nothing distinguishes "this row has always accurately
+described what happened" from "this row was mutated after the fact,"
+which is exactly the property the audit-table triggers elsewhere in §5
+exist to guarantee and this table shares the same requirement for.
+
 `failure_stage` records *where* it stopped, and `error_summary` carries a
 short operator-facing reason. `status` is shared across job kinds —
 same machine, same sweep — but `failure_stage` is **per job kind**, or
@@ -1699,13 +2154,39 @@ hand at exactly the moment they need an answer quickly.
 Several rules fall out of this:
 
 - **A crashed job doesn't stay `running` forever.** `heartbeat_at` is
-  updated during the run, and a sweep at startup moves any `running` job
-  from a *different* `runner_instance_id` than the current sibling's to
+  updated during the run **on its own timer inside the sibling's
+  monitoring loop, independent of ansible-runner task-event
+  boundaries** — that precision matters because §8 gives the stage phase
+  a per-host bound derived from `file_size` specifically because a
+  single job-level bound is the wrong shape for a phase moving
+  gigabytes, and the same reasoning applies to heartbeat freshness. A
+  single `net_put` push of a multi-hundred-megabyte image is one Ansible
+  task; driving `heartbeat_at` off task-start/task-end events rather
+  than a wall-clock timer would render a slow-but-healthy transfer as
+  *stalled* for its whole duration, undermining the distinction the next
+  paragraph is built on. A sweep at startup moves any `running` job from
+  a *different* `runner_instance_id` than the current sibling's to
   `abandoned` (§5). Keying on the instance UUID rather than on a PID is
   what makes that test correct: a PID is reused across container
   restarts and arrives as a meaningless number across PID namespaces. A
   job stuck at `running` is otherwise indistinguishable from a slow one,
   which means nobody investigates it.
+
+  **That sweep needs one check before it writes `abandoned`, or it can
+  misclassify a job that actually finished.** The publish sequence
+  (§7.2) — promote, write file, git commit, then the trailing
+  `render_state`/`status` writes — is not transactional. A crash after
+  the commit lands but before those trailing writes leaves a `running`
+  row with a foreign `runner_instance_id`, and the sweep as described
+  marks it `abandoned` unconditionally — permanently, since abandonment
+  needs a fresh approval rather than an auto-retry (below). But the
+  publish already succeeded: the file and git history are correct. Before
+  writing `abandoned` to a `registry_jobs` row, the sweep checks whether
+  the rendered file already matches this job's own snapshot and its
+  `registry_commit_sha` already exists in git — if so, it finishes the
+  row to `succeeded`/`committed` instead. Without this, an auditor
+  reading the row a year later sees a failed publish that was in fact
+  live in production the entire time.
 - **A sibling that dies and stays dead is swept by nobody.** §9 puts the
   sweep in the sibling so it can never fire while a healthy run
   progresses under another process, which is the right reasoning and
@@ -1733,14 +2214,35 @@ Several rules fall out of this:
   (§5) rather than a message or a kill. The sibling checks it between
   hosts and at phase boundaries — never mid-device — and the run reaches
   `cancelled`. What that means differs by phase and is §8.1's subject:
-  cancelling a stage is safe, cancelling an activation mid-wave leaves
-  the fleet split across two versions, and the UI says so before it
-  accepts the request. A `queued` job cancels cleanly by never starting.
-- **`queued` is bounded too.** §8's wall-clock timeout starts at *run*,
-  so a job that never starts has no bound at all. `deadline_at` (§5) is
-  set at enqueue rather than at dispatch, and a job that passes it
-  without being claimed goes to `expired`. This is the same bound
-  §9.1 puts on a held credential, arriving from the queue's side.
+  cancelling a stage is safe *for the fleet* — an in-flight host may
+  still need its SCP server restored, so the sibling lets a host already
+  mid-push reach its own `rescue:`/`always:` before honoring the cancel,
+  rather than dropping the EE process outright (§4.3.1) — cancelling an
+  activation mid-wave leaves the fleet split across two versions, and
+  the UI says so before it accepts the request. A `queued` job cancels
+  cleanly by never starting.
+- **`queued` is bounded too, and the bound now has a stated resolution
+  for the case where publish and phase jobs might otherwise compete for
+  it.** §8's wall-clock timeout starts at *run*, so a job that never
+  starts has no bound at all. `deadline_at` (§5) is set at enqueue
+  rather than at dispatch, and a job that passes it without being
+  claimed goes to `expired`. This is the same bound §9.1 puts on a held
+  credential, arriving from the queue's side — and it is the reason
+  `registry_jobs` and `upgrade_phase_jobs` share **one FIFO queue in the
+  sibling**, ordered by `created_at` across both kinds, rather than two
+  independently-scheduled tracks. Publishing stopped being an EE
+  dispatch (§8) but is still the sibling's own serialized work; running
+  it on a second concurrent track would need its own fairness and
+  locking story for a benefit this design doesn't need, and it would
+  make §9.1's "queued for hours behind a long activation wave" scenario
+  depend on an unstated scheduling policy instead of the one rule above.
+  A consequence worth stating plainly: `expired` is reachable for
+  `registry_jobs` (no credential involved) but effectively unreachable
+  for `upgrade_phase_jobs` in practice, since the credential TTL (§9.1,
+  measured in minutes) will almost always expire and fail the phase
+  `failure_stage: credential` before any sane `deadline_at` would — not
+  a bug, just a reason not to spend effort tuning `deadline_at`
+  precision for phase jobs specifically.
 - **A failed publish doesn't promote the artifact.** The artifact stays
   `staged`, the previously published row stays published, and the
   registry is never rendered, so a failed job leaves the fleet on the
@@ -1779,6 +2281,8 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | --- | --- | --- |
 | — | `pre_checking` | Flask, on submit (pre-check needs no gate) |
 | `pre_checking` | `awaiting_approval` | sibling, on phase completion; sets `awaiting_phase` |
+| `pre_checking` | `failed` | sibling, on the pre-check phase job reaching a failed terminal state |
+| `pre_checking` | `cancelled` | Flask, honoring a cancel requested before any gate exists |
 | `awaiting_approval` | `running` | Flask, on approval (writes the phase job row) |
 | `running` | `awaiting_approval` | sibling, at the next gate |
 | `running` | `failed` | sibling, on a phase reaching a failed terminal state |
@@ -1786,6 +2290,19 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | `awaiting_approval` | `cancelled` / `completed` | Flask: an operator cancels, or declines the optional cleanup gate |
 | `running` | `cancelled` | sibling, honoring the cancel column |
 | `running` | `completed` | sibling, after verify with no cleanup pending |
+
+**`pre_checking` needed its own exit edges, not just its own entry.** It
+was given a literal distinct from `running` specifically because
+pre-check needs no gate — but that split meant `running`'s
+failure/cancel edges didn't automatically apply to it, and nothing else
+did either. A pre-check phase job that times out, crashes to
+`abandoned`, or is cancelled before any gate exists left the *run* row
+with no documented transition out of `pre_checking` at all: not
+`running`, so `running → failed` doesn't fire; not `awaiting_approval`,
+so the sweep's TTL doesn't fire either. The two edges above close it —
+a run can no longer get stuck at `pre_checking` permanently, which also
+means it no longer escapes §7.4's purge story for a state that never
+resolves.
 
 Declining cleanup is an edge rather than an absence, which is what stops
 "awaiting cleanup approval" and "finished, cleanup declined" from being
@@ -1888,6 +2405,20 @@ The table wins there too. This does not make NetHub a DHCP manager any
 more than the registry makes it a file server; it makes the reservation
 a projection rather than a copy.
 
+**The sibling renders it, not Flask, and that follows from a rule §9
+already states for a different store.** "After every allowlist change"
+names a Flask write as the trigger, and Kea runs natively on the host,
+outside the container units and outside §9.1's trust argument entirely
+(§9). The natural reading — the process behind the only unauthenticated
+route writes host-level DHCP configuration and reloads a native service
+— is the same escalation §9 explicitly rejects for the Podman socket,
+with the reasoning ("neither is work for the process holding the
+unauthenticated route") sitting one section away and not yet applied
+here. The sibling owns Kea rendering instead: Flask writes the
+allowlist row exactly as before, and the sibling reconciles on a timer
+and on a polled change signal, the same division of labor it already
+has for the registry.
+
 ## 8. Ansible EE Integration
 
 Reuse a pinned EE image, invoke via the `ansible-runner` Python API,
@@ -1915,7 +2446,18 @@ generous stops being diagnostic. The stage phase therefore carries a
 floor transfer rate, so a host that stalls fails in minutes while a
 genuinely slow one is allowed the time it needs. NetHub has the size
 authoritatively at dispatch (below), so this costs nothing to compute.
-The job-level bound remains as the outer backstop. What is retained for
+**This bound is a task-level timeout on the transfer task itself
+(`ansible_command_timeout`, or `async:`/`poll:`), not a process-level
+kill of the EE job** — the distinction matters because the stage phase
+brackets the push with a device-config change it must restore (§4.3.1),
+and a bound implemented as a job-level `SIGKILL` would routinely bypass
+that restore on exactly the slow links this bound exists to catch,
+turning the "accepted residual risk" §4.3.1 describes for a hard kill
+into the common case rather than the rare one. Expiring the task-level
+bound raises inside the play and falls into the stage block's own
+`rescue:`/`always:` like any other task failure. The job-level bound
+remains as the outer backstop for everything else — a genuinely hung EE
+process, not this specific transfer. What is retained for
 diagnosis is the scrubbed `stdout` and `job_events`, written to
 `playbook_log_path` and purged with the job row (§7.4). The
 `private_data_dir` itself is *not* kept: it is tmpfs-backed, and its
@@ -1932,15 +2474,15 @@ retired `upgrade_iosxe.yml`'s remote-size discovery cascade: the per-run
 localhost size cache, the remote stat fallback, and the
 `files/remote_image_size.py` helper it shelled out to (referenced by the
 playbook but never written). Those existed only to answer a question
-NetHub already knows the answer to. The move to SFTP settled it
-independently — the distribution account is chrooted under
-`ForceCommand internal-sftp` with no shell (§4.3.1), so there is nothing
-on the far end to run a remote stat with. `file_size` is now required
+NetHub already knows the answer to. The move to push settled it more
+completely: the source file is on a read-only mount local to the EE
+doing the pushing (§3.5, §4.3.1), so there is no "remote" to stat in the
+first place, on either side of the transfer. `file_size` is now required
 rather than discovered, and the playbook asserts it. That promise has a
-schema precondition, which §5 now carries: `file_size` and `remote_dir`
-are snapshotted onto `upgrade_run_hosts` as well as onto the artifact
-row, so a phase renders its inventory from the run's own rows and the
-size is present without a lookup that could return a superseded answer.
+schema precondition, which §5 now carries: `file_size` is snapshotted
+onto `upgrade_run_hosts` as well as onto the artifact row, so a phase
+renders its inventory from the run's own rows and the size is present
+without a lookup that could return a superseded answer.
 
 ### 8.1 Upgrade dispatch and the phase split
 
@@ -1955,12 +2497,14 @@ bundle key per host, and a small closed set of typed knobs. This is
 §3.5's rule applied to the upgrade dispatch. NetHub
 validates it and compiles the real inventory around it. The two things
 it will not take are the reason for that indirection. A user-supplied
-playbook is arbitrary code inside the EE with the distribution
-credential in reach, which would put an authenticated RCE primitive
-beside the unauthenticated route §4 spends its length reasoning about.
-Per-run minting (§4.3.1) bounds what that credential is worth afterwards;
-it does nothing about what a playbook could do with it while the phase is
-still running, so the rule stands unchanged. A
+playbook is arbitrary code inside the EE with the live device credential
+in reach — an authenticated RCE primitive beside the unauthenticated
+route §4 spends its length reasoning about. There is no longer a
+separate distribution credential to price this against (§4.3.1 removed
+it); the device credential §9.1 injects for the phase execution is the
+one that matters, and per-phase collection bounds what it is worth after
+the phase ends. It does nothing about what a playbook could do with it
+while the phase is still running, so the rule stands unchanged. A
 user-supplied inventory carries `image_registry`, which would let a
 request name any filename against any SHA-512 and bypass the `artifacts`
 table entirely, breaking §3.4's "hashed once at ingest, consumed three
@@ -1968,21 +2512,56 @@ times" at the third consumption. Connection vars are withheld for a
 third reason: `ansible_user` is the submitter's own device identity, and
 an identity the submitter can type is not evidence of anything.
 
+**Every field a request *does* supply is validated against a character
+allowlist before it reaches a rendered Jinja context or a device command
+string, not only the fields called out as connection vars.** §9.2
+already states this rule for the one input closest to a secret — a
+credential "validated against a character allowlist before it goes
+anywhere near a variable or a command string" — but the request
+document's own fields need it too, and didn't have it stated here.
+`hosts[].bundle` resolves to `artifacts.filename`/`version`, which are
+themselves operator-controlled at upload time (§5's `UNIQUE(filename)`
+constraint closes one failure mode of that, not this one) and land
+directly in the rendered registry and in the `install add file …` /
+`verify /sha512 …` command strings the playbook runs — an unescaped
+`{{ ... }}` in a filename is the playbook-upload hole reached through
+ingest instead of through the request document, and unescaped whitespace
+or a newline appends to a level-15 command line. `hosts[].name` is used
+as a literal path component (the config-backup filename, §5); an
+unvalidated `../../` in it escapes the intended directory. `flash_dir`
+is documented as `flash:`/`bootflash:` and is validated as a closed
+enum, not a free string, for the same reason. The rule closing all of
+these: filenames, versions, and hostnames match a restricted charset
+(`[A-Za-z0-9._-]`, no leading `-`) at both ingest and submit time,
+`sha512` matches exactly 128 hex characters, and `{`, `}`, and control
+characters are rejected outright wherever they'd otherwise reach a
+rendered context.
+
 **`ansible_host` is the one connection var a request does supply, and
 saying "no connection vars" without that carve-out is wrong in a way
 that matters.** A request has to name the devices it targets; an address
 is not an identity claim and withholding it would leave nothing to
 submit. But the field is the whole attack in §4.3's credential model —
 naming a machine you control is enough to be handed someone's device
-password — so it is accepted under two constraints rather than trusted.
-It is validated against a deployment-level target CIDR, which is a
-network boundary rather than an inventory and so does not reopen §2's
-non-goal. And it is authenticated on connection against
-`device_host_keys` (§4.3), which is what turns "an address NetHub will
-dial" into "a device NetHub has met before". The distinction to hold on
-to is between vars that assert *who someone is* — `ansible_user`,
-credentials, `become` settings — which a submitter never supplies, and
-the address of the thing being acted on, which they must.
+password — so it is accepted under three constraints rather than
+trusted, not two. It must be an IPv4/IPv6 **literal** — a hostname would
+let the CIDR check below and the eventual connection resolve to
+different addresses at different times, and would key
+`device_host_keys` on a string whose meaning can silently change later
+(§4.3). It is validated against a deployment-level target CIDR by
+numeric comparison on that literal, which is a network boundary rather
+than an inventory and so does not reopen §2's non-goal. And — the
+constraint that closes the gap §4.3.1 describes rather than merely
+raising its cost — the address must already have a **confirmed** row in
+`device_host_keys` (§4.3.1); an address nobody has deliberately
+confirmed cannot be named as `ansible_host` at all, which is what turns
+"an address NetHub will dial" into "a device a human has already met and
+attested to," not merely "a device NetHub happened to meet first during
+this run." The distinction to hold on to is between vars that assert
+*who someone is* — `ansible_user`, credentials, `become` settings —
+which a submitter never supplies, and the address of the thing being
+acted on, which they must and which is now verified before it's acted
+on rather than only afterward.
 
 **The playbook's `pause` prompts assume a terminal that no longer
 exists.** Run by hand, `upgrade_iosxe.yml` stops four times to ask
@@ -2027,24 +2606,25 @@ Five things follow from the split:
   copied on Monday, activated in Saturday's window.
 
   It is also strictly faster *for the devices*, which is not the same as
-  free. With NetHub the only distribution host (§3.3), an uncapped stage
-  phase means every targeted device fetching a gigabyte from one box at
-  once, over whatever link separates them from it. Stage therefore takes
+  free. With NetHub the sole source of the bytes (§3.3), an uncapped
+  stage phase means NetHub pushing a gigabyte to every targeted device at
+  once, over whatever link separates it from them. Stage therefore takes
   a concurrency cap — a deployment setting (§5), applied as `throttle` on
-  the copy task. Narrowing `serial` to activation is still the right
+  the push task. Narrowing `serial` to activation is still the right
   call; the cap is what keeps the resulting parallelism from moving the
-  bottleneck onto the store.
+  bottleneck onto NetHub's own outbound link.
 - **Almost no state has to cross a phase boundary.** Facts flow through
   one play today via `set_fact`, which separate executions break. But
-  filename, `sha512`, `remote_dir` and `version` come from the rendered
-  inventory, and `file_size` from the registry NetHub always populates
-  (above). What is left is device state — current version, free space —
-  which is re-gathered per phase and *should* be: a pre-check from three
-  days ago must not authorize today's reload. The split is cheap
-  precisely because the registry already carries the expensive facts.
-  The distribution credential deliberately does not cross either: it is
-  minted for the stage execution and expired with it (§4.3.1), so the
-  Monday-to-Saturday gap holds no live secret.
+  filename, `sha512` and `version` come from the rendered inventory, and
+  `file_size` from the registry NetHub always populates (above). What is
+  left is device state — current version, free space — which is
+  re-gathered per phase and *should* be: a pre-check from three days ago
+  must not authorize today's reload. The split is cheap precisely because
+  the registry already carries the expensive facts. No distribution
+  credential crosses either, because push no longer mints one (§4.3.1);
+  the device credential the stage phase does need is collected fresh at
+  its own approval gate (§9.1), same as every other phase, so the
+  Monday-to-Saturday gap holds no live secret of any kind.
 - **Activation re-checks what staging established.** Between the two
   phases a device may have been upgraded by hand or had its flash
   cleaned, so activation reopens with the "not already on target version"
@@ -2088,15 +2668,24 @@ Five things follow from the split:
 - **Cancelling means different things at different phases, and the UI
   says which.** `cancel_requested_at` (§5) is polled by the sibling
   between hosts. Cancelling a `queued` phase stops it before it starts.
-  Cancelling pre-check, stage, or verify is safe: the first two are
-  non-disruptive by construction and the third is read-only, so the run
-  parks with some hosts staged and some not, which the next stage
-  approval reconciles. Cancelling an activation mid-wave is *not* safe
-  and is not presented as though it were — the devices already reloaded
-  are on the new version and the rest are not, and the operator is
-  choosing a split fleet over finishing the wave. That is sometimes the
-  right call, which is why the button exists; the confirmation names the
-  consequence rather than asking twice.
+  Cancelling pre-check or verify is safe outright: both are read-only.
+  **Stage is not quite the same shape as those two, and saying so was an
+  overclaim worth correcting.** It's non-disruptive to the fleet's
+  traffic, but it's the one of the three that mutates device
+  configuration (§4.3.1's SCP-server toggle), and the stage concurrency
+  cap (below) means several hosts can be mid-push when a cancel lands.
+  So the sibling lets any host already inside the stage block reach its
+  own `rescue:`/`always:` and confirm its restore before honoring the
+  cancel for that host, rather than tearing down the EE process
+  outright — the run still parks promptly, with some hosts staged and
+  some not, which the next stage approval reconciles, but "safe" here
+  means "the fleet's traffic is unaffected and every host's SCP toggle
+  gets put back," not "instantaneous." Cancelling an activation mid-wave
+  is *not* safe and is not presented as though it were — the devices
+  already reloaded are on the new version and the rest are not, and the
+  operator is choosing a split fleet over finishing the wave. That is
+  sometimes the right call, which is why the button exists; the
+  confirmation names the consequence rather than asking twice.
 - **The serialization lock is held per phase execution, not per run.** A
   run parked at a gate holds no EE process, so §3.2's one-run-at-a-time
   rule applies to phases rather than to runs. Otherwise a run awaiting
@@ -2118,18 +2707,16 @@ numbers have to absorb.
 ## 9. Deployment
 
 - Podman Quadlet units for the Flask app, the sibling job runner, and the
-  distribution container, which serves the day-2 image subtree over
-  SSH/SFTP and is dual-purposed to serve the day-0 subtree over plain
-  HTTP, with no separate bootstrap container. The store is local to this
-  host and is NetHub's own (§3.3); the two daemons are pointed at
-  different subtrees of it. The HTTP daemon decides nothing: it serves one
-  fixed path holding the generic script, plus a `mint/` subtree of
-  one-shot symlinks Flask writes and reaps, and authorization for day-0
-  lives in the phone-home handler. The SFTP side answers only to the
-  service account §4.3.1 defines — `ForceCommand internal-sftp`,
-  `ChrootDirectory` over the image subtree, no shell, read-only — whose
-  password the sibling sets per phase execution and clears when it ends. Everything
-  runs on one host, in separate units, under one rootless Podman user.
+  distribution container, which serves the day-0 subtree over plain
+  HTTP, with no separate bootstrap container. There is no day-2 daemon:
+  the store is local to this host and is NetHub's own (§3.3), and day-2
+  images reach a device by the EE mounting the published subtree
+  read-only and pushing from it (§3.5, §4.3.1), not by a device
+  connecting to anything NetHub serves. The HTTP daemon decides nothing:
+  it serves one fixed path holding the generic script, plus a `mint/`
+  subtree of one-shot symlinks Flask writes and reaps, and authorization
+  for day-0 lives in the phone-home handler. Everything runs on one host,
+  in separate units, under one rootless Podman user.
 - **DHCP integration is the deliberate exception**: it runs natively as
   its own service rather than as a unit, because it binds a privileged
   broadcast-facing port on the provisioning VLAN and is the one
@@ -2265,12 +2852,12 @@ worth saying plainly that the longest phase — the serial activation wave
 — can itself run for hours, and the credential is live for its
 duration; "one phase execution" is an honest bound, not a short one.
 
-**The distribution password never crosses at all.** §4.3.1's minted
-credential is generated by the sibling, because the sibling is the
-component that talks to the distribution host and the one that knows when
-the execution has reached a terminal state and the credential should be
-expired. Flask never sees it, so it is one fewer thing on either channel.
-The socket carries the submitter's device credential and nothing else.
+**There is no second credential to carry.** §4.3.1's earlier design had
+the sibling mint a distribution password for the pull; push removed that
+credential entirely rather than moving it onto a different channel. The
+socket carries the submitter's device credential and nothing else, and
+that was already true of every other phase — stage is no longer a
+special case here.
 
 ### 9.2 The socket, and what keeps it narrow
 
@@ -2412,52 +2999,62 @@ the next attempt gets a credential.
 
 ## 10. Open Questions
 
-- **How the distribution account's password is set and cleared
-  (§4.3.1).** Choosing SFTP settled the account's *shape*: a `Match`
-  block with `ForceCommand internal-sftp`, `ChrootDirectory` over the
-  published image subtree, no shell, read-only. What remains is the
-  credential lifecycle — rewriting the system account's password per
-  phase execution, versus a purpose-built SSH service the sibling runs
-  and holds the credential inside. The second is tighter (it could scope
-  a credential to one file for one execution) and more code. Worth
-  deciding before the container is built; a migration later is not
-  cheap.
+- **Whether `net_put` is actually usable against IOS-XE at image size.**
+  Partially encouraging, not settled: the same technique (`net_put` over
+  `network_cli`, SCP) was exercised in a different playbook and moved a
+  small text file successfully, which is evidence the mechanism itself
+  works but not that it holds up at image size — a few bytes finishes
+  before whatever fails on a multi-hundred-megabyte transfer would show
+  up. `net_put_probe.yml` exists to close that gap properly: push a real,
+  multi-hundred-megabyte file under both the `libssh` and `paramiko`
+  connection types and see what happens. As of this writing it has not
+  been run at that scale and no result is recorded anywhere. This gates
+  whether `tasks/push_image_net_put.yml` ships as-is or gets replaced
+  with the documented OpenSSH-`scp`-inside-the-EE fallback before push is
+  trusted against a fleet (§4.3.1).
+- **Closing what's left of the restore-on-kill/abandon gap (§4.3.1).**
+  The ordinary failure paths are now covered two ways: the stage phase
+  confirms its own restore and fails the host if it can't, and the
+  per-host bound that used to risk bypassing that restore (§8) is now a
+  task-level timeout that falls into the same `rescue:`/`always:` rather
+  than a process kill, with cancel handling doing the same. What remains
+  is narrower and genuinely residual: a killed process, an abandoned
+  run, or a crashed EE container outside NetHub's own timeout/cancel
+  logic still doesn't reach `always:`. A general reconciliation pass
+  over every device is not the fix for that residual either — connecting
+  to every device that was ever mid-stage and checking is exactly the
+  per-device current-state view §2 and §7.4 refuse to build. The
+  candidate that doesn't reopen that non-goal is job-scoped rather than
+  device-scoped, and its tracking column already exists (§5):
+  `scp_restore_confirmed` on the stage row in `upgrade_host_phase_results`
+  is null or `false` for exactly the rows that owe a restore. What's
+  still open is whether to build an active process against that column
+  — the sibling's startup sweep, or a separate periodic pass, connecting
+  to *those specific hosts* and finishing the restore — or to leave it
+  as a queryable answer an operator checks by hand. Worth deciding once
+  push is trusted (the `net_put` question above); the column exists
+  either way, so this is a decision about automation, not about whether
+  the state is tracked.
 - **Where NetHub's rendered `known_hosts` actually takes effect (§4.3,
   §9.2).** §4.3 requires the fail-closed host-key check on the
   `network_cli` session, and the connection plugins do not all read the
   file from the same place — some hardcode `~/.ssh/known_hosts` rather
   than honouring a path inside the `private_data_dir`. Which file gates
   the session has to be established by testing rather than assumed, or
-  the pin §4.3 leans on may not be the one in force.
-- **The two SFTP strings the playbook guesses.** The copy task carries
-  over `Password:` as the prompt and "N bytes copied" as the completion
-  condition from its SCP form. Neither has been confirmed against a real
-  device on `copy sftp://`, and the `wait_for` is what turns a truncated
-  transfer into a failure rather than a silent success. Verify both
-  before the transfer is trusted.
-- **Whether SFTP is slower than SCP on the links that matter.** SFTP is a
-  windowed request/response protocol, so on a high-latency path it can
-  underperform SCP unless the window is large; `ip ssh bulk-mode`
-  (default from 17.10) raises the SSH transport window for both. This
-  interacts with §8's per-host timeout and §8.1's stage concurrency cap,
-  so it is a measurement those two settings depend on rather than a
-  curiosity.
-- **Whether the device verifies the distribution host's key at all.**
-  The device-to-store leg is authenticated in one direction: the device
-  proves nothing about who it is talking to unless its SSH client is
-  configured with the server's key. §4.3.1 prices this correctly — what
-  an impostor collects is a near-worthless credential, and a substituted
-  image is caught by `verify /sha512` against a digest that arrived over
-  the pinned session — so nothing depends on closing it. It is recorded
-  because the reasoning should be revisited if either of those two
-  properties ever changes.
+  the pin §4.3 leans on may not be the one in force. This now also gates
+  the push itself — and, if `net_put` turns out to open a second
+  connection under the same identity rather than multiplexing through
+  the persistent session (§4.3.1), the question applies to *both*
+  connections independently, not to one shared answer.
 - **When distributed distribution comes back (§2, §3.3).** NetHub is the
-  only distribution host and multi-site mirrors are out of scope. The
+  sole source of the bytes and multi-site mirrors are out of scope. The
   constraint that bites first is a branch site on a narrow link, where
-  every device fetches its own copy across the WAN. §3.3 is the seam, and
-  reopening it means reopening §4.3.1: a mirror NetHub does not
-  administer is one whose account model it cannot constrain, which is
-  what made the credential cheap to price in the first place.
+  every push crosses the WAN from NetHub. §3.3 is the seam, and reopening
+  it now means deciding which process performs a mirror's pushes and how
+  it authenticates to devices behind that link — a different question
+  than the old "whose account model constrains the credential", since
+  push no longer has a distribution account for a mirror to inherit or
+  complicate.
 - **Whether Flask and the sibling should run as two rootless users
   rather than one (§9.2).** Under a single user, the socket's mount
   scope is the only thing distinguishing callers and `SO_PEERCRED`
@@ -2473,20 +3070,78 @@ the next attempt gets a credential.
   disposal problem this document never solved for no benefit. Listed
   here rather than in §5 because the removal touches
   `example_inventory/` and the EE's expectations, not the schema.
-- **Whether the tamper gap on the `artifacts` table is worth closing
-  (§7.2).** NetHub detects drift between its stores and does not detect
-  a consistent lie told across all of them, because the digest devices
-  verify against comes from a row anyone with the SQLite file can edit.
-  Signed registry commits and the divergence record narrow it; an
-  append-only hash chain over `artifacts` writes, or a digest
-  countersigned by the sibling at publish, would narrow it further at a
-  cost this scale may not justify. Worth deciding deliberately rather
-  than by omission.
+- **Whether an append-only hash chain over `artifacts` is worth building
+  on top of the signed-projection fix (§7.2).** §7.2 now extends the
+  existing signed-commit pattern to `device_host_keys` and
+  security-relevant `settings`, which was the higher-value gap (a Flask
+  compromise forging a host-key pin or widening the target CIDR ahead of
+  a credential release, versus forging an image digest). What's left
+  open is narrower: whether `artifacts.sha512` itself needs a stronger
+  mechanism — an append-only hash chain over its writes, or a digest
+  countersigned by the sibling at publish — beyond the sibling's
+  pre-dispatch re-check the extension above already gives it. Worth
+  deciding deliberately once the extension is built, not before, since
+  it may turn out to be enough on its own.
 - **The two day-0 numbers in §3.2 are asserted, not measured.** A
   two-second p99 and a fifteen-minute device backoff are what the
   architecture is calibrated against, and neither has been checked
   against a real IOS-XE ZTP client on a loaded upload path. They are
   written down so that the first measurement contradicts something.
+- **Whether to pin a certificate in the day-0 generic script (§4).**
+  This would close the confidentiality gap the plain-HTTP decision
+  leaves open — a passive listener currently reads the bootstrap
+  payload's TACACS+/RADIUS secrets, SNMP communities, and enable hashes
+  outright — by having the script NetHub ships pin a key for every fetch
+  after it, downgrading the exposure to "an active attacker must
+  substitute the first script." Not free: NetHub would need to generate,
+  rotate, and re-embed that certificate in the script it serves, and a
+  rotation mechanism that isn't itself anchored to something reopens the
+  same first-contact problem one level up. Worth a deliberate yes/no
+  rather than defaulting to "no" by never revisiting it.
+- **How far to extend the single-connection AAA credential probe
+  (§4.3).** The current design validates a submitted device credential
+  against one host in the target set before dispatch, which catches a
+  flatly wrong password but not one that's valid on some AAA policy
+  groups and not others — a group-scoped denial can still surface
+  mid-wave. Probing one host per distinct AAA group named in the
+  request would close that at the cost of more pre-dispatch connections
+  and more places for the probe itself to fail; whether that trade is
+  worth it depends on how commonly real deployments actually segment
+  AAA policy by device group, which is a question about the deployments
+  NetHub will run against rather than about the mechanism itself.
+- **What the mandatory host-key confirmation step costs a first-time
+  fleet onboarding (§4.3.1).** Requiring every address to have a
+  confirmed `device_host_keys` row before any run can target it closes
+  the confused-deputy gap described there, but a bulk import of a new
+  fleet now means confirming every address individually before the
+  first run against any of them. Whether that needs a lightweight
+  bulk-confirm affordance — and what would keep such an affordance from
+  quietly reopening the gap it's meant to avoid friction around — is
+  worth deciding with real onboarding volumes in mind rather than
+  guessed at here.
+- **How to size the OIDC absolute session timeout against the IdP's own
+  revocation SLA (§4.5).** The timeout is now the honest bound on how
+  fast an IdP-side role demotion or account disablement takes effect at
+  NetHub, not "the next request." What that bound should actually be is
+  a property of the deployment's IdP and its own group-membership
+  propagation delay, not something this document can size once for
+  everyone.
+- **Whether a user may hold more than one concurrent session (§4.5).**
+  The invalidate-other-sessions behavior on password reset / role
+  change / deactivation presumes multiple sessions can exist per user
+  without saying whether that's intended normal use (an admin logged in
+  on a laptop and a phone) or an incidental side effect of the session
+  model that should be capped at one.
+- **Whether day-0 config/script artifacts need their own promotion gate
+  (§5, `allowlist_entries`).** The role/kind-matching trigger there
+  requires only that a referenced artifact isn't `superseded` and isn't
+  byte-pruned — deliberately looser than the `staged → published`
+  workflow §3.4/§5 define for images, since an admin-uploaded per-device
+  config isn't "published" to a fleet the way an IOS-XE image is.
+  Whether day-0 artifacts should get an explicit review/promotion step
+  of their own instead of relying on upload-time correctness is a
+  product question about how much day-0 content review NetHub's
+  operators actually want, not a technical one.
 - New repository, built clean for the backend, reusing applicable
   existing pieces (e.g. Kea configuration) rather than forking the repo
   wholesale. The frontend is the exception: it's carried over from

@@ -94,29 +94,6 @@
             that:
               - "'level is 15' in privilege_check.stdout[0]"
 
-    ## Cisco documents `ip ssh source-interface` as a prerequisite for
-    ## SFTP client-side functionality. Asserting it here turns a missing
-    ## global command into one clear pre-check failure rather than a
-    ## transfer that dies partway through a wave.
-    - name: Assert SFTP client prerequisite is configured
-      tags: pre-check, install
-      block:
-        - name: Read ip ssh source-interface
-          cisco.ios.ios_command:
-            commands: 'show running-config | include ^ip ssh source-interface'
-          register: ssh_source_interface_check
-
-        - name: Fail unless ip ssh source-interface is set
-          ansible.builtin.assert:
-            quiet: false
-            success_msg: 'ip ssh source-interface is configured.'
-            fail_msg: >-
-              ip ssh source-interface is not configured. Cisco documents it
-              as a prerequisite for SFTP client functionality, which this
-              playbook uses to pull the image from the distribution host.
-            that:
-              - "ssh_source_interface_check.stdout[0] | trim | length > 0"
-
     - name: Set upgrade timestamp
       tags: backup, install
       ansible.builtin.set_fact:
@@ -165,7 +142,6 @@
       ansible.builtin.set_fact:
         target_image: "{{ image_bundle.filename }}"
         target_image_sha512: "{{ image_bundle.sha512 }}"
-        target_image_remote_dir: "{{ image_bundle.remote_dir }}"
         target_xe_ver: "{{ image_bundle.version }}"
 
     ## Initialized after target_xe_ver is resolved so upgrade_result.status

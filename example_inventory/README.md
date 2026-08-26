@@ -59,13 +59,12 @@ playbook -- code review -- not a runtime upload.
 - **`group_vars/junos.yml`.** Out of vendor scope (2.1). The
   platform-keyed directory shape is kept so adding it back is an
   addition, not a rework.
-- **`scp_pass` riding on `ansible_user`, and `vault.yml` with it.** The
-  distribution account is now a separate `dist_user`, and its password is
-  not rendered at all — §4.3.1 mints it per phase execution and injects
-  it in memory, so the vaulted file has nothing left to hold. The
-  transfer is SFTP rather than SCP, which is what lets that account be
-  chrooted with no shell. See the comment in
-  `rendered/group_vars/iosxe/vars.yml`.
+- **`scp_pass` riding on `ansible_user`, and `vault.yml` with it.** NetHub
+  now pushes the image (§4.3.1) over the same `network_cli` session
+  `ansible_user` already authenticates, so there is no second,
+  distribution-specific account or password to render at all — no
+  `dist_user`, no `dist_pass`, nothing for a vault to hold. See the
+  comment in `rendered/group_vars/iosxe/vars.yml`.
 - **`ansible_become` / `ansible_become_method`.** NetHub requires
   privilege 15 at login (§4.3), so there is no escalation step and no
   `become_password` to collect. See the comment in
