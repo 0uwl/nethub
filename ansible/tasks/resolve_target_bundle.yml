@@ -1,10 +1,4 @@
 ---
-## Resolves target_bundle and every fact derived from it. Pure templating
-## against inventory vars -- no device connection required, so this is
-## included by both the ungathered preview play and the main upgrade play,
-## and the two can no longer drift apart on how a host's target image is
-## determined.
-##
 ## in  -- software_bundle (inventory var), software_registry
 ## out -- target_bundle, target_image, target_image_sha512, target_version,
 ##        target_image_size, target_image_size_kb
@@ -17,13 +11,12 @@
       - software_bundle is defined
     fail_msg: >-
       No software_bundle defined for {{ inventory_hostname }} -- set it in inventory
-      (host_vars or group_vars) to the software_registry entry to install.
-      See inventory/hosts.yml for an example. Aborting.
+      (host_vars or group_vars) to the software_registry entry to install
 
 - name: Set target_bundle fact
   tags: pre-check, image-copy, install
   ansible.builtin.set_fact:
-    target_bundle: "{{ software_registry['software_bundle'] }}"
+    target_bundle: "{{ software_registry[software_bundle] }}"
 
 - name: Resolve target image from target_bundle
   tags: pre-check, check-version, install

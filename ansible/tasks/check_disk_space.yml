@@ -1,6 +1,4 @@
 ---
-## Asserts the device has enough free flash space for target_image.
-##
 ## in  -- target_image, target_image_size, target_image_size_kb (see
 ##        tasks/resolve_target_bundle.yml), iosxe_facts_flash_dir_info (set
 ##        by the iosxe_facts role)
