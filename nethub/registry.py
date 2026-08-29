@@ -107,3 +107,19 @@ def add_entry(name, sha512, file_storage):
             'file_size': os.path.getsize(dest_path),
         }
         _save_registry(registry)
+
+
+def delete_entry(name):
+    with _lock:
+        registry = load_registry()
+
+        entry = registry.get(name)
+        if entry is None:
+            raise RegistryError(f'No entry named "{name}" exists.')
+
+        image_path = os.path.join(current_app.config['IMAGE_DIR'], entry['file_name'])
+        if os.path.exists(image_path):
+            os.remove(image_path)
+
+        del registry[name]
+        _save_registry(registry)

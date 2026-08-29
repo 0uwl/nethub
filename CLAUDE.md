@@ -20,7 +20,10 @@ auth (everyone who can log in is an admin — no roles, no OIDC),
 admin-driven user creation (`nethub/auth.py`), and a registry-publish
 flow (`nethub/registry.py`, `nethub/registry_routes.py`) where an
 uploaded image plus a typed-in checksum become a new `software_registry`
-entry in a NetHub-owned YAML file. `alpha.md` is that slice's plan and
+entry in a NetHub-owned YAML file, deletable from the same list page. A
+delete is a hard, unaudited removal (the entry and its image file) — no
+`state`/`superseded_by_id` machinery, matching alpha's existing
+no-supersede stance on adds. `alpha.md` is that slice's plan and
 records its deliberate deviations from `design-document.md` — no
 `artifacts` table, no Ansible dispatch, no `registry_jobs`/git-committed
 registry, sessions are Flask-Login's signed cookie rather than a

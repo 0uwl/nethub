@@ -16,6 +16,7 @@
       <th>File name</th>
       <th>SHA-512</th>
       <th>File size</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -25,6 +26,12 @@
       <td>{{ entry.file_name }}</td>
       <td><code>{{ entry.sha512 }}</code></td>
       <td>{{ entry.file_size }}</td>
+      <td>
+        <form method="post" action="{{ url_for('registry.delete_entry', name=name) }}" onsubmit="return confirm('Delete registry entry \'{{ name }}\'?');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

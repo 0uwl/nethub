@@ -28,3 +28,15 @@ def new_entry():
         flash(f'Added registry entry "{name}".')
         return redirect(url_for('registry.list_entries'))
     return render_template('pages/registry_new.html', name='', sha512='')
+
+
+@registry_bp.route('/registry/<name>/delete', methods=['POST'])
+@login_required
+def delete_entry(name):
+    try:
+        registry_store.delete_entry(name)
+    except registry_store.RegistryError as e:
+        flash(str(e))
+    else:
+        flash(f'Deleted registry entry "{name}".')
+    return redirect(url_for('registry.list_entries'))

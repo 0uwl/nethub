@@ -65,6 +65,24 @@ def test_add_entry_rejects_missing_file(app):
             registry_store.add_entry('no-file', _sha512(), None)
 
 
+def test_delete_entry_removes_entry_and_file(app):
+    with app.app_context():
+        registry_store.add_entry('iosxe-17.9', _sha512(), _file())
+        image_path = os.path.join(app.config['IMAGE_DIR'], 'image.bin')
+        assert os.path.exists(image_path)
+
+        registry_store.delete_entry('iosxe-17.9')
+
+        assert registry_store.list_entries() == {}
+        assert not os.path.exists(image_path)
+
+
+def test_delete_entry_rejects_unknown_name(app):
+    with app.app_context():
+        with pytest.raises(registry_store.RegistryError, match='No entry named'):
+            registry_store.delete_entry('nope')
+
+
 def test_on_disk_file_nests_entries_under_software_registry_key(app):
     """The written YAML must match the shape Ansible group_vars expects
     (ansible/inventory/rendered/group_vars/os_iosxe.yml): entries live
