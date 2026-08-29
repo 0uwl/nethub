@@ -13,7 +13,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 export NETHUB_PORT="${NETHUB_PORT:-8080}"
 export SECRET_KEY="${SECRET_KEY:-dev-only-insecure-secret-key}"
-export ADMIN_PASSWORD="${ADMIN_PASSWORD:-dev}"
+export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export ADMIN_PASSWORD="${ADMIN_PASSWORD:-dev-admin}"
 
 IMAGE="localhost/nethub-dev:latest"
 CONTAINER="nethub-dev"
@@ -30,5 +31,6 @@ podman run --rm --name "$CONTAINER" \
     -e ADMIN_USERNAME \
     -e ADMIN_PASSWORD \
     -e DATABASE_PATH \
-    -e REGISTRY_ROOT \
+    -e IMAGE_DIR \
+    -e REGISTRY_FILE \
     "$IMAGE" --port "$NETHUB_PORT"

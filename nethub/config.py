@@ -30,7 +30,13 @@ SQLALCHEMY_TRACK_MODIFICATIONS = False
 # above the largest IOS-XE images in ansible/inventory/rendered's example registry).
 MAX_CONTENT_LENGTH = 1_500 * 1024 * 1024
 
-# Where alpha's registry YAML and uploaded images live. Deliberately outside
-# ansible/inventory/rendered, which is a design sketch, not a real output path.
-REGISTRY_ROOT = os.getenv('REGISTRY_ROOT', os.path.join(basedir, 'instance', 'registry'))
-IMAGES_DIR = os.path.join(REGISTRY_ROOT, 'images')
+# Where uploaded images live. Deliberately outside ansible/inventory/rendered,
+# which is a design sketch, not a real output path.
+IMAGE_DIR = os.getenv('IMAGE_DIR', os.path.join(basedir, 'instance', 'registry', 'images'))
+
+# Full path to the registry YAML file -- independent of IMAGE_DIR so a
+# deployment can bind-mount one specific host file here (e.g. a real Ansible
+# group_vars/os_iosxe.yml) and have publishing write straight into it.
+REGISTRY_FILE = os.getenv(
+    'REGISTRY_FILE', os.path.join(basedir, 'instance', 'registry', 'software_registry.yml')
+)

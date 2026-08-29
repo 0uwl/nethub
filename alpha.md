@@ -168,8 +168,10 @@ Write path, in the upload route:
 - Add `MAX_CONTENT_LENGTH` so an unbounded upload isn't a free DoS
   against disk/memory — this is a trust-boundary input, not a
   hypothetical.
-- Add `REGISTRY_DIR` / `IMAGES_DIR` (or one `REGISTRY_ROOT` with the two
-  as subpaths), reads from env with a sane local default.
+- Add `IMAGE_DIR` and `REGISTRY_FILE`, each read from env with its own
+  sane local default -- no shared "root" var, since the registry file
+  needs to be independently pointable at a bind-mounted host file
+  (a real Ansible `group_vars` file) while images stay put.
 
 ## File/module layout
 

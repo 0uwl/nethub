@@ -22,18 +22,25 @@ class RegistryError(Exception):
 
 
 def _registry_path():
-    root = current_app.config['REGISTRY_ROOT']
-    os.makedirs(root, exist_ok=True)
-    return os.path.join(root, 'software_registry.yml')
+    path = current_app.config['REGISTRY_FILE']
+    dirname = os.path.dirname(path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
+    return path
 
 
 def load_registry():
     path = _registry_path()
     if not os.path.exists(path):
-        return {'search_dir': current_app.config['IMAGES_DIR']}
+        return {'search_dir': current_app.config['IMAGE_DIR']}
     with open(path, 'r') as f:
         data = yaml.safe_load(f)
-    return data or {'search_dir': current_app.config['IMAGES_DIR']}
+    # On-disk shape matches an Ansible group_vars file: entries live under a
+    # top-level `software_registry` key (see ansible/inventory/rendered),
+    # not at the file's root.
+    registry = (data or {}).get('software_registry') or {}
+    registry.setdefault('search_dir', current_app.config['IMAGE_DIR'])
+    return registry
 
 
 def list_entries():
@@ -45,7 +52,7 @@ def list_entries():
 def _save_registry(data):
     path = _registry_path()
     with open(path, 'w') as f:
-        yaml.safe_dump(data, f, default_flow_style=False)
+        yaml.safe_dump({'software_registry': data}, f, default_flow_style=False)
 
 
 def _sha512_of_file(path):
@@ -73,14 +80,14 @@ def add_entry(name, sha512, file_storage):
         if not file_storage or not file_storage.filename:
             raise RegistryError('An image file is required.')
 
-        images_dir = current_app.config['IMAGES_DIR']
-        os.makedirs(images_dir, exist_ok=True)
+        IMAGE_DIR = current_app.config['IMAGE_DIR']
+        os.makedirs(IMAGE_DIR, exist_ok=True)
 
         filename = secure_filename(file_storage.filename)
         if not filename:
             raise RegistryError('Uploaded file has an unusable name.')
 
-        dest_path = os.path.join(images_dir, filename)
+        dest_path = os.path.join(IMAGE_DIR, filename)
         if os.path.exists(dest_path):
             raise RegistryError(f'A file named "{filename}" already exists.')
 

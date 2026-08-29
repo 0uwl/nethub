@@ -49,16 +49,21 @@ inventory NetHub renders around it (design doc §3.5/§8.1); its
 
 ```bash
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, PyYAML, gunicorn -- no test deps yet
+                                   # Flask-WTF, PyYAML, gunicorn, pytest
 
 export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
 flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
+
+pytest                            # runs tests/ -- see tests/conftest.py for the
+                                   # app/client fixtures (temp DB + registry root per test)
 ```
 
-There are no tests, linter config, or CI in this repo yet.
+Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
+end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
+fixture, registry upload/checksum validation). No linter config or CI yet.
 
 The Ansible playbooks (`ansible/stage_cisco_upgrade.yml`,
 `ansible/install_cisco_upgrade.yml`) are currently invoked by hand,
@@ -140,7 +145,8 @@ Environment variables the unit (or a plain `podman run`) can set:
 |---|---|---|
 | `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
-| `REGISTRY_ROOT` | `<repo root>/instance/registry` | Holds `software_registry.yml` and `images/` — set to a path under the `/app/registry` volume in the container. |
+| `IMAGE_DIR` | `<repo root>/instance/registry/images` | Where uploaded images are stored — set to a path under the `/app/registry` volume in the container. |
+| `REGISTRY_FILE` | `<repo root>/instance/registry/software_registry.yml` | Full path to the registry YAML file — independent of `IMAGE_DIR` (no shared "root" var), so it can point at a bind-mounted host file (e.g. a real Ansible `group_vars/os_iosxe.yml`) and have publishing write straight into it. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
 | `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
