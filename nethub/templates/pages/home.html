@@ -1,0 +1,14 @@
+{% extends 'layouts/main.html' %}
+{% block title %}NetHub{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>NetHub</h1>
+</div>
+{% if current_user.is_authenticated %}
+<p class="lead"><a href="{{ url_for('registry.list_entries') }}">Go to the software registry</a></p>
+{% else %}
+<p class="lead"><a href="{{ url_for('auth.login') }}">Log in</a> to manage the software registry.</p>
+{% endif %}
+
+{% endblock %}

@@ -1,7 +1,7 @@
 # NetHub
 
-> NetHub is in early bootstrap. `app.py` currently only serves a static
-> homepage and error pages — see [Project status](#project-status) below.
+> NetHub is in early bootstrap — see [Project status](#project-status)
+> below for what's actually implemented.
 
 NetHub is a small, self-hosted dashboard that unifies both halves of a
 network device's lifecycle in one Flask app, one database, one admin UI:
@@ -33,10 +33,13 @@ design target, not a description of current code.
 ## Running it
 
 ```bash
-pip install -r requirements.txt   # Flask, gunicorn — no dev/test deps yet
+pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
+                                   # Flask-WTF, PyYAML, gunicorn -- no test deps yet
 
-export SECRET_KEY=<any-string>    # required; app.py raises ValueError without it
-python app.py                     # runs the dev server (config.py sets DEBUG = True)
+export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
+python wsgi.py                    # runs the dev server (DEBUG defaults off; DEBUG=1 for local dev)
+
+flask --app wsgi create-admin <username>   # bootstrap the first login user
 ```
 
 There are no tests, linter config, or CI yet.

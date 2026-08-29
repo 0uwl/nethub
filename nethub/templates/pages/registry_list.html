@@ -1,0 +1,36 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Software Registry{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Software Registry</h1>
+</div>
+
+<p><a href="{{ url_for('registry.new_entry') }}" class="btn btn-primary">Add new</a></p>
+
+{% if entries %}
+<table class="table table-striped">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>File name</th>
+      <th>SHA-512</th>
+      <th>File size</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for name, entry in entries.items() %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>{{ entry.file_name }}</td>
+      <td><code>{{ entry.sha512 }}</code></td>
+      <td>{{ entry.file_size }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="lead">No registry entries yet.</p>
+{% endif %}
+
+{% endblock %}

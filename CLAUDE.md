@@ -4,15 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-NetHub is in early bootstrap. `app.py` currently only serves a static
-homepage and error pages — none of the Provisioning or Software Lifecycle
-functionality described in `design-document.md` exists yet. The
-playbooks under `ansible/` are hand-invoked scaffolding, not yet wired to
-anything NetHub provides — see "Ansible playbook notes" below for their
-current shape and where they're headed. Treat `design-document.md` as
-the design document / target architecture, not a description of current
-code — always verify a described component actually exists before
-assuming it's implemented.
+NetHub is in early bootstrap. The Flask app lives in the `nethub/`
+package (`wsgi.py` at the repo root is the entry point — `python
+wsgi.py`, `flask --app wsgi ...`, or gunicorn's `wsgi:app`) and
+implements a first slice of the Software Lifecycle module: local
+username/password auth (everyone who can log in is an admin — no roles,
+no OIDC), admin-driven user creation (`nethub/auth.py`), and a
+registry-publish flow (`nethub/registry.py`, `nethub/registry_routes.py`)
+where an uploaded image plus a typed-in checksum become a new
+`software_registry` entry in a NetHub-owned YAML file. `alpha.md` is
+that slice's plan and records its deliberate deviations from
+`design-document.md` — no `artifacts` table, no Ansible dispatch, no
+`registry_jobs`/git-committed registry, sessions are Flask-Login's
+signed cookie rather than a `sessions` row (§4.5). Provisioning (day-0)
+is entirely unimplemented. The playbooks under `ansible/` are
+hand-invoked scaffolding, not yet wired to anything NetHub provides —
+see "Ansible playbook notes" below for their current shape and where
+they're headed. Treat `design-document.md` as the design document /
+target architecture, not a description of current code — always verify
+a described component actually exists before assuming it's implemented.
 
 `ansible/inventory/` is a design sketch, not working config. It shows
 the ownership boundary between the user-uploaded upgrade request and the
@@ -22,10 +32,14 @@ inventory NetHub renders around it (design doc §3.5/§8.1); its
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # Flask, gunicorn — no dev/test deps yet
+pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
+                                   # Flask-WTF, PyYAML, gunicorn -- no test deps yet
 
-export SECRET_KEY=<any-string>    # required; config.py raises ValueError without it
-python app.py                     # runs the dev server (config.py sets DEBUG = True)
+export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
+python wsgi.py                    # runs the dev server (DEBUG defaults off; DEBUG=1 for local dev)
+
+flask --app wsgi create-admin <username>   # bootstrap the first login user --
+                                            # there is no self-registration route
 ```
 
 There are no tests, linter config, or CI in this repo yet.
@@ -464,15 +478,20 @@ seems to require one, the design is what needs revisiting, not the rule.
   execution, and only scrubbed `stdout`/`job_events` retained as
   `playbook_log_path`. Retaining the directory wholesale would park
   credentials on disk for §7.4's full 365 days.
-- **`DEBUG` must be off before the credential path exists** (and before
-  §4.5's session model — the same debugger renders a session cookie
-  alongside a device password).
-  `config.py` currently sets `DEBUG = True`, which is fine for the
-  bootstrap the repo is in today and is a release blocker for the
-  approval flow: Werkzeug's interactive debugger renders frame locals —
-  including a device password — into an HTTP response, and the reloader
-  runs two processes. Same class: `LimitCORE=0` and non-dumpable
-  process, or a crash writes the heap to `/var/lib/systemd/coredump`.
+- **`DEBUG` must be off wherever a credential path exists** (and wherever
+  §4.5's session model applies — the same debugger renders a session
+  cookie alongside a device password). It already applies to the local
+  username/password login alpha added (`nethub/auth.py`): `nethub/config.py`
+  reads `DEBUG` from an env var and defaults it to off, rather than
+  hardcoding `True`, precisely because that login form now exists.
+  Werkzeug's interactive debugger renders frame locals — including a
+  submitted password — into an HTTP response, and the reloader runs two
+  processes; don't flip the default back to `True` or make it easier to
+  turn on than the current env var opt-in. It remains a release blocker
+  for the full approval flow's device credentials, same reasoning, wider
+  blast radius. Same class, not yet addressed: `LimitCORE=0` and
+  non-dumpable process, or a crash writes the heap to
+  `/var/lib/systemd/coredump`.
 - **Everything runs on one host, in separate Quadlet units, under one
   rootless user — DHCP being the deliberate exception** (it stays
   native; it binds a privileged broadcast-facing port and is outside
