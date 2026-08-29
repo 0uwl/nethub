@@ -18,7 +18,7 @@ def create_app():
     login_manager.init_app(app)
     csrf.init_app(app)
 
-    from . import models  # noqa: F401  (registers the user_loader; needed before first request)
+    from . import models  # noqa: F401 -- registers the user_loader; needed before first request
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
     from .registry_routes import registry_bp

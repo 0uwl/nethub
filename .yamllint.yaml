@@ -1,0 +1,15 @@
+---
+extends: default
+
+ignore: |
+  .venv/
+
+rules:
+  # Ansible content commonly starts without `---`, and this project's
+  # task/playbook files are a mix of both -- not worth enforcing.
+  document-start: disable
+  # Ansible/Python-style True/False shows up throughout the playbooks
+  # (see ansible/*.yml) -- both are valid YAML booleans.
+  truthy: disable
+  line-length:
+    max: 150

@@ -58,18 +58,18 @@
     - name: Skip staging if image is already present
       when: dir_image_check == target_image
       block:
-      - name: Set staging result as skipped
-        tags: image-copy, pre-check
-        ansible.builtin.set_fact:
-          staging_result:
-            success: True
-            status: "skipped"
-            reason: "Image is already present on host"
-            message: "No message"
+        - name: Set staging result as skipped
+          tags: image-copy, pre-check
+          ansible.builtin.set_fact:
+            staging_result:
+              success: true
+              status: "skipped"
+              reason: "Image is already present on host"
+              message: "No message"
 
-      - name: Stop play for host {{ inventory_hostname }}
-        tags: image-copy, enable-scp
-        ansible.builtin.meta: end_host
+        - name: Stop play for host {{ inventory_hostname }}
+          tags: image-copy, enable-scp
+          ansible.builtin.meta: end_host
 
 
     - name: Stage image

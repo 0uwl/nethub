@@ -12,9 +12,9 @@ os.environ['DATABASE_PATH'] = os.path.join(_tmp_dir, 'test.db')
 os.environ['IMAGE_DIR'] = os.path.join(_tmp_dir, 'registry', 'images')
 os.environ['REGISTRY_FILE'] = os.path.join(_tmp_dir, 'registry', 'software_registry.yml')
 
-from nethub import create_app  # noqa: E402
-from nethub.extensions import db  # noqa: E402
-from nethub.models import User  # noqa: E402
+from nethub import create_app
+from nethub.extensions import db
+from nethub.models import User
 
 
 @pytest.fixture

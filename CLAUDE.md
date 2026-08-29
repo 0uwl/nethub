@@ -72,13 +72,36 @@ flask --app nethub run            # runs the dev server (DEBUG defaults off; --d
 flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
 
-pytest                            # runs tests/ -- see tests/conftest.py for the
-                                   # app/client fixtures (temp DB + registry root per test)
+pytest                             # runs tests/ -- see tests/conftest.py for the
+                                    # app/client fixtures (temp DB + registry root per test)
+
+ruff check .                       # Python lint (pyproject.toml: 100-char lines,
+                                    # N999 ignored for nethub/gunicorn.conf.py --
+                                    # gunicorn requires that exact filename)
+yamllint .                         # YAML lint (.yamllint.yaml: default ruleset minus
+                                    # document-start/truthy, which the Ansible content
+                                    # doesn't follow; line length capped at 150)
+ansible-lint ansible/              # Ansible lint, gated at `profile: min` (.ansible-lint)
+                                    # -- `basic` flags stylistic choices that are
+                                    # deliberate here (see "Ansible playbook notes")
 ```
 
 Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
-fixture, registry upload/checksum validation). No linter config or CI yet.
+fixture, registry upload/checksum validation). `pyproject.toml`'s
+`[tool.pytest.ini_options] pythonpath = ["."]` is why bare `pytest` can
+`import nethub` — without it only `python -m pytest` (which puts the cwd on
+`sys.path` itself) could.
+
+`.github/workflows/ci.yml` runs on every push/PR against `main`: a `lint`
+job (the three commands above, plus `Containerfile` — not
+`Containerfile.dev`, which is dev-only — via the `immanuwell/dockerfile-roast`
+action also used by Drawbridge), a `test` job (`pytest -v`), and a `publish`
+job that builds and pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on
+push to `main` once both prior jobs pass. `ansible-lint` needs
+`cisco.ios`/`ansible.netcommon` installed to resolve the playbooks' FQCN
+modules (no `requirements.yml` declares them), so the lint job installs
+both explicitly before running it.
 
 The Ansible playbooks (`ansible/stage_cisco_upgrade.yml`,
 `ansible/install_cisco_upgrade.yml`) are currently invoked by hand,

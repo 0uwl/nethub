@@ -59,19 +59,19 @@
     - name: Abort if image is not staged present
       when: dir_image_check != target_image
       block:
-      - name: Set staging result as skipped
-        tags: image-copy, pre-check
-        ansible.builtin.set_fact:
-          install_result:
-            success: False
-            status: "image_missing"
-            message: "Image is not staged on host"
-            current_version: "{{ ansible_facts['net_version'] }}"
-            target_version: "{{ target_version }}"
+        - name: Set staging result as skipped
+          tags: image-copy, pre-check
+          ansible.builtin.set_fact:
+            install_result:
+              success: false
+              status: "image_missing"
+              message: "Image is not staged on host"
+              current_version: "{{ ansible_facts['net_version'] }}"
+              target_version: "{{ target_version }}"
 
-      - name: Stop play for host
-        tags: image-copy, enable-scp
-        ansible.builtin.meta: end_host
+        - name: Stop play for host
+          tags: image-copy, enable-scp
+          ansible.builtin.meta: end_host
 
     - name: Backing up config to {{ config_backup_dir | default('./backup') }}
       tags: backup, image-copy, install
@@ -96,7 +96,7 @@
       tags: pre-check
       ansible.builtin.set_fact:
         install_result:
-          success: False
+          success: false
           status: "not_started"
           message: "Installation process not started"
           current_version: "{{ current_version }}"
@@ -140,7 +140,7 @@
           tags: install
           ansible.builtin.set_fact:
             install_result:
-              success: False
+              success: false
               status: "install_failed"
               message: "Install command failed"
               current_version: "{{ current_version }}"
@@ -193,7 +193,7 @@
             - name: Catch clean-up errors
               ansible.builtin.set_fact:
                 install_result:
-                  success: False
+                  success: false
                   status: "not_clean"
                   message: "Post-installation clean-up failedl"
                   reason: "{{ ansible_failed_reason.msg }}"
@@ -207,7 +207,7 @@
           tags: install
           ansible.builtin.set_fact:
             install_result:
-              success: True
+              success: true
               status: "software_installed"
               message: "Installation successful"
               current_version: "{{ ansible_facts['net_version'] }}"
@@ -259,4 +259,3 @@
           {{ failed_hosts | length }} of {{ ansible_play_batch | length }} host(s)
           did not complete successfully: {{ failed_hosts }}
       when: failed_hosts | length > 0
-

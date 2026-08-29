@@ -32,9 +32,8 @@ def test_add_entry_success(app):
 
 
 def test_add_entry_rejects_missing_name(app):
-    with app.app_context():
-        with pytest.raises(registry_store.RegistryError, match='Name is required'):
-            registry_store.add_entry('', _sha512(), _file())
+    with app.app_context(), pytest.raises(registry_store.RegistryError, match='Name is required'):
+        registry_store.add_entry('', _sha512(), _file())
 
 
 def test_add_entry_rejects_duplicate_name(app):
@@ -45,9 +44,8 @@ def test_add_entry_rejects_duplicate_name(app):
 
 
 def test_add_entry_rejects_bad_checksum_format(app):
-    with app.app_context():
-        with pytest.raises(registry_store.RegistryError, match='128-character hex'):
-            registry_store.add_entry('bad-hash', 'not-a-hash', _file())
+    with app.app_context(), pytest.raises(registry_store.RegistryError, match='128-character hex'):
+        registry_store.add_entry('bad-hash', 'not-a-hash', _file())
 
 
 def test_add_entry_rejects_checksum_mismatch_and_cleans_up_file(app):
@@ -60,9 +58,8 @@ def test_add_entry_rejects_checksum_mismatch_and_cleans_up_file(app):
 
 
 def test_add_entry_rejects_missing_file(app):
-    with app.app_context():
-        with pytest.raises(registry_store.RegistryError, match='image file is required'):
-            registry_store.add_entry('no-file', _sha512(), None)
+    with app.app_context(), pytest.raises(registry_store.RegistryError, match='image file is required'):
+        registry_store.add_entry('no-file', _sha512(), None)
 
 
 def test_delete_entry_removes_entry_and_file(app):
@@ -78,9 +75,8 @@ def test_delete_entry_removes_entry_and_file(app):
 
 
 def test_delete_entry_rejects_unknown_name(app):
-    with app.app_context():
-        with pytest.raises(registry_store.RegistryError, match='No entry named'):
-            registry_store.delete_entry('nope')
+    with app.app_context(), pytest.raises(registry_store.RegistryError, match='No entry named'):
+        registry_store.delete_entry('nope')
 
 
 def test_on_disk_file_nests_entries_under_software_registry_key(app):

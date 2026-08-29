@@ -7,8 +7,8 @@ import hashlib
 import os
 import re
 import threading
-import yaml
 
+import yaml
 from flask import current_app
 from werkzeug.utils import secure_filename
 

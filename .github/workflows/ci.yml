@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff yamllint ansible ansible-lint
+      - name: Ruff (Python)
+        run: ruff check .
+      - name: yamllint
+        run: yamllint .
+      # cisco.ios/ansible.netcommon aren't declared anywhere in ansible/ (no
+      # requirements.yml) -- install them so ansible-lint can resolve the
+      # FQCN modules the playbooks use instead of flagging every one.
+      - name: Install Ansible collections used by the playbooks
+        run: ansible-galaxy collection install cisco.ios ansible.netcommon
+      - name: ansible-lint
+        run: ansible-lint ansible/
+      # Containerfile.dev is dev-only, deliberately incomplete (no COPY of
+      # app code -- see its own header comment) and never used in
+      # production, so it's not linted against the production preset --
+      # same exclusion Drawbridge applies to its own dev image.
+      - name: Containerfile linting
+        uses: immanuwell/dockerfile-roast@1.4.4
+        with:
+          files: 'Containerfile'
+          engine: podman
+          preset: production
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Pytest
+        run: pytest -v
+
+  publish:
+    name: Publish container
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # linux/arm64 covers e.g. a 64-bit Raspberry Pi host; QEMU
+      # (setup-qemu-action) emulates it since this runner is amd64.
+      # cache-from/to: type=gha caches build layers in the Actions cache
+      # and reuses whatever's still valid on the next run.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha,scope=nethub
+          cache-to: type=gha,scope=nethub,mode=max
