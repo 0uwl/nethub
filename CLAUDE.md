@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
-package (`wsgi.py` at the repo root is the entry point — `python
-wsgi.py`, `flask --app wsgi ...`, or gunicorn's `wsgi:app`) and
-implements a first slice of the Software Lifecycle module: local
+package, built as an application factory (`nethub.create_app()`) rather
+than a module-level `app` — Flask's and gunicorn's CLIs both autodetect
+it directly (`flask --app nethub ...`, `gunicorn --factory
+nethub:create_app`), so there's no separate `wsgi.py` entry-point file.
+It implements a first slice of the Software Lifecycle module: local
 username/password auth (everyone who can log in is an admin — no roles,
 no OIDC), admin-driven user creation (`nethub/auth.py`), and a
 registry-publish flow (`nethub/registry.py`, `nethub/registry_routes.py`)
@@ -36,10 +38,10 @@ pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
                                    # Flask-WTF, PyYAML, gunicorn -- no test deps yet
 
 export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
-python wsgi.py                    # runs the dev server (DEBUG defaults off; DEBUG=1 for local dev)
+flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
-flask --app wsgi create-admin <username>   # bootstrap the first login user --
-                                            # there is no self-registration route
+flask --app nethub create-admin <username>   # bootstrap the first login user --
+                                              # there is no self-registration route
 ```
 
 There are no tests, linter config, or CI in this repo yet.

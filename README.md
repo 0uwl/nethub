@@ -37,9 +37,9 @@ pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
                                    # Flask-WTF, PyYAML, gunicorn -- no test deps yet
 
 export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
-python wsgi.py                    # runs the dev server (DEBUG defaults off; DEBUG=1 for local dev)
+flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
-flask --app wsgi create-admin <username>   # bootstrap the first login user
+flask --app nethub create-admin <username>   # bootstrap the first login user
 ```
 
 There are no tests, linter config, or CI yet.

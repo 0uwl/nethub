@@ -174,16 +174,19 @@ Write path, in the upload route:
 ## File/module layout
 
 Built as an actual package rather than a flat `app.py`, since a later
-pass restructured it that way:
+pass restructured it that way, and then a further pass converted it to
+an application factory (no `wsgi.py` -- `create_app()` is autodetected
+directly by both Flask's and gunicorn's CLIs: `flask --app nethub run`,
+`gunicorn --factory nethub:create_app`):
 
 ```
-wsgi.py                    -- repo-root entry point: `from nethub import app`
 nethub/
-  __init__.py               -- Flask app, extension init (SQLAlchemy, LoginManager, CSRFProtect),
-                                 blueprint registration, error handlers, the `/` route
-  config.py                 -- moved as-is; basedir now resolves to the repo root
+  __init__.py               -- create_app(): builds the Flask app, extension init
+                                 (SQLAlchemy, LoginManager, CSRFProtect), blueprint
+                                 registration, error handlers, the `/` route
+  config.py                 -- moved as-is; basedir resolves to the repo root
                                  (one level up from the package) so database.db/instance/
-                                 still land beside wsgi.py, not inside nethub/
+                                 land beside the package, not inside it
   extensions.py             -- shared db/login_manager/csrf instances
   models.py                 -- User
   registry.py               -- load/save software_registry.yml, the write-lock, hash check
