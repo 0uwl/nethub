@@ -1,0 +1,122 @@
+# Reference Quadlet unit for NetHub.
+#
+# To install by hand, rootless as the user that will run the container:
+#   cp quadlet/nethub.container ~/.config/containers/systemd/nethub.container
+#   # fill in SECRET_KEY and ADMIN_PASSWORD (or LoadCredential=) below
+#   systemctl --user daemon-reload
+#   systemctl --user start nethub
+#
+# Host prep -- rootless, so this lives under the invoking user's own XDG
+# data dir, no sudo/chown needed:
+#   mkdir -p ~/.local/share/nethub/{data,registry}
+#
+# Full description of every variable: CLAUDE.md / alpha.md.
+
+[Unit]
+Description=NetHub software registry server
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/nethub:latest
+ContainerName=nethub
+
+# Required for the bind mounts below to be writable. The image runs as
+# fixed UID 1000 (nethub), but rootless Podman's default user namespace
+# does not map that 1:1 to the host: even when the invoking host user is
+# also UID 1000, the container sees the bind-mounted directory as a
+# different, non-writable owner. keep-id fixes the mapping so container
+# UID 1000 *is* the invoking host user for these mounts, regardless of
+# that user's real host UID.
+UserNS=keep-id:uid=1000,gid=1000
+
+# Gunicorn binds 0.0.0.0:$NETHUB_PORT (8080 by default).
+PublishPort=8080:8080
+
+# --- Required ---
+# /app/data holds the SQLite database. /app/registry holds
+# software_registry.yml and the uploaded images it describes. %h expands to
+# the invoking user's home directory. :Z relabels for SELinux hosts;
+# harmless if SELinux is disabled.
+Volume=%h/.local/share/nethub/data:/app/data:Z
+Volume=%h/.local/share/nethub/registry:/app/registry:Z
+Environment=DATABASE_PATH=/app/data/database.db
+Environment=REGISTRY_ROOT=/app/registry
+
+# --- Required ---
+# Flask/Flask-Login session-signing key. No default -- the app refuses to
+# start without it (nethub/config.py). Generate once and keep it stable
+# across restarts: rotating it invalidates every live session.
+#   openssl rand -hex 32
+Environment=SECRET_KEY=CHANGE_ME_use_openssl_rand_hex_32
+
+# Preferred alternative to the plaintext line above: load it as a systemd
+# credential instead -- see "Systemd credential injection" at the bottom of
+# this file. Uncomment the matching LoadCredential= line in [Service] and
+# delete/comment out the Environment=SECRET_KEY= line above.
+
+# --- Optional ---
+# Port Gunicorn binds to inside the container. Update the left side of
+# PublishPort= above to match if you change this.
+#Environment=NETHUB_PORT=8080
+
+# --- Optional ---
+# Cap request size so an upload can't exhaust disk/memory. Bytes; 1.5 GB by
+# default, comfortably above a real IOS-XE image.
+#Environment=MAX_CONTENT_LENGTH=1610612736
+
+# --- Optional ---
+# Only consulted on first boot, when the database has no users yet -- an
+# already-running deployment has its admin(s) and ignores both of these. If
+# neither is set, a random password is generated and printed once, to
+# `podman logs nethub` / `journalctl --user -u nethub`, on that first boot.
+
+# Username for the first admin account. Everyone who can log in is an admin
+# in this alpha -- there are no roles yet to pick between.
+#Environment=ADMIN_USERNAME=admin
+
+# Sets the first admin's password directly instead of a random one. Has to
+# sit here in plaintext for the container to read it on every restart --
+# prefer the admin_password systemd credential below where possible.
+#Environment=ADMIN_PASSWORD=
+
+# Local-development escape hatch only -- turns on Werkzeug's interactive
+# debugger and reloader. NEVER set this in a deployed Quadlet unit: the
+# debugger renders frame locals -- including a submitted password -- into
+# an HTTP response on any unhandled exception (see CLAUDE.md's DEBUG hard
+# rule). It also has no effect here anyway -- gunicorn (ENTRYPOINT in
+# Containerfile) doesn't consult it; it exists for `flask run`/dev.sh.
+#Environment=DEBUG=1
+
+# App only ever writes under /app/data, /app/registry, /tmp, /run.
+ReadOnly=true
+Tmpfs=/tmp
+Tmpfs=/run
+
+[Service]
+Restart=on-failure
+
+# --- Systemd credential injection ---
+# LoadCredential=/SetCredential= are plain systemd service directives, not
+# Podman/Quadlet keys -- they belong in [Service], not [Container] (Quadlet
+# passes this section straight through to the generated .service unit
+# unchanged; see `man podman-systemd.unit`, "the [Service] table ... pass
+# directly to systemd"). Recent Podman versions forward loaded credentials
+# into the container and set $CREDENTIALS_DIRECTORY there automatically;
+# confirm this against the Podman version actually in use, and note that
+# LoadCredentialEncrypted= specifically has been reported to need
+# SecurityLabelDisable=true in [Container] under SELinux enforcing --
+# nethub/credentials.py reads $CREDENTIALS_DIRECTORY the same way
+# regardless of which of these three directives supplied it.
+#
+# Uncomment either or both, pointing at a real secret file readable by the
+# user this unit runs as (root-only-readable is fine -- systemd, not
+# Podman, opens it):
+#LoadCredential=secret_key:/path/to/secret-key-file
+#LoadCredential=admin_password:/path/to/admin-password-secret
+#
+# Or generate+encrypt one with systemd-creds and use LoadCredentialEncrypted=
+# instead -- see `man systemd-creds`.
+
+[Install]
+WantedBy=default.target

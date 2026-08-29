@@ -1,0 +1,11 @@
+README.md
+CLAUDE.md
+design-document.md
+alpha.md
+.git/
+.venv/
+ansible/
+instance/
+database.db
+__pycache__/
+*.pyc

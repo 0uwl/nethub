@@ -6,25 +6,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
 package, built as an application factory (`nethub.create_app()`) rather
-than a module-level `app` — Flask's and gunicorn's CLIs both autodetect
-it directly (`flask --app nethub ...`, `gunicorn --factory
-nethub:create_app`), so there's no separate `wsgi.py` entry-point file.
-It implements a first slice of the Software Lifecycle module: local
-username/password auth (everyone who can log in is an admin — no roles,
-no OIDC), admin-driven user creation (`nethub/auth.py`), and a
-registry-publish flow (`nethub/registry.py`, `nethub/registry_routes.py`)
-where an uploaded image plus a typed-in checksum become a new
-`software_registry` entry in a NetHub-owned YAML file. `alpha.md` is
-that slice's plan and records its deliberate deviations from
-`design-document.md` — no `artifacts` table, no Ansible dispatch, no
-`registry_jobs`/git-committed registry, sessions are Flask-Login's
-signed cookie rather than a `sessions` row (§4.5). Provisioning (day-0)
-is entirely unimplemented. The playbooks under `ansible/` are
-hand-invoked scaffolding, not yet wired to anything NetHub provides —
-see "Ansible playbook notes" below for their current shape and where
-they're headed. Treat `design-document.md` as the design document /
-target architecture, not a description of current code — always verify
-a described component actually exists before assuming it's implemented.
+than a module-level `app`. Flask's CLI autodetects it directly
+(`flask --app nethub ...`), so there's no separate `wsgi.py`
+entry-point file. Gunicorn (production; see "Container" below) takes it
+as `nethub:create_app()` — a call expression, not a bare name — because
+the pinned gunicorn version (26.x) parses its app argument as a Python
+expression and only invokes it if written as a call; there is no
+`--factory` flag in this version (older gunicorn releases used one —
+don't assume it still exists without checking `gunicorn --help` against
+whatever version `requirements.txt` actually resolves). It implements a
+first slice of the Software Lifecycle module: local username/password
+auth (everyone who can log in is an admin — no roles, no OIDC),
+admin-driven user creation (`nethub/auth.py`), and a registry-publish
+flow (`nethub/registry.py`, `nethub/registry_routes.py`) where an
+uploaded image plus a typed-in checksum become a new `software_registry`
+entry in a NetHub-owned YAML file. `alpha.md` is that slice's plan and
+records its deliberate deviations from `design-document.md` — no
+`artifacts` table, no Ansible dispatch, no `registry_jobs`/git-committed
+registry, sessions are Flask-Login's signed cookie rather than a
+`sessions` row (§4.5). Provisioning (day-0) is entirely unimplemented.
+The playbooks under `ansible/` are hand-invoked scaffolding, not yet
+wired to anything NetHub provides — see "Ansible playbook notes" below
+for their current shape and where they're headed. Treat
+`design-document.md` as the design document / target architecture, not
+a description of current code — always verify a described component
+actually exists before assuming it's implemented.
+
+NetHub containerizes as a single-process image (`Containerfile` —
+`python:3.12-slim`, gunicorn, one worker) plus a dev image
+(`Containerfile.dev` — Flask's own dev server with reload, run via
+`dev.sh` against a bind-mounted repo for live edits) and a reference
+Podman Quadlet unit at `quadlet/nethub.container`. See "Container" below
+for the full environment-variable list and the systemd-credential
+mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 
 `ansible/inventory/` is a design sketch, not working config. It shows
 the ownership boundary between the user-uploaded upgrade request and the
@@ -74,6 +88,75 @@ dispatches neither. §8.1 supersedes this in the target design: NetHub
 dispatches each phase with no TTY, and the `pause` prompts become UI
 approval gates. Don't "fix" either playbook's prompts without
 implementing the phase model that replaces them.
+
+## Container
+
+`Containerfile` builds `localhost/nethub:latest` — single stage,
+`python:3.12-slim`, non-root UID 1000, gunicorn as PID 1 via
+`nethub:create_app()` (see the "Project status" note above on why that's
+a call expression, not `--factory`). `Containerfile.dev` is dev-only:
+Flask's own dev server with `--debug` (reload + interactive debugger),
+application code deliberately *not* baked in (only `requirements.txt`
+is), so `dev.sh` can bind-mount the repo at `/app` and get live edits
+with no rebuild. Never run `Containerfile.dev` as anything but a local
+dev convenience — same reasoning as the `DEBUG` hard rule below.
+
+`nethub/gunicorn.conf.py` fixes `workers = 1` (not a knob — SQLite plus
+the single-worker hard rule below both assume exactly one process) and
+sets `control_socket_disable = True`: gunicorn ≥25.1 otherwise tries to
+create `$HOME/.gunicorn/gunicorn.ctl` for a control socket nothing here
+uses, which throws under the Quadlet unit's `ReadOnly=true`. Discovered
+by actually running the built image read-only, not by inspection — if
+gunicorn's default behavior changes again, re-check by running the
+container rather than trusting this note.
+
+`quadlet/nethub.container` is the reference Podman Quadlet unit (see
+Drawbridge's own `quadlet/drawbridge.container` for the sibling
+project's version of the same pattern). Verified end-to-end against a
+real `podman build`/`podman run` — including `UserNS=keep-id`,
+`ReadOnly=true`+`Tmpfs=`, and the systemd-credential path — not just
+written from the Drawbridge example and assumed to work. Two things
+worth knowing if this file gets edited:
+
+- **`LoadCredential=`/`SetCredential=` belong in `[Service]`, not
+  `[Container]`.** They're plain systemd unit directives; Quadlet passes
+  a literal `[Service]` section straight through to the generated
+  `.service` unit unchanged (`man podman-systemd.unit`), but they are
+  *not* recognized `[Container]` keys. Whether Podman then forwards the
+  resulting `$CREDENTIALS_DIRECTORY` into the container automatically is
+  version-dependent and not something to assert confidently without
+  checking the Podman version in the field — the unit file's own
+  comments say so; don't strengthen that claim without re-verifying it.
+- **`UserNS=keep-id:uid=1000,gid=1000` is required for the volumes to be
+  writable, not optional hardening.** Confirmed by testing: the
+  container's bind mounts fail with `unable to open database file`
+  without it, even when the host directory and the image's fixed UID
+  1000 numerically match — rootless Podman's default user namespace
+  doesn't map that 1:1 on its own.
+
+Environment variables the unit (or a plain `podman run`) can set:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. |
+| `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
+| `REGISTRY_ROOT` | `<repo root>/instance/registry` | Holds `software_registry.yml` and `images/` — set to a path under the `/app/registry` volume in the container. |
+| `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
+| `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
+| `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
+| `ADMIN_PASSWORD` | none — random, printed once, if unset | First-boot only, same gate as above. A systemd credential named `admin_password` takes priority over this env var, same mechanism as `SECRET_KEY`. |
+| `DEBUG` | off | Local dev only — see the hard rule below. No effect on the production image; gunicorn never reads it. |
+
+The `ADMIN_USERNAME`/`ADMIN_PASSWORD`/credential priority order in
+`nethub/bootstrap.py` is deliberately modeled on Drawbridge's
+`_initial_admin_password()` (`drawbridge/db.py`) — credential beats env
+var beats generated-and-printed — but does **not** carry over
+Drawbridge's forced-password-reset-on-first-login behavior for the
+env/generated tiers. That's not an oversight: this alpha's `User` model
+has no such field and no reset flow to force into (see `alpha.md`), so
+replicating the label without the mechanism behind it would just be a
+UI claim nothing enforces. Don't add a `must_reset_password` column
+without building the flow that reads it.
 
 ## Architecture (target design — see design-document.md for full detail)
 

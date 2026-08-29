@@ -3,7 +3,6 @@
 #----------------------------------------------------------------------------#
 
 import logging
-from logging import Formatter, FileHandler
 
 from flask import Flask, render_template
 
@@ -21,6 +20,7 @@ def create_app():
 
     from . import models  # noqa: F401  (registers the user_loader; needed before first request)
     from .auth import auth_bp, register_cli
+    from .bootstrap import bootstrap_admin
     from .registry_routes import registry_bp
 
     app.register_blueprint(auth_bp)
@@ -29,6 +29,7 @@ def create_app():
 
     with app.app_context():
         db.create_all()
+        bootstrap_admin()
 
     #------------------------------------------------------------------------#
     # Controllers.
@@ -46,13 +47,17 @@ def create_app():
     def not_found_error(error):
         return render_template('errors/404.html'), 404
 
+    # Under gunicorn, hand Flask's logger gunicorn's own handlers so errors
+    # go to stdout (captured by `podman logs`/journald) instead of a
+    # relative-path error.log file -- that path doesn't exist, and wouldn't
+    # be writable, under the container's read-only root filesystem (see
+    # Containerfile / quadlet/nethub.container). Not running under gunicorn
+    # (e.g. `flask run` in dev) -- gunicorn.error has no handlers yet, so
+    # this is a no-op and Flask's default logging stands.
     if not app.debug:
-        file_handler = FileHandler('error.log')
-        file_handler.setFormatter(
-            Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]')
-        )
-        app.logger.setLevel(logging.INFO)
-        file_handler.setLevel(logging.INFO)
-        app.logger.addHandler(file_handler)
+        gunicorn_logger = logging.getLogger('gunicorn.error')
+        if gunicorn_logger.handlers:
+            app.logger.handlers = gunicorn_logger.handlers
+            app.logger.setLevel(gunicorn_logger.level)
 
     return app

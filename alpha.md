@@ -175,23 +175,32 @@ Write path, in the upload route:
 
 Built as an actual package rather than a flat `app.py`, since a later
 pass restructured it that way, and then a further pass converted it to
-an application factory (no `wsgi.py` -- `create_app()` is autodetected
-directly by both Flask's and gunicorn's CLIs: `flask --app nethub run`,
-`gunicorn --factory nethub:create_app`):
+an application factory (no `wsgi.py` -- Flask's CLI autodetects
+`create_app()` directly: `flask --app nethub run`. Gunicorn, used only
+in the production container, needs it written as a call expression --
+`nethub:create_app()`, not `nethub:create_app` -- since the pinned
+gunicorn version parses its app argument as Python and only invokes it
+if it's a call; there is no `--factory` flag in that version):
 
 ```
 nethub/
   __init__.py               -- create_app(): builds the Flask app, extension init
                                  (SQLAlchemy, LoginManager, CSRFProtect), blueprint
-                                 registration, error handlers, the `/` route
+                                 registration, admin bootstrap, error handlers, the `/` route
   config.py                 -- moved as-is; basedir resolves to the repo root
                                  (one level up from the package) so database.db/instance/
                                  land beside the package, not inside it
+  credentials.py             -- read_credential(): $CREDENTIALS_DIRECTORY lookup for
+                                 systemd LoadCredential=/SetCredential= (SECRET_KEY, ADMIN_PASSWORD)
+  bootstrap.py               -- bootstrap_admin(): creates the first user on an empty
+                                 database from ADMIN_USERNAME/ADMIN_PASSWORD/credential/random
   extensions.py             -- shared db/login_manager/csrf instances
   models.py                 -- User
   registry.py               -- load/save software_registry.yml, the write-lock, hash check
   auth.py                   -- auth_bp: login/logout/user-management routes, register_cli(app)
   registry_routes.py        -- registry_bp: /registry, /registry/new
+  gunicorn.conf.py           -- production-only: workers=1, bind from NETHUB_PORT,
+                                 control_socket_disable=True
   templates/pages/login.html
   templates/pages/registry_list.html
   templates/pages/registry_new.html
@@ -199,6 +208,11 @@ nethub/
   templates/pages/users_new.html
   static/                   -- moved from the repo root unchanged
 ```
+
+Containerization (`Containerfile`, `Containerfile.dev`, `dev.sh`,
+`quadlet/nethub.container`) is documented in CLAUDE.md's "Container"
+section rather than here -- it's packaging around this slice, not a
+change to what the slice does.
 
 `auth.py` and `registry_routes.py` are Flask blueprints (`auth_bp`,
 `registry_bp`) rather than routes hung directly off `app` — needed once

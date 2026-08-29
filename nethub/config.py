@@ -1,5 +1,7 @@
 import os
 
+from .credentials import read_credential
+
 # Project root (one level up from this package), not this file's own
 # directory -- database.db and instance/ live beside the package, matching
 # Flask's own instance-folder convention and the existing .gitignore entries.
@@ -10,13 +12,18 @@ basedir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # right along with them. Set DEBUG=1 for local dev only.
 DEBUG = os.getenv('DEBUG', '') == '1'
 
-# Secret key for session management
-SECRET_KEY = os.getenv('SECRET_KEY')
+# Secret key for session management. A systemd credential named 'secret_key'
+# (LoadCredential=/SetCredential=) takes priority over the plaintext
+# SECRET_KEY env var, same idea as the ADMIN_PASSWORD/admin_password
+# credential in nethub/bootstrap.py -- see quadlet/nethub.container.
+SECRET_KEY = read_credential('secret_key') or os.getenv('SECRET_KEY')
 if SECRET_KEY is None:
     raise ValueError("SECRET_KEY cannot be empty, please generate a random string and supply it through an env variable")
 
-# Connect to the database
-SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(basedir, 'database.db')
+# Bare SQLite file path -- not a full SQLAlchemy URL. Overridable so a
+# container can point it at a mounted volume (e.g. /app/data/database.db).
+DATABASE_PATH = os.getenv('DATABASE_PATH', os.path.join(basedir, 'database.db'))
+SQLALCHEMY_DATABASE_URI = 'sqlite:///' + DATABASE_PATH
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 # Cap request size so an upload can't exhaust disk/memory (1.5 GB, comfortably
