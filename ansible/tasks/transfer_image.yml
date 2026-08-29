@@ -1,0 +1,87 @@
+---
+## in  -- image_transport, target_image, target_image_sha512, flash_dir,
+##        software_registry
+## out -- staging_result, and (push transport only) scp_server_prior_enabled,
+##        scp_restore_confirmed
+##
+## Picks a transport adapter then verifies the transfered image
+
+- name: Assert a known image transport is configured
+  tags: pre-check, image-copy
+  ansible.builtin.assert:
+    quiet: false
+    success_msg: 'Staging {{ target_image }} with the {{ image_transport }} transport.'
+    fail_msg: >-
+      image_transport must be 'push_scp' or 'pull_sftp', got
+      '{{ image_transport | default("undefined") }}'.
+    that:
+      - image_transport is defined
+      - image_transport in ['push_scp', 'pull_sftp']
+
+- name: Push the image to {{ inventory_hostname }} over SCP
+  tags: image-copy
+  ansible.builtin.include_tasks: push_image_scp.yml
+  when: image_transport == 'push_scp'
+
+- name: Have {{ inventory_hostname }} pull the image over SFTP
+  tags: image-copy
+  ansible.builtin.include_tasks: pull_image_sftp.yml
+  when: image_transport == 'pull_sftp'
+
+- name: Verify the staged image
+  block:
+    - name: Verify the staged image on the device
+      tags: image-validate, install
+      cisco.ios.ios_command:
+        commands:
+          - "verify /sha512 {{ flash_dir }}{{ target_image }} {{ target_image_sha512 }}"
+        wait_for:
+          - "result[0] contains '{{ target_image_sha512 }}'"
+      vars:
+        ansible_command_timeout: 600
+      register: image_validation_result
+
+    - name: Assert the device confirmed the expected digest
+      tags: image-validate
+      ansible.builtin.assert:
+        quiet: false
+        success_msg: 'Device confirmed SHA-512 {{ target_image_sha512 }} for {{ target_image }}.'
+        fail_msg: >-
+          Device output did not contain the expected SHA-512 digest for
+          {{ target_image }}. Treat this as a failed verification -- do not
+          proceed to install.
+        that:
+          - "target_image_sha512 in (image_validation_result.stdout[0] | default(''))"
+
+    - name: Print target image validation result
+      tags: image-validate
+      ansible.builtin.debug:
+        msg: "{{ image_validation_result.stdout_lines[0][1] }}"
+
+  rescue:
+    - name: Catch verification errors
+      tags: post-check, image-copy
+      ansible.builtin.set_fact:
+        staging_result:
+          success: false
+          status: "not_verified"
+          reason: "Image checksum verification failed"
+          message: "{{ ansible_failed_reason.msg | default('No message') }}"
+
+    - name: Stop play for host
+      ansible.builtin.meta: end_host
+
+- name: Record staging result for the batch summary
+  tags: post-check, image-copy
+  ansible.builtin.set_fact:
+    staging_result:
+      success: true
+      status: "image_copied"
+      reason: "Staging finished successfully"
+      message: "No message"
+  when: scp_restore_confirmed | default(true) | bool
+
+- name: Stop processing this host if staging failed
+  tags: image-copy
+  ansible.builtin.meta: end_host
+  when: not staging_result.success

@@ -21,7 +21,9 @@
       run_once: true  # no serial so it always covers every targeted host in one pass
       delegate_to: localhost
       ansible.builtin.debug:
-        msg: "copy image {{ hostvars[item].target_bundle.file_name | default('UNDEFINED') }} -> {{ item }}"
+        msg: >-
+          {{ image_transport | default('UNDEFINED') }}:
+          {{ hostvars[item].target_bundle.file_name | default('UNDEFINED') }} -> {{ item }}
       loop: "{{ ansible_play_batch }}"
       loop_control:
         label: "{{ item }}"
@@ -93,44 +95,13 @@
           tags: pre-check, image-copy
           ansible.builtin.include_tasks: tasks/check_disk_space.yml
 
+        ## Transport-independent. tasks/transfer_image.yml picks the push or
+        ## pull adapter from image_transport and verifies what landed. The
+        ## SCP-server enable/restore bracket lives inside the push adapter,
+        ## which is the only transport that reconfigures the device.
         - name: Stage target image on {{ inventory_hostname }}
           tags: image-copy
-          ansible.builtin.include_tasks: tasks/stage_image.yml
-
-      always:
-          - name: Restore SCP server to its prior state
-            tags: image-copy, install
-            cisco.ios.ios_config:
-              lines:
-                - "{{ 'ip scp server enable' if scp_server_prior_enabled | default(false) else 'no ip scp server enable' }}"
-            register: scp_server_restore
-            failed_when: false
-            when: scp_server_prior_enabled is defined
-
-          - name: Read back SCP server state
-            tags: image-copy, install
-            cisco.ios.ios_command:
-              commands: 'show running-config | include ^ip scp server'
-            register: scp_server_after
-            failed_when: false
-            when: scp_server_prior_enabled is defined
-
-          - name: Record whether the restore was confirmed
-            tags: image-copy, install
-            ansible.builtin.set_fact:
-              scp_restore_confirmed: >-
-                {{ (scp_server_prior_enabled is not defined)
-                   or (('ip scp server enable' in (scp_server_after.stdout[0] | default('')))
-                       == (scp_server_prior_enabled | bool)) }}
-
-          - name: Warn loudly if the device was not put back
-            tags: image-copy, install
-            ansible.builtin.debug:
-              msg: >-
-                WARNING: {{ inventory_hostname }} SCP server state was NOT
-                restored. This device has been changed and not changed back.
-                Fix it by hand
-            when: not (scp_restore_confirmed | bool)
+          ansible.builtin.include_tasks: tasks/transfer_image.yml
 
 - name: IOSXE Staging Summary
   hosts: upgrade_batch

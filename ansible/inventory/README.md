@@ -47,6 +47,12 @@ typed knobs. NetHub validates it and compiles the real inventory.
 Anything else is rejected at submit time. Connection vars, credentials,
 and registry entries are NetHub's to write.
 
+`image_transport` is on that list too, and for a sharper reason than the
+rest: it selects which credential the transfer uses (§4.3.1), so a
+submitter who could set it could choose to have the deployment's
+distribution credential spent instead of their own. It is deployment-level,
+rendered into `group_vars/all.yml` from the `settings` table.
+
 Beyond this set, the answer is a pull request against the curated
 playbook -- code review -- not a runtime upload.
 
@@ -59,12 +65,15 @@ playbook -- code review -- not a runtime upload.
 - **`group_vars/junos.yml`.** Out of vendor scope (2.1). The
   platform-keyed directory shape is kept so adding it back is an
   addition, not a rework.
-- **`scp_pass` riding on `ansible_user`, and `vault.yml` with it.** NetHub
-  now pushes the image (§4.3.1) over the same `network_cli` session
-  `ansible_user` already authenticates, so there is no second,
-  distribution-specific account or password to render at all — no
-  `dist_user`, no `dist_pass`, nothing for a vault to hold. See the
-  comment in `rendered/group_vars/iosxe/vars.yml`.
+- **`scp_pass` riding on `ansible_user`, and `vault.yml` with it.** Under
+  the push transport there is no second, distribution-specific account or
+  password to render at all — the image travels over the same credential
+  `ansible_user` already authenticates (§4.3.1). The pull transport does
+  need a distribution account, but it still renders no password here:
+  `distribution_user` is a var, the password is injected per execution
+  (§9.1) and never lands in the `private_data_dir`'s inventory. A vault
+  would only re-add a key to dispose of, which is why it stayed gone. See
+  the comment in `rendered/group_vars/all.yml`.
 - **`ansible_become` / `ansible_become_method`.** NetHub requires
   privilege 15 at login (§4.3), so there is no escalation step and no
   `become_password` to collect. See the comment in
