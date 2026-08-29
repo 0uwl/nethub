@@ -96,6 +96,93 @@ def test_on_disk_file_nests_entries_under_software_registry_key(app):
         assert on_disk['software_registry']['iosxe-17.9']['sha512'] == _sha512()
 
 
+def _write_raw_registry(app, data):
+    path = app.config['REGISTRY_FILE']
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        yaml.safe_dump(data, f)
+
+
+def test_check_registry_clean_registry_has_no_issues(app):
+    with app.app_context():
+        registry_store.add_entry('iosxe-17.9', _sha512(), _file())
+        assert registry_store.check_registry() == []
+
+
+def test_check_registry_flags_missing_file(app):
+    with app.app_context():
+        _write_raw_registry(app, {
+            'software_registry': {
+                'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1},
+            }
+        })
+        issues = registry_store.check_registry()
+        assert len(issues) == 1
+        assert 'not found' in issues[0]
+
+
+def test_check_registry_flags_checksum_mismatch_without_touching_it(app):
+    with app.app_context():
+        registry_store.add_entry('iosxe-17.9', _sha512(), _file())
+        # simulate a hand-edit that swaps in a wrong (but well-formed) checksum
+        raw = registry_store.load_registry()
+        raw['iosxe-17.9']['sha512'] = 'b' * 128
+        registry_store._save_registry(raw)
+
+        issues = registry_store.check_registry()
+        assert len(issues) == 1
+        assert 'does not match' in issues[0]
+        # checksum mismatches are reported, never silently rewritten
+        assert registry_store.list_entries()['iosxe-17.9']['sha512'] == 'b' * 128
+
+
+def test_check_registry_flags_missing_fields(app):
+    with app.app_context():
+        _write_raw_registry(app, {
+            'software_registry': {'broken': {'file_name': 'x.bin'}}
+        })
+        issues = registry_store.check_registry()
+        assert len(issues) == 1
+        assert 'missing' in issues[0]
+        assert 'sha512' in issues[0]
+        assert 'file_size' in issues[0]
+
+
+def test_check_registry_flags_entry_that_is_not_a_mapping(app):
+    with app.app_context():
+        _write_raw_registry(app, {'software_registry': {'oops': 'just-a-string'}})
+        issues = registry_store.check_registry()
+        assert len(issues) == 1
+        assert 'not a mapping' in issues[0]
+
+
+def test_check_registry_flags_invalid_yaml(app):
+    with app.app_context():
+        path = app.config['REGISTRY_FILE']
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write('software_registry: [this is not valid: yaml')
+        issues = registry_store.check_registry()
+        assert len(issues) == 1
+        assert 'not valid YAML' in issues[0]
+
+
+def test_check_registry_silently_fixes_stale_file_size(app):
+    with app.app_context():
+        registry_store.add_entry('iosxe-17.9', _sha512(), _file())
+        image_path = os.path.join(app.config['IMAGE_DIR'], 'image.bin')
+        # simulate a hand-edit typo in file_size -- the file itself (and its
+        # real checksum) is untouched, so this is safely re-derivable
+        raw = registry_store.load_registry()
+        raw['iosxe-17.9']['file_size'] = 999999
+        registry_store._save_registry(raw)
+
+        issues = registry_store.check_registry()
+
+        assert issues == []
+        assert registry_store.list_entries()['iosxe-17.9']['file_size'] == os.path.getsize(image_path)
+
+
 def test_registry_file_env_var_points_at_a_specific_path(app, tmp_path):
     """REGISTRY_FILE lets a deployment bind-mount and update one specific
     host file (e.g. a real Ansible group_vars file) instead of always

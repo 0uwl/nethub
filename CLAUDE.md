@@ -23,7 +23,19 @@ uploaded image plus a typed-in checksum become a new `software_registry`
 entry in a NetHub-owned YAML file, deletable from the same list page. A
 delete is a hard, unaudited removal (the entry and its image file) — no
 `state`/`superseded_by_id` machinery, matching alpha's existing
-no-supersede stance on adds. `alpha.md` is that slice's plan and
+no-supersede stance on adds. Because the registry YAML is hand-editable
+on disk (there's no `artifacts` table behind it — see below), every
+route that reads it treats a broken file as recoverable, not fatal:
+`registry.load_registry()` raises `RegistryError` (flashed, not a 500)
+on invalid YAML or a `software_registry` key that isn't a mapping, and
+`registry.check_registry()` — wired to a "Check registry" button, not
+run implicitly on page load, since it hashes every registered image on
+disk — walks every entry, silently re-deriving a stale `file_size`
+(cheap, non-security, always recoverable from the file itself) and
+flagging anything it can't safely fix on its own: a missing file, a
+checksum that no longer matches the bytes on disk, a malformed or
+incomplete entry. It never guesses at a wrong checksum. `alpha.md` is
+that slice's plan and
 records its deliberate deviations from `design-document.md` — no
 `artifacts` table, no Ansible dispatch, no `registry_jobs`/git-committed
 registry, sessions are Flask-Login's signed cookie rather than a

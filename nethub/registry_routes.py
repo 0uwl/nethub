@@ -10,7 +10,14 @@ registry_bp = Blueprint('registry', __name__)
 @registry_bp.route('/registry')
 @login_required
 def list_entries():
-    return render_template('pages/registry_list.html', entries=registry_store.list_entries())
+    try:
+        entries = registry_store.list_entries()
+    except registry_store.RegistryError as e:
+        # A hand-edited registry file can be unparsable -- show the error
+        # instead of a bare 500, same as the other registry routes.
+        flash(str(e))
+        entries = {}
+    return render_template('pages/registry_list.html', entries=entries)
 
 
 @registry_bp.route('/registry/new', methods=['GET', 'POST'])
@@ -39,4 +46,20 @@ def delete_entry(name):
         flash(str(e))
     else:
         flash(f'Deleted registry entry "{name}".')
+    return redirect(url_for('registry.list_entries'))
+
+
+@registry_bp.route('/registry/check', methods=['POST'])
+@login_required
+def check_entries():
+    # Hashes every registered image on disk -- deliberately a manual,
+    # admin-triggered action rather than something that runs on every
+    # /registry page load, since that could mean hashing gigabytes of
+    # images on every view.
+    issues = registry_store.check_registry()
+    if issues:
+        for issue in issues:
+            flash(issue)
+    else:
+        flash('Registry check found no issues.')
     return redirect(url_for('registry.list_entries'))

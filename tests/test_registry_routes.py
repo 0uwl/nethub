@@ -1,5 +1,8 @@
 import hashlib
 import io
+import os
+
+import yaml
 
 
 def test_list_entries_requires_login(client):
@@ -79,3 +82,40 @@ def test_delete_entry_unknown_name_flashes_error(logged_in_client):
     resp = logged_in_client.post('/registry/nope/delete', follow_redirects=True)
     assert resp.status_code == 200
     assert b'No entry named' in resp.data
+
+
+def test_check_entries_requires_login(client):
+    assert client.post('/registry/check').status_code == 302
+
+
+def test_check_entries_clean_registry_flashes_no_issues(logged_in_client):
+    resp = logged_in_client.post('/registry/check', follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'no issues' in resp.data
+
+
+def test_check_entries_flags_broken_entry(logged_in_client, app):
+    with app.app_context():
+        path = app.config['REGISTRY_FILE']
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            yaml.safe_dump(
+                {'software_registry': {'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1}}},
+                f,
+            )
+
+    resp = logged_in_client.post('/registry/check', follow_redirects=True)
+    assert resp.status_code == 200
+    assert b'not found' in resp.data
+
+
+def test_list_entries_survives_hand_broken_yaml(logged_in_client, app):
+    with app.app_context():
+        path = app.config['REGISTRY_FILE']
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write('software_registry: [this is not valid: yaml')
+
+    resp = logged_in_client.get('/registry')
+    assert resp.status_code == 200
+    assert b'not valid YAML' in resp.data
