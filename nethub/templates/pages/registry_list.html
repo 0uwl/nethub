@@ -21,6 +21,7 @@
   <thead>
     <tr>
       <th>Name</th>
+      <th>Version</th>
       <th>File name</th>
       <th>SHA-512</th>
       <th>File size</th>
@@ -31,6 +32,7 @@
     {% for name, entry in entries.items() %}
     <tr>
       <td>{{ name }}</td>
+      <td>{{ entry.version }}</td>
       <td>{{ entry.file_name }}</td>
       <td><code>{{ entry.sha512 }}</code></td>
       <td>{{ entry.file_size }}</td>

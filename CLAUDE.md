@@ -21,14 +21,14 @@ admin-driven user creation (`nethub/auth.py`), and a multi-registry
 publish flow. NetHub tracks any number of `software_registry`-bearing
 files rather than one hardcoded file: an admin bind-mounts each file
 somewhere under `REGISTRIES_ROOT`, then registers it from the
-Registries settings page (`nethub/registries_routes.py`) — NetHub reads
-the file for an existing `software_registry` key (adopting its entries
-if there are any) or collects a `search_dir` and writes a fresh one in.
-Each registered file is a `Registry` row (`nethub/models.py`) — a
-pointer NetHub owns, not a copy of the data; the file and its images
-stay the admin's. Entry-level publish/delete
-(`nethub/registry.py`, `nethub/registry_routes.py`, now scoped under
-`/registries/<id>/entries`) is otherwise the same flow as before: an
+Registries settings page (`nethub/registry_routes.py`'s `registries_bp`)
+— NetHub reads the file for an existing `software_registry` key
+(adopting its entries if there are any) or collects a `search_dir` and
+writes a fresh one in. Each registered file is a `Registry` row
+(`nethub/models.py`) — a pointer NetHub owns, not a copy of the data;
+the file and its images stay the admin's. Entry-level publish/delete
+(`nethub/registry.py`, `nethub/registry_routes.py`'s `registry_bp`,
+scoped under `/registries/<id>/entries`) is otherwise the same flow as before: an
 uploaded image plus a typed-in checksum become a new entry, deletable
 from the same list page. Entry delete is a hard, unaudited removal (the
 entry and its image file) — no `state`/`superseded_by_id` machinery,
@@ -108,7 +108,8 @@ ansible-lint ansible/              # Ansible lint, gated at `profile: min` (.ans
                                     # deliberate here (see "Ansible playbook notes")
 ```
 
-Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes,registries_routes}.py`
+Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
+(`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
 fixture, registry-row creation/adoption, entry upload/checksum validation). The
 `make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
@@ -127,12 +128,12 @@ push to `main` once both prior jobs pass. `ansible-lint` needs
 modules (no `requirements.yml` declares them), so the lint job installs
 both explicitly before running it.
 
-The Ansible playbooks (`ansible/stage_cisco_upgrade.yml`,
-`ansible/install_cisco_upgrade.yml`) are currently invoked by hand,
+The Ansible playbooks (`ansible/playbooks/stage_cisco_upgrade.yml`,
+`ansible/playbooks/install_cisco_upgrade.yml`) are currently invoked by hand,
 against a network device inventory not present in this repo:
 ```bash
-ansible-playbook ansible/stage_cisco_upgrade.yml -e stage_serial=1
-ansible-playbook ansible/install_cisco_upgrade.yml -e install_serial=1
+ansible-playbook ansible/playbooks/stage_cisco_upgrade.yml -e stage_serial=1
+ansible-playbook ansible/playbooks/install_cisco_upgrade.yml -e install_serial=1
 ```
 They target Cisco IOS-XE devices (`cisco.ios` collection, `network_cli`
 connection) and expect each host to define a `software_bundle` var
@@ -141,7 +142,7 @@ connection) and expect each host to define a `software_bundle` var
 (`push_scp` default, or `pull_sftp` plus `distribution_host` /
 `distribution_user` and a password from
 `DISTRIBUTION_PASSWORD`); it lives in
-`ansible/inventory/rendered/group_vars/all.yml` and is deployment-level,
+`ansible/inventory/group_vars/all.yml` and is deployment-level,
 never per-request. `stage_serial`/`install_serial` control how many
 hosts run per wave in each playbook (both default to 1); with a value
 >1, hosts in the same wave share this terminal's stdin for the
@@ -692,11 +693,11 @@ seems to require one, the design is what needs revisiting, not the rule.
 - **Day-2 transfer runs in whichever direction `image_transport` says,
   and the adapters are not interchangeable in their costs** (design doc
   §4.3.1). `push_scp` is the default: `ansible.netcommon.net_put` under
-  the `paramiko` connection type, in `ansible/tasks/push_image_scp.yml`.
+  the `paramiko` connection type, in `ansible/playbooks/tasks/push_image_scp.yml`.
   IOS-XE has no SFTP *server* (client only), so a push has no SFTP
   option — SCP is the only wire protocol available in that direction.
   `pull_sftp` is the alternative: one `copy sftp://…` on the device's own
-  CLI in `ansible/tasks/pull_image_sftp.yml`, driven with
+  CLI in `ansible/playbooks/tasks/pull_image_sftp.yml`, driven with
   `ansible.netcommon.cli_command` prompt/answer. `tasks/transfer_image.yml`
   dispatches between them and owns the shared `verify /sha512`.
   - The isolation layer is now *required*, reversing the previous rule
@@ -774,7 +775,7 @@ seems to require one, the design is what needs revisiting, not the rule.
   substituted *host*. That asymmetry is why the transport is an admin's
   decision and never a submitter's.
 
-## Ansible playbook notes (`ansible/stage_cisco_upgrade.yml`, `ansible/install_cisco_upgrade.yml`)
+## Ansible playbook notes (`ansible/playbooks/stage_cisco_upgrade.yml`, `ansible/playbooks/install_cisco_upgrade.yml`)
 
 Describes the playbooks as committed — hand-invoked scaffolding, not
 final. They're deliberately split in two to preview the idea behind
@@ -798,7 +799,7 @@ playbook as doing only one of the two.
   bite someone changing it; leave the argument in the design doc. The
   `## in`/`## out` headers at the top of each task file stay — they are
   the contract between task files and are worth the lines.
-- **Shared logic lives in `ansible/tasks/`, not roles.** There is no
+- **Shared logic lives in `ansible/playbooks/tasks/`, not roles.** There is no
   `iosxe_facts`/`batch_summary` role anymore:
   `tasks/collect_iosxe_facts.yml`, `tasks/resolve_target_bundle.yml`,
   `tasks/check_disk_space.yml`, `tasks/transfer_image.yml`,

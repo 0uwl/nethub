@@ -27,7 +27,7 @@ SQLALCHEMY_DATABASE_URI = 'sqlite:///' + DATABASE_PATH
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 # Cap request size so an upload can't exhaust disk/memory (1.5 GB, comfortably
-# above the largest IOS-XE images in ansible/inventory/rendered's example registry).
+# above the largest IOS-XE images in ansible/inventory's example registry).
 MAX_CONTENT_LENGTH = 1_500 * 1024 * 1024
 
 # Root directory an admin bind-mounts registry files into (e.g. a real

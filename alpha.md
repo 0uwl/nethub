@@ -93,7 +93,7 @@ multi-registry support (an admin can now track any number of
 `software_registry`-bearing files, e.g. several existing Ansible
 `group_vars/*.yml` files at once). An admin bind-mounts each file
 somewhere under `REGISTRIES_ROOT` (PyYAML, same shape as
-`ansible/inventory/rendered/group_vars/os_iosxe.yml` throughout — one
+`ansible/inventory/group_vars/os_iosxe.yml` throughout — one
 top-level `software_registry` key, sibling keys like `image_transport`
 left untouched), then registers it from the Registries settings page:
 NetHub reads the file for an existing `software_registry` key (adopting
@@ -111,21 +111,29 @@ software_registry:
   search_dir: "<config-driven path>"
   '<name>':
     file_name: <secure_filename(upload.filename)>
+    version: <the text-field value>
     sha512: <the text-field value, lowercased>
     file_size: <os.path.getsize of the saved file>
 ```
 
-No `version` field — it wasn't asked for, and nothing in the committed
-playbooks needs it for the tasks alpha touches. Add it if/when a form
-field for it shows up.
+`version` is a required field, not an omission — this was wrong in an
+earlier draft of this document, which claimed nothing committed needed
+it. `ansible/playbooks/tasks/resolve_target_bundle.yml` sets
+`target_version: "{{ target_bundle.version }}"`, and
+`install_cisco_upgrade.yml` depends on `target_version` throughout its
+pre-check (`current_version != target_version`), its install step, and
+its post-install verification (`ansible_net_version == target_version`)
+— an entry without one breaks the install playbook the moment a host is
+pointed at it. `check_registry()` flags any existing entry missing it,
+same as a missing `sha512`/`file_size`.
 
 Write path, in the upload route:
 
 1. Validate: name is non-empty and not already a key in the registry
    (reject outright — no supersede/overwrite flow in alpha, that's
    §6/§5's `state`/`superseded_by_id` machinery and it isn't built
-   yet); checksum matches `^[0-9a-fA-F]{128}$` (SHA-512 is 128 hex
-   chars); a file was actually uploaded.
+   yet); version is non-empty; checksum matches `^[0-9a-fA-F]{128}$`
+   (SHA-512 is 128 hex chars); a file was actually uploaded.
 2. Save the upload to the images directory under
    `secure_filename(file.filename)` — never trust the client-supplied
    name as a path. Reject if a file of that name already exists on
@@ -236,8 +244,9 @@ nethub/
   registry.py               -- per-registry load/save, the write-lock (public: `lock`),
                                  discover_files/inspect_file/sync_registry, hash check
   auth.py                   -- auth_bp: login/logout/user-management routes, register_cli(app)
-  registries_routes.py      -- registries_bp: /registries, /registries/new, /registries/<id>/delete
-  registry_routes.py        -- registry_bp: /registries/<id>/entries/*
+  registry_routes.py        -- registries_bp (/registries, /registries/new,
+                                 /registries/<id>/delete) and registry_bp
+                                 (/registries/<id>/entries/*), one file, two scopes
   gunicorn.conf.py           -- production-only: workers=1, bind from NETHUB_PORT,
                                  control_socket_disable=True
   templates/pages/login.html
@@ -255,9 +264,9 @@ Containerization (`Containerfile`, `Containerfile.dev`, `dev.sh`,
 section rather than here -- it's packaging around this slice, not a
 change to what the slice does.
 
-`auth.py`, `registry_routes.py`, and `registries_routes.py` are Flask
-blueprints (`auth_bp`, `registry_bp`, `registries_bp`) rather than
-routes hung directly off `app` — needed once
+`auth.py` and `registry_routes.py` are Flask blueprints (`auth_bp`, plus
+`registry_routes.py`'s own `registry_bp`/`registries_bp` pair) rather
+than routes hung directly off `app` — needed once
 two people (or two agents) were touching the route layer in parallel,
 and kept afterward since it's what let the whole thing move into a
 package without `nethub/__init__.py` becoming a dumping ground.

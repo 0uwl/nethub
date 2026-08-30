@@ -26,6 +26,7 @@ echo "==> Starting dev container (Flask debug/reload on :$NETHUB_PORT)"
 podman run --rm --name "$CONTAINER" \
     -p "${NETHUB_PORT}:${NETHUB_PORT}" \
     -v "$PWD:/app:Z" \
+    -v "./ansible/inventory/rendered/group_vars:/app/instance/registries:Z" \
     -e NETHUB_PORT \
     -e SECRET_KEY \
     -e ADMIN_USERNAME \

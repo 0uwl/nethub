@@ -4,9 +4,10 @@ Alpha's stand-in for §7.1's flock (see alpha.md "Registry storage") --
 sufficient because Flask alpha runs single-process/single-worker. Multiple
 Registry rows may point at files under REGISTRIES_ROOT; the lock is still
 global rather than per-registry, matching that same alpha simplification.
-`lock` is public (not `_lock`) because registries_routes.py's row-creation
-flow (duplicate-name/symlink-alias checks, then insert) needs the same
-serialization -- it's not otherwise touching this module's functions.
+`lock` is public (not `_lock`) because registry_routes.py's
+registries_bp row-creation flow (duplicate-name/symlink-alias checks,
+then insert) needs the same serialization -- it's not otherwise
+touching this module's functions.
 """
 import hashlib
 import os
@@ -61,7 +62,7 @@ def load_registry(registry):
         except yaml.YAMLError as e:
             raise RegistryError(f'Registry file is not valid YAML: {e}')
     # On-disk shape matches an Ansible group_vars file: entries live under a
-    # top-level `software_registry` key (see ansible/inventory/rendered),
+    # top-level `software_registry` key (see ansible/inventory/),
     # not at the file's root.
     entries = (data or {}).get('software_registry', {}) if isinstance(data, dict) else {}
     if not isinstance(entries, dict):
@@ -138,7 +139,7 @@ def _sha512_of_file(path):
     return h.hexdigest()
 
 
-def add_entry(registry, name, sha512, file_storage):
+def add_entry(registry, name, sha512, file_storage, version):
     with lock:
         data = load_registry(registry)
 
@@ -147,6 +148,15 @@ def add_entry(registry, name, sha512, file_storage):
             raise RegistryError('Name is required.')
         if name in data:
             raise RegistryError(f'An entry named "{name}" already exists.')
+
+        # Required, not cosmetic: ansible/playbooks/tasks/resolve_target_bundle.yml
+        # sets target_version from this field, and install_cisco_upgrade.yml
+        # uses target_version for its pre-check, the install command, and
+        # post-install verification -- an entry without one breaks the
+        # install playbook the moment someone points a host at it.
+        version = (version or '').strip()
+        if not version:
+            raise RegistryError('Version is required.')
 
         sha512 = (sha512 or '').strip().lower()
         if not _SHA512_RE.match(sha512):
@@ -183,6 +193,7 @@ def add_entry(registry, name, sha512, file_storage):
             'file_name': filename,
             'sha512': sha512,
             'file_size': os.path.getsize(dest_path),
+            'version': version,
         }
         _save_registry(registry, data)
 
@@ -236,7 +247,7 @@ def check_registry(registry):
                     issues.append(f'Entry "{name}": not a mapping, skipped.')
                     continue
 
-                missing = [f for f in ('file_name', 'sha512', 'file_size') if f not in entry]
+                missing = [f for f in ('file_name', 'sha512', 'file_size', 'version') if f not in entry]
                 if missing:
                     issues.append(f'Entry "{name}": missing {", ".join(missing)}.')
                     continue

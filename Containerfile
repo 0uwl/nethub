@@ -17,6 +17,6 @@ USER nethub
 
 EXPOSE 8080
 
-# /app/data and /app/registry are mount points (see quadlet/nethub.container)
+# /app/data and /app/registries are mount points (see quadlet/nethub.container)
 # -- do not bake content into the image; bind-mount them at runtime.
 ENTRYPOINT ["gunicorn", "-c", "nethub/gunicorn.conf.py", "nethub:create_app()"]

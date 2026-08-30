@@ -1,7 +1,7 @@
-"""HTTP tests for registry_routes.py -- the /registries/<id>/entries
-routes that list, add, delete and check one registry's entries.
-Registry-row (list/new/delete) routes are covered in
-tests/test_registries_routes.py.
+"""HTTP tests for registry_routes.py's registry_bp -- the
+/registries/<id>/entries routes that list, add, delete and check one
+registry's entries. Registry-row (list/new/delete) routes (registries_bp)
+are covered in tests/test_registries_routes.py.
 """
 import hashlib
 import io
@@ -38,6 +38,7 @@ def test_new_entry_upload_flow(logged_in_client, make_registry):
         data={
             'name': 'iosxe-17.9',
             'sha512': sha512,
+            'version': '17.9.1',
             'image': (io.BytesIO(content), 'image.bin'),
         },
         content_type='multipart/form-data',
@@ -56,12 +57,31 @@ def test_new_entry_bad_checksum_reshows_form_with_error(logged_in_client, make_r
         data={
             'name': 'bad',
             'sha512': 'not-a-real-hash',
+            'version': '17.9.1',
             'image': (io.BytesIO(b'x'), 'image.bin'),
         },
         content_type='multipart/form-data',
     )
     assert resp.status_code == 200
     assert b'128-character hex' in resp.data
+
+
+def test_new_entry_missing_version_reshows_form_with_error(logged_in_client, make_registry):
+    registry = make_registry()
+    content = b'image-bytes'
+    sha512 = hashlib.sha512(content).hexdigest()
+    resp = logged_in_client.post(
+        f'/registries/{registry.id}/entries/new',
+        data={
+            'name': 'iosxe-17.9',
+            'sha512': sha512,
+            'version': '',
+            'image': (io.BytesIO(content), 'image.bin'),
+        },
+        content_type='multipart/form-data',
+    )
+    assert resp.status_code == 200
+    assert b'Version is required' in resp.data
 
 
 def test_delete_entry_requires_login(client, make_registry):
@@ -78,6 +98,7 @@ def test_delete_entry_removes_it_from_the_list(logged_in_client, make_registry):
         data={
             'name': 'iosxe-17.9',
             'sha512': sha512,
+            'version': '17.9.1',
             'image': (io.BytesIO(content), 'image.bin'),
         },
         content_type='multipart/form-data',
@@ -119,7 +140,7 @@ def test_check_entries_flags_broken_entry(logged_in_client, app, make_registry):
         path = os.path.join(app.config['REGISTRIES_ROOT'], registry.file_path)
         with open(path, 'w') as f:
             yaml.safe_dump(
-                {'software_registry': {'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1}}},
+                {'software_registry': {'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1, 'version': '1.0'}}},
                 f,
             )
 

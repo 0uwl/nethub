@@ -100,7 +100,9 @@ Environment=SECRET_KEY=CHANGE_ME_use_openssl_rand_hex_32
 # Containerfile) doesn't consult it; it exists for `flask run`/dev.sh.
 #Environment=DEBUG=1
 
-# App only ever writes under /app/data, /app/registry, /tmp, /run.
+# App only ever writes under /app/data, /app/registries (plus whatever
+# per-registry search_dir volumes are mounted -- see the optional block
+# above), /tmp, /run.
 ReadOnly=true
 Tmpfs=/tmp
 Tmpfs=/run

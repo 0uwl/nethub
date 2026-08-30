@@ -2,9 +2,10 @@
 ## User-uploaded upgrade request.
 ##
 ## This is NOT an Ansible inventory. NetHub validates it and compiles it
-## into one (see rendered/) before any playbook runs. It carries exactly
-## two kinds of information: which hosts to upgrade this run, and which
-## published image each one should end up on.
+## into one (see hosts.yml, upgrade_batch.yml, group_vars/ in this same
+## directory) before any playbook runs. It carries exactly two kinds of
+## information: which hosts to upgrade this run, and which published
+## image each one should end up on.
 ##
 ## Everything else -- connection settings, credentials, and the image
 ## catalog itself -- is written by NetHub and cannot be set from here.

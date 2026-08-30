@@ -1,6 +1,7 @@
-"""HTTP tests for registries_routes.py -- the /registries routes that
-list, create, and delete Registry rows (which files NetHub tracks).
-Entry-scoped routes are covered in tests/test_registry_routes.py.
+"""HTTP tests for registry_routes.py's registries_bp -- the /registries
+routes that list, create, and delete Registry rows (which files NetHub
+tracks). Entry-scoped routes (registry_bp) are covered in
+tests/test_registry_routes.py.
 """
 import os
 

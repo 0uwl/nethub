@@ -1,0 +1,11 @@
+# The file containing the group 'upgrade_batch' which the playbooks stage_cisco_upgrade.yml and
+# install_cisco_upgrade.yml is run against. You can of course modify the structure of your
+# Asnible inventory after the way it's set up for you, but playbooks will run against this group only
+---
+upgrade_batch:
+  hosts:
+    test-switch:
+      software_bundle: "17.12.06_lite"
+
+    test-switch-2:
+      software_bundle: "17.12.08_lite"

@@ -1,0 +1,2 @@
+# Example of an empty registry which NetHub will populate when adopted
+# JunOS is example only, NetHub does not currently support JunOS auto upgrade

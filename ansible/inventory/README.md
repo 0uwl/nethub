@@ -1,17 +1,25 @@
 # Example inventory layout
 
-Sketch of how NetHub gets an inventory in front of `upgrade_iosxe.yml`.
-Two files, two owners, and the boundary between them is the point.
+Sketch of how NetHub gets an inventory in front of the upgrade
+playbooks (`ansible/playbooks/stage_cisco_upgrade.yml` and
+`install_cisco_upgrade.yml`). One file the user owns; everything else
+NetHub renders. The boundary between them is the point.
 
 ```
 upgrade_request.example.yml   <- the user uploads this
-rendered/                     <- NetHub writes this, per job
-  hosts.yml
-  group_vars/
-    all.yml
-    iosxe/
-      vars.yml                (software_registry projection)
+hosts.yml                     <- NetHub writes this, per job
+upgrade_batch.yml             <- NetHub writes this, per job
+group_vars/
+  all.yml
+  os_iosxe.yml                (software_registry projection)
+  os_junos.yml                (illustrates an adopted-but-empty registry --
+                               see "What went away" below)
 ```
+
+Everything but `upgrade_request.example.yml` illustrates NetHub's
+*output* — there's no `rendered/` subdirectory marking that boundary
+anymore, just the `.example.yml` suffix on the one file that's actually
+a submitted request rather than something NetHub produced.
 
 ## Why the split
 
@@ -58,13 +66,21 @@ playbook -- code review -- not a runtime upload.
 
 ## What went away
 
-- **The master fleet inventory** (`hosts.yml` in the original). 8 calls
-  for "a minimal per-job ... inventory rather than the full fleet
-  inventory", and 2 rules out being an inventory manager. Hosts arrive
-  with a request and leave with the job.
-- **`group_vars/junos.yml`.** Out of vendor scope (2.1). The
-  platform-keyed directory shape is kept so adding it back is an
-  addition, not a rework.
+- **The master fleet inventory.** 8 calls for "a minimal per-job ...
+  inventory rather than the full fleet inventory", and 2 rules out
+  being an inventory manager. `hosts.yml` here is that minimal per-job
+  rendering (two illustrative hosts), not a persistent fleet inventory
+  NetHub maintains — hosts arrive with a request and leave with the job.
+- **`group_vars/junos.yml` as upgrade support.** Out of vendor scope
+  (2.1) — NetHub does not dispatch upgrades for it, and
+  `group_vars/os_junos.yml`'s own header comment says so. It's kept in
+  this example tree for a different reason than the original bullet
+  had: it illustrates the *adopted-but-empty* registry case (a file
+  with no `software_registry` key yet, which NetHub writes one into on
+  adoption) rather than a rendered projection of real entries. The
+  platform-keyed naming (`os_<platform>.yml`) is the same shape a real
+  second platform would use, so adding one back is still an addition,
+  not a rework.
 - **`scp_pass` riding on `ansible_user`, and `vault.yml` with it.** Under
   the push transport there is no second, distribution-specific account or
   password to render at all — the image travels over the same credential
@@ -73,8 +89,7 @@ playbook -- code review -- not a runtime upload.
   `distribution_user` is a var, the password is injected per execution
   (§9.1) and never lands in the `private_data_dir`'s inventory. A vault
   would only re-add a key to dispose of, which is why it stayed gone. See
-  the comment in `rendered/group_vars/all.yml`.
+  the comment in `group_vars/all.yml`.
 - **`ansible_become` / `ansible_become_method`.** NetHub requires
   privilege 15 at login (§4.3), so there is no escalation step and no
-  `become_password` to collect. See the comment in
-  `rendered/group_vars/all.yml`.
+  `become_password` to collect. See the comment in `group_vars/all.yml`.

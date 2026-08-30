@@ -15,6 +15,11 @@
   </div>
 
   <div class="form-group">
+    <label for="version">Version</label>
+    <input type="text" class="form-control" id="version" name="version" value="{{ version }}" required>
+  </div>
+
+  <div class="form-group">
     <label for="sha512">SHA-512 checksum</label>
     <input type="text" class="form-control" id="sha512" name="sha512" value="{{ sha512 }}" required>
   </div>
@@ -27,5 +32,32 @@
   <button type="submit" class="btn btn-primary">Upload</button>
   <a href="{{ url_for('registry.list_entries', registry_id=registry.id) }}" class="btn btn-default">Cancel</a>
 </form>
+
+<script>
+(function () {
+  var imageInput = document.getElementById('image');
+  var versionInput = document.getElementById('version');
+  if (!imageInput || !versionInput) return;
+
+  // Best-effort suggestion only, not validated server-side as a version
+  // format. Cisco IOS-XE image names embed the version as 2-4
+  // dot-separated numbers, sometimes with a trailing rebuild letter (e.g.
+  // cat9k_lite_iosxe.17.12.06a.SPA.bin) -- captured group excludes that
+  // letter, since the field should hold digits/dots only. The lookbehind
+  // stops it matching into a trailing digit of the platform/feature-set
+  // name (e.g. the "9" in "...-universalk9.17.13.01a...", otherwise
+  // matched as if it were part of the version). Always editable.
+  var VERSION_RE = /(?<![a-zA-Z0-9])(\d+(?:\.\d+){1,3})[a-z]?/i;
+
+  imageInput.addEventListener('change', function () {
+    var file = imageInput.files[0];
+    if (!file) return;
+    var match = file.name.match(VERSION_RE);
+    if (match) {
+      versionInput.value = match[1];
+    }
+  });
+}());
+</script>
 
 {% endblock %}

@@ -34,7 +34,7 @@ def test_list_entries_empty_for_fresh_registry(app, make_registry):
 def test_load_registry_search_dir_reflects_db_row(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         assert registry_store.load_registry(registry)['search_dir'] == registry.search_dir
 
 
@@ -63,31 +63,42 @@ def test_load_registry_raises_when_file_missing(app, make_registry):
 def test_add_entry_success(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         entries = registry_store.list_entries(registry)
         assert entries['iosxe-17.9']['sha512'] == _sha512()
         assert entries['iosxe-17.9']['file_name'] == 'image.bin'
         assert entries['iosxe-17.9']['file_size'] == len(b'fake-image-bytes')
+        assert entries['iosxe-17.9']['version'] == '17.9.1'
 
 
 def test_add_entry_rejects_missing_name(app, make_registry):
     registry = make_registry()
     with app.app_context(), pytest.raises(registry_store.RegistryError, match='Name is required'):
-        registry_store.add_entry(registry, '', _sha512(), _file())
+        registry_store.add_entry(registry, '', _sha512(), _file(), '17.9.1')
+
+
+def test_add_entry_rejects_missing_version(app, make_registry):
+    """version is required, not cosmetic -- ansible/playbooks/tasks/resolve_target_bundle.yml
+    sets target_version from it, and install_cisco_upgrade.yml depends on
+    target_version throughout its pre-check, install, and post-verify steps.
+    """
+    registry = make_registry()
+    with app.app_context(), pytest.raises(registry_store.RegistryError, match='Version is required'):
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '')
 
 
 def test_add_entry_rejects_duplicate_name(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'dup', _sha512(), _file())
+        registry_store.add_entry(registry, 'dup', _sha512(), _file(), '17.9.1')
         with pytest.raises(registry_store.RegistryError, match='already exists'):
-            registry_store.add_entry(registry, 'dup', _sha512(b'other'), _file(b'other'))
+            registry_store.add_entry(registry, 'dup', _sha512(b'other'), _file(b'other'), '17.9.1')
 
 
 def test_add_entry_rejects_bad_checksum_format(app, make_registry):
     registry = make_registry()
     with app.app_context(), pytest.raises(registry_store.RegistryError, match='128-character hex'):
-        registry_store.add_entry(registry, 'bad-hash', 'not-a-hash', _file())
+        registry_store.add_entry(registry, 'bad-hash', 'not-a-hash', _file(), '17.9.1')
 
 
 def test_add_entry_rejects_checksum_mismatch_and_cleans_up_file(app, make_registry):
@@ -95,7 +106,7 @@ def test_add_entry_rejects_checksum_mismatch_and_cleans_up_file(app, make_regist
     with app.app_context():
         wrong_hash = _sha512(b'not-the-real-content')
         with pytest.raises(registry_store.RegistryError, match='Checksum mismatch'):
-            registry_store.add_entry(registry, 'bad-checksum', wrong_hash, _file())
+            registry_store.add_entry(registry, 'bad-checksum', wrong_hash, _file(), '17.9.1')
         # rejected upload must not leave an orphaned file or registry entry
         assert registry_store.list_entries(registry) == {}
         assert os.listdir(registry.search_dir) == []
@@ -111,24 +122,24 @@ def test_add_entry_refuses_to_write_through_dangling_symlink(app, make_registry,
     with app.app_context():
         os.symlink(str(target), os.path.join(registry.search_dir, 'image.bin'))
         with pytest.raises(registry_store.RegistryError, match='already exists'):
-            registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+            registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
     assert not target.exists()
 
 
 def test_add_entry_rejects_missing_file(app, make_registry):
     registry = make_registry()
     with app.app_context(), pytest.raises(registry_store.RegistryError, match='image file is required'):
-        registry_store.add_entry(registry, 'no-file', _sha512(), None)
+        registry_store.add_entry(registry, 'no-file', _sha512(), None, '17.9.1')
 
 
 def test_on_disk_file_nests_entries_under_software_registry_key(app, make_registry):
     """The written YAML must match the shape Ansible group_vars expects
-    (ansible/inventory/rendered/group_vars/os_iosxe.yml): entries live
+    (ansible/inventory/group_vars/os_iosxe.yml): entries live
     under a top-level `software_registry` key, not at the file root.
     """
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         with open(os.path.join(app.config['REGISTRIES_ROOT'], registry.file_path)) as f:
             on_disk = yaml.safe_load(f)
         assert set(on_disk.keys()) == {'software_registry'}
@@ -146,7 +157,7 @@ def test_add_entry_preserves_sibling_keys(app, make_registry):
             'distribution_host': 'dist.example.com',
             'software_registry': {},
         })
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         with open(os.path.join(app.config['REGISTRIES_ROOT'], registry.file_path)) as f:
             on_disk = yaml.safe_load(f)
         assert on_disk['image_transport'] == 'push_scp'
@@ -157,7 +168,7 @@ def test_add_entry_preserves_sibling_keys(app, make_registry):
 def test_delete_entry_preserves_sibling_keys(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         # list_entries (unlike load_registry) already excludes search_dir,
         # so writing it back raw doesn't create a fake entry named that
         _write_raw_registry(app, registry, {
@@ -180,7 +191,7 @@ def test_delete_entry_preserves_sibling_keys(app, make_registry):
 def test_delete_entry_removes_entry_and_file(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         image_path = os.path.join(registry.search_dir, 'image.bin')
         assert os.path.exists(image_path)
 
@@ -227,7 +238,7 @@ def test_delete_entry_refuses_non_mapping_entry(app, make_registry):
 def test_check_registry_clean_registry_has_no_issues(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         assert registry_store.check_registry(registry) == []
 
 
@@ -236,7 +247,7 @@ def test_check_registry_flags_missing_file(app, make_registry):
     with app.app_context():
         _write_raw_registry(app, registry, {
             'software_registry': {
-                'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1},
+                'ghost': {'file_name': 'nope.bin', 'sha512': 'a' * 128, 'file_size': 1, 'version': '1.0'},
             }
         })
         issues = registry_store.check_registry(registry)
@@ -247,7 +258,7 @@ def test_check_registry_flags_missing_file(app, make_registry):
 def test_check_registry_flags_checksum_mismatch_without_touching_it(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         # simulate a hand-edit that swaps in a wrong (but well-formed) checksum
         raw = registry_store.load_registry(registry)
         raw.pop('search_dir', None)
@@ -272,6 +283,7 @@ def test_check_registry_flags_missing_fields(app, make_registry):
         assert 'missing' in issues[0]
         assert 'sha512' in issues[0]
         assert 'file_size' in issues[0]
+        assert 'version' in issues[0]
 
 
 def test_check_registry_flags_path_traversal_file_name_without_reading_it(app, make_registry, tmp_path):
@@ -284,7 +296,7 @@ def test_check_registry_flags_path_traversal_file_name_without_reading_it(app, m
     with app.app_context():
         _write_raw_registry(app, registry, {
             'software_registry': {
-                'evil': {'file_name': str(secret), 'sha512': 'a' * 128, 'file_size': 1},
+                'evil': {'file_name': str(secret), 'sha512': 'a' * 128, 'file_size': 1, 'version': '1.0'},
             }
         })
         issues = registry_store.check_registry(registry)
@@ -316,7 +328,7 @@ def test_check_registry_flags_invalid_yaml(app, make_registry):
 def test_check_registry_silently_fixes_stale_file_size(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         image_path = os.path.join(registry.search_dir, 'image.bin')
         # simulate a hand-edit typo in file_size -- the file itself (and its
         # real checksum) is untouched, so this is safely re-derivable
@@ -340,7 +352,7 @@ def test_save_registry_refuses_non_mapping_document(app, make_registry):
         with open(path, 'w') as f:
             yaml.safe_dump(['this', 'is', 'a', 'list'], f)
         with pytest.raises(registry_store.RegistryError, match='not a mapping'):
-            registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+            registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         # refused, not silently replaced -- original content survives
         with open(path) as f:
             assert yaml.safe_load(f) == ['this', 'is', 'a', 'list']
@@ -349,7 +361,7 @@ def test_save_registry_refuses_non_mapping_document(app, make_registry):
 def test_save_registry_does_not_leave_tmp_file_behind(app, make_registry):
     registry = make_registry()
     with app.app_context():
-        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file())
+        registry_store.add_entry(registry, 'iosxe-17.9', _sha512(), _file(), '17.9.1')
         path = os.path.join(app.config['REGISTRIES_ROOT'], registry.file_path)
         assert not os.path.exists(f'{path}.tmp')
 

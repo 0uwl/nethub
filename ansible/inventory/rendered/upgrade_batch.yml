@@ -1,8 +1,0 @@
----
-upgrade_batch:
-  hosts:
-    test-switch:
-      software_bundle: "17.12.06_lite"
-
-    test-switch-2:
-      software_bundle: "17.12.08_lite"
