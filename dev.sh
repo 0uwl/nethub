@@ -3,10 +3,10 @@
 # repo bind-mounted in at /app, so edits on the host take effect live via
 # Flask's reloader with no rebuild needed. Browse to http://localhost:8080.
 #
-# database.db and instance/registry/ land inside the bind-mounted repo (the
-# app's own defaults, unchanged from running it directly on the host), so
-# dev data persists across restarts without a separate volume; both are
-# already gitignored.
+# database.db and instance/registries/ land inside the bind-mounted repo
+# (the app's own defaults, unchanged from running it directly on the
+# host), so dev data persists across restarts without a separate volume;
+# both are already gitignored.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -31,6 +31,5 @@ podman run --rm --name "$CONTAINER" \
     -e ADMIN_USERNAME \
     -e ADMIN_PASSWORD \
     -e DATABASE_PATH \
-    -e IMAGE_DIR \
-    -e REGISTRY_FILE \
+    -e REGISTRIES_ROOT \
     "$IMAGE" --port "$NETHUB_PORT"

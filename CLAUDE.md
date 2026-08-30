@@ -17,29 +17,51 @@ don't assume it still exists without checking `gunicorn --help` against
 whatever version `requirements.txt` actually resolves). It implements a
 first slice of the Software Lifecycle module: local username/password
 auth (everyone who can log in is an admin — no roles, no OIDC),
-admin-driven user creation (`nethub/auth.py`), and a registry-publish
-flow (`nethub/registry.py`, `nethub/registry_routes.py`) where an
-uploaded image plus a typed-in checksum become a new `software_registry`
-entry in a NetHub-owned YAML file, deletable from the same list page. A
-delete is a hard, unaudited removal (the entry and its image file) — no
-`state`/`superseded_by_id` machinery, matching alpha's existing
-no-supersede stance on adds. Because the registry YAML is hand-editable
-on disk (there's no `artifacts` table behind it — see below), every
-route that reads it treats a broken file as recoverable, not fatal:
-`registry.load_registry()` raises `RegistryError` (flashed, not a 500)
-on invalid YAML or a `software_registry` key that isn't a mapping, and
-`registry.check_registry()` — wired to a "Check registry" button, not
-run implicitly on page load, since it hashes every registered image on
-disk — walks every entry, silently re-deriving a stale `file_size`
-(cheap, non-security, always recoverable from the file itself) and
-flagging anything it can't safely fix on its own: a missing file, a
-checksum that no longer matches the bytes on disk, a malformed or
-incomplete entry. It never guesses at a wrong checksum. `alpha.md` is
+admin-driven user creation (`nethub/auth.py`), and a multi-registry
+publish flow. NetHub tracks any number of `software_registry`-bearing
+files rather than one hardcoded file: an admin bind-mounts each file
+somewhere under `REGISTRIES_ROOT`, then registers it from the
+Registries settings page (`nethub/registries_routes.py`) — NetHub reads
+the file for an existing `software_registry` key (adopting its entries
+if there are any) or collects a `search_dir` and writes a fresh one in.
+Each registered file is a `Registry` row (`nethub/models.py`) — a
+pointer NetHub owns, not a copy of the data; the file and its images
+stay the admin's. Entry-level publish/delete
+(`nethub/registry.py`, `nethub/registry_routes.py`, now scoped under
+`/registries/<id>/entries`) is otherwise the same flow as before: an
+uploaded image plus a typed-in checksum become a new entry, deletable
+from the same list page. Entry delete is a hard, unaudited removal (the
+entry and its image file) — no `state`/`superseded_by_id` machinery,
+matching alpha's existing no-supersede stance on adds; *registry* delete
+(forgetting a `Registry` row) is deliberately the opposite — it never
+touches the file or its images, only NetHub's own pointer to them.
+Because the registry YAML is hand-editable on disk (there's no
+`artifacts` table behind it — see below) and, per the settings flow
+above, may not even originate from NetHub, every route that reads or
+writes it treats both a broken file and a hostile one as recoverable,
+not fatal: `registry.load_registry()` raises `RegistryError` (flashed,
+not a 500) on invalid YAML or a `software_registry` key that isn't a
+mapping; `registry._save_registry()` is a path-escape-guarded,
+read-modify-write, atomic (temp file + `os.replace`) save that preserves
+every sibling key in the file (`image_transport`, `distribution_host`,
+...) rather than overwriting the whole document; a `file_name` read back
+out of the file is revalidated through `secure_filename` before
+`delete_entry`/`check_registry` will touch a path built from it, since a
+hand-edited value there is exactly as untrusted as one a submitter typed
+in; and `registry.check_registry()` — wired to a "Check registry"
+button, not run implicitly on page load, since it hashes every
+registered image on disk — walks every entry, silently re-deriving a
+stale `file_size` (cheap, non-security, always recoverable from the file
+itself) and flagging anything it can't safely fix on its own: a missing
+file, a checksum that no longer matches the bytes on disk, a malformed
+or incomplete entry. It never guesses at a wrong checksum. `alpha.md` is
 that slice's plan and
 records its deliberate deviations from `design-document.md` — no
 `artifacts` table, no Ansible dispatch, no `registry_jobs`/git-committed
 registry, sessions are Flask-Login's signed cookie rather than a
-`sessions` row (§4.5). Provisioning (day-0) is entirely unimplemented.
+`sessions` row (§4.5); the multi-registry `Registry` table is an alpha
+addition with no design-doc counterpart, not a stand-in for one.
+Provisioning (day-0) is entirely unimplemented.
 The playbooks under `ansible/` are hand-invoked scaffolding, not yet
 wired to anything NetHub provides — see "Ansible playbook notes" below
 for their current shape and where they're headed. Treat
@@ -86,9 +108,11 @@ ansible-lint ansible/              # Ansible lint, gated at `profile: min` (.ans
                                     # deliberate here (see "Ansible playbook notes")
 ```
 
-Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
+Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes,registries_routes}.py`
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
-fixture, registry upload/checksum validation). `pyproject.toml`'s
+fixture, registry-row creation/adoption, entry upload/checksum validation). The
+`make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
+file under a temp `REGISTRIES_ROOT` and creates its `Registry` row. `pyproject.toml`'s
 `[tool.pytest.ini_options] pythonpath = ["."]` is why bare `pytest` can
 `import nethub` — without it only `python -m pytest` (which puts the cwd on
 `sys.path` itself) could.
@@ -183,8 +207,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 |---|---|---|
 | `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
-| `IMAGE_DIR` | `<repo root>/instance/registry/images` | Where uploaded images are stored — set to a path under the `/app/registry` volume in the container. |
-| `REGISTRY_FILE` | `<repo root>/instance/registry/software_registry.yml` | Full path to the registry YAML file — independent of `IMAGE_DIR` (no shared "root" var), so it can point at a bind-mounted host file (e.g. a real Ansible `group_vars/os_iosxe.yml`) and have publishing write straight into it. |
+| `REGISTRIES_ROOT` | `<repo root>/instance/registries` | Root directory an admin bind-mounts registry files into — every `Registry.file_path` is resolved (and path-escape-checked) relative to this. Replaces the old `IMAGE_DIR`/`REGISTRY_FILE` pair; there is no separate images root, since each registry's own `search_dir` (set from the Registries settings page, not an env var) is typically a much larger, independently-mounted volume. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
 | `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |

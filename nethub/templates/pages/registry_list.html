@@ -1,14 +1,16 @@
 {% extends 'layouts/main.html' %}
-{% block title %}Software Registry{% endblock %}
+{% block title %}{{ registry.name }}{% endblock %}
 {% block content %}
 
+<p><a href="{{ url_for('registries.list_registries') }}">&laquo; Registries</a></p>
+
 <div class="page-header">
-  <h1>Software Registry</h1>
+  <h1>{{ registry.name }}</h1>
 </div>
 
 <p>
-  <a href="{{ url_for('registry.new_entry') }}" class="btn btn-primary">Add new</a>
-  <form method="post" action="{{ url_for('registry.check_entries') }}" style="display:inline">
+  <a href="{{ url_for('registry.new_entry', registry_id=registry.id) }}" class="btn btn-primary">Add new</a>
+  <form method="post" action="{{ url_for('registry.check_entries', registry_id=registry.id) }}" style="display:inline">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button type="submit" class="btn btn-default">Check registry</button>
   </form>
@@ -33,7 +35,7 @@
       <td><code>{{ entry.sha512 }}</code></td>
       <td>{{ entry.file_size }}</td>
       <td>
-        <form method="post" action="{{ url_for('registry.delete_entry', name=name) }}" onsubmit="return confirm('Delete registry entry \'{{ name }}\'?');">
+        <form method="post" action="{{ url_for('registry.delete_entry', registry_id=registry.id, name=name) }}" onsubmit="return confirm('Delete this registry entry?');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="btn btn-danger btn-sm">Delete</button>
         </form>

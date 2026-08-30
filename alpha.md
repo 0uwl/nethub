@@ -58,7 +58,7 @@ needed at this scale.
 
 ## Data model
 
-One table, via Flask-SQLAlchemy:
+Two tables, via Flask-SQLAlchemy:
 
 ```
 User
@@ -66,25 +66,43 @@ User
   username      str, unique
   password_hash str
   created_at    datetime
+
+Registry
+  id            int, pk
+  name          str, unique
+  file_path     str, unique -- relative to REGISTRIES_ROOT
+  search_dir    str         -- absolute path; DB-authoritative (see below)
+  created_at    datetime
 ```
 
 No `role` column — everyone who authenticates is an admin. Add it back
 when a second role exists to distinguish (design doc §4.4); a column
 with one always-true value is a column that does nothing yet.
 
-No `artifacts` table in alpha. The registry YAML file *is* the store —
-see below. This is the biggest deviation from §5 and is called out
+No `artifacts` table in alpha. Each registry's YAML file *is* the store
+for its entries — see below. `Registry` is a pointer table (which files
+NetHub tracks, and where their images live), not a copy of artifact
+data, and has no design-doc counterpart of its own — the absence of
+`artifacts` is still the biggest deviation from §5 and is called out
 explicitly in "Deviations."
 
 ## Registry storage
 
-`software_registry.yml` (PyYAML, same shape as
-`ansible/inventory/rendered/group_vars/os_iosxe.yml`) lives under a
-path alpha owns — e.g. `instance/registry/software_registry.yml` —
-**not** inside `ansible/inventory/rendered/`, which CLAUDE.md documents
-as a design sketch, not a real output target. Uploaded images go in a
-sibling directory, e.g. `instance/registry/images/`, matching whatever
-`search_dir` the rendered file declares.
+Originally one hardcoded `software_registry.yml`; superseded by
+multi-registry support (an admin can now track any number of
+`software_registry`-bearing files, e.g. several existing Ansible
+`group_vars/*.yml` files at once). An admin bind-mounts each file
+somewhere under `REGISTRIES_ROOT` (PyYAML, same shape as
+`ansible/inventory/rendered/group_vars/os_iosxe.yml` throughout — one
+top-level `software_registry` key, sibling keys like `image_transport`
+left untouched), then registers it from the Registries settings page:
+NetHub reads the file for an existing `software_registry` key (adopting
+its entries if present) or collects a `search_dir` from the admin and
+writes a fresh one in. Each registered file becomes a `Registry` row.
+Uploaded images for a given registry go in *that registry's own*
+`search_dir` — no shared images directory, since each registry's
+`search_dir` is independently admin-supplied and typically a much
+larger, separately-mounted volume than `REGISTRIES_ROOT` itself.
 
 Entry shape written per submission:
 
@@ -120,12 +138,22 @@ Write path, in the upload route:
    keep even though alpha doesn't compute the hash *authoritatively* —
    it just stops a fat-fingered checksum or a corrupted upload from
    silently entering the registry.
-4. Read the current YAML, add the entry, write it back, all under a
-   single process-wide `threading.Lock()`. That's the alpha-sized
-   substitute for §7.1's `flock` — sufficient because Flask alpha runs
+4. Read the current YAML, add the entry, write it back (path-escape
+   checked against `REGISTRIES_ROOT`, read-modify-write so sibling keys
+   survive, written atomically via a temp file + `os.replace`), all
+   under a single process-wide `threading.Lock()` (`registry.lock` —
+   public, not `_lock`, since the registries settings routes' row-
+   creation flow shares it too). That's the alpha-sized substitute for
+   §7.1's `flock` — sufficient because Flask alpha runs
    single-process/single-worker anyway (same constraint the full design
-   already imposes for unrelated reasons, §3.2), and two admins
-   submitting at once are the only concurrent writers that exist.
+   already imposes for unrelated reasons, §3.2), and still global rather
+   than per-registry even with multiple registries now in play; two
+   admins submitting at once are the only concurrent writers that exist.
+   A `file_name` read back out of the file is revalidated through
+   `secure_filename` before delete/check will touch a path built from
+   it — the file is hand-editable (and, now, may be an admin's
+   pre-existing file NetHub never wrote), so it's untrusted on the way
+   in exactly like a submitted upload filename is.
 
 ## Auth flow
 
@@ -152,8 +180,13 @@ Write path, in the upload route:
 |---|---|---|---|
 | `/login` | GET/POST | none | authenticate |
 | `/logout` | POST | required | end session |
-| `/registry` | GET | required | list current entries |
-| `/registry/new` | GET/POST | required | the upload form |
+| `/registries` | GET | required | list tracked registries |
+| `/registries/new` | GET/POST | required | adopt/create a registry from a file under `REGISTRIES_ROOT` |
+| `/registries/<id>/delete` | POST | required | forget a registry (row only — file/images untouched) |
+| `/registries/<id>/entries` | GET | required | list one registry's current entries |
+| `/registries/<id>/entries/new` | GET/POST | required | the upload form |
+| `/registries/<id>/entries/<name>/delete` | POST | required | delete one entry (and its image) |
+| `/registries/<id>/entries/check` | POST | required | hash-check one registry's entries against disk |
 | `/users` | GET | required | list users |
 | `/users/new` | GET/POST | required | create a user |
 
@@ -168,10 +201,12 @@ Write path, in the upload route:
 - Add `MAX_CONTENT_LENGTH` so an unbounded upload isn't a free DoS
   against disk/memory — this is a trust-boundary input, not a
   hypothetical.
-- Add `IMAGE_DIR` and `REGISTRY_FILE`, each read from env with its own
-  sane local default -- no shared "root" var, since the registry file
-  needs to be independently pointable at a bind-mounted host file
-  (a real Ansible `group_vars` file) while images stay put.
+- Add `REGISTRIES_ROOT`, read from env with a sane local default —
+  the one directory an admin bind-mounts registry files into. (Originally
+  a separate `IMAGE_DIR`/`REGISTRY_FILE` pair for the single-registry
+  design; superseded once multiple registries needed a shared root to
+  discover files under, each with its own admin-supplied `search_dir`
+  instead of one shared images directory.)
 
 ## File/module layout
 
@@ -197,13 +232,17 @@ nethub/
   bootstrap.py               -- bootstrap_admin(): creates the first user on an empty
                                  database from ADMIN_USERNAME/ADMIN_PASSWORD/credential/random
   extensions.py             -- shared db/login_manager/csrf instances
-  models.py                 -- User
-  registry.py               -- load/save software_registry.yml, the write-lock, hash check
+  models.py                 -- User, Registry
+  registry.py               -- per-registry load/save, the write-lock (public: `lock`),
+                                 discover_files/inspect_file/sync_registry, hash check
   auth.py                   -- auth_bp: login/logout/user-management routes, register_cli(app)
-  registry_routes.py        -- registry_bp: /registry, /registry/new
+  registries_routes.py      -- registries_bp: /registries, /registries/new, /registries/<id>/delete
+  registry_routes.py        -- registry_bp: /registries/<id>/entries/*
   gunicorn.conf.py           -- production-only: workers=1, bind from NETHUB_PORT,
                                  control_socket_disable=True
   templates/pages/login.html
+  templates/pages/registries_list.html
+  templates/pages/registries_new.html
   templates/pages/registry_list.html
   templates/pages/registry_new.html
   templates/pages/users_list.html
@@ -216,8 +255,9 @@ Containerization (`Containerfile`, `Containerfile.dev`, `dev.sh`,
 section rather than here -- it's packaging around this slice, not a
 change to what the slice does.
 
-`auth.py` and `registry_routes.py` are Flask blueprints (`auth_bp`,
-`registry_bp`) rather than routes hung directly off `app` — needed once
+`auth.py`, `registry_routes.py`, and `registries_routes.py` are Flask
+blueprints (`auth_bp`, `registry_bp`, `registries_bp`) rather than
+routes hung directly off `app` — needed once
 two people (or two agents) were touching the route layer in parallel,
 and kept afterward since it's what let the whole thing move into a
 package without `nethub/__init__.py` becoming a dumping ground.

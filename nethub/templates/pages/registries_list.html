@@ -1,0 +1,43 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Registries{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Registries</h1>
+</div>
+
+<p><a href="{{ url_for('registries.new_registry') }}" class="btn btn-primary">New registry</a></p>
+
+{% if registries %}
+<table class="table table-striped">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>File</th>
+      <th>Search dir</th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for reg in registries %}
+    <tr>
+      <td>{{ reg.name }}</td>
+      <td><code>{{ reg.file_path }}</code></td>
+      <td><code>{{ reg.search_dir }}</code></td>
+      <td><a href="{{ url_for('registry.list_entries', registry_id=reg.id) }}">View entries</a></td>
+      <td>
+        <form method="post" action="{{ url_for('registries.delete_registry', registry_id=reg.id) }}" onsubmit="return confirm('Stop tracking this registry? The file and its images are left untouched.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="lead">No registries yet.</p>
+{% endif %}
+
+{% endblock %}

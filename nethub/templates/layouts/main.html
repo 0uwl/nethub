@@ -48,7 +48,7 @@
         {% if current_user.is_authenticated %}
         <div class="collapse navbar-collapse">
           <ul class="nav navbar-nav">
-            <li><a href="{{ url_for('registry.list_entries') }}">Registry</a></li>
+            <li><a href="{{ url_for('registries.list_registries') }}">Registries</a></li>
             <li><a href="{{ url_for('auth.list_users') }}">Users</a></li>
           </ul>
           <form class="navbar-form navbar-right" method="post" action="{{ url_for('auth.logout') }}">

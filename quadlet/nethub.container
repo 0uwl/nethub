@@ -34,27 +34,26 @@ UserNS=keep-id:uid=1000,gid=1000
 PublishPort=8080:8080
 
 # --- Required ---
-# /app/data holds the SQLite database. /app/registry holds
-# software_registry.yml and the uploaded images it describes. %h expands to
-# the invoking user's home directory. :Z relabels for SELinux hosts;
-# harmless if SELinux is disabled. IMAGE_DIR and REGISTRY_FILE are
-# independent paths (no shared "root" var) -- both must be set explicitly
-# here since config.py's own defaults fall under the read-only image, not
-# a writable volume.
+# /app/data holds the SQLite database. /app/registries is REGISTRIES_ROOT
+# -- every file an admin wants NetHub to track/manage as a registry (see
+# the Registries settings page) must be bind-mounted somewhere under it.
+# %h expands to the invoking user's home directory. :Z relabels for
+# SELinux hosts; harmless if SELinux is disabled.
 Volume=%h/.local/share/nethub/data:/app/data:Z
-Volume=%h/.local/share/nethub/registry:/app/registry:Z
+Volume=%h/.local/share/nethub/registries:/app/registries:Z
 Environment=DATABASE_PATH=/app/data/database.db
-Environment=IMAGE_DIR=/app/registry/images
-Environment=REGISTRY_FILE=/app/registry/software_registry.yml
+Environment=REGISTRIES_ROOT=/app/registries
 
 # --- Optional ---
-# Point REGISTRY_FILE elsewhere and bind-mount that exact path to a real
-# Ansible group_vars file on the host (e.g. an os_iosxe.yml under
-# ansible/inventory/rendered) so publishing writes straight into it -- the
-# on-disk shape (a top-level `software_registry` key) already matches what
-# that file expects.
-#Volume=/path/to/host/os_iosxe.yml:/app/registry/os_iosxe.yml:Z
-#Environment=REGISTRY_FILE=/app/registry/os_iosxe.yml
+# Bind-mount a real Ansible group_vars file on the host (e.g. an
+# os_iosxe.yml under ansible/inventory/rendered) into REGISTRIES_ROOT so
+# the Registries settings page can discover and adopt it -- NetHub reads
+# any existing top-level `software_registry` key it already has, or adds
+# one. Each registry also needs its own writable search_dir for images,
+# set from the settings page (not here) -- typically a much larger,
+# separately bind-mounted volume, e.g.:
+#Volume=/path/to/host/group_vars/os_iosxe.yml:/app/registries/os_iosxe.yml:Z
+#Volume=/path/to/host/image/store:/app/registries-images/os_iosxe:Z
 
 # --- Required ---
 # Flask/Flask-Login session-signing key. No default -- the app refuses to

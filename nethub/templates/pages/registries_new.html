@@ -1,0 +1,40 @@
+{% extends 'layouts/main.html' %}
+{% block title %}New registry{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>New registry</h1>
+</div>
+
+{% if not available %}
+<p class="lead">No unclaimed files found under the registries root -- bind-mount one first.</p>
+{% endif %}
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+  <div class="form-group">
+    <label for="name">Name</label>
+    <input type="text" class="form-control" id="name" name="name" value="{{ name }}" required autofocus>
+  </div>
+
+  <div class="form-group">
+    <label for="file_path">File</label>
+    <select class="form-control" id="file_path" name="file_path" required {{ 'disabled' if not available }}>
+      {% for f in available %}
+      <option value="{{ f }}" {{ 'selected' if f == file_path }}>{{ f }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label for="search_dir">Search dir</label>
+    <input type="text" class="form-control" id="search_dir" name="search_dir" value="{{ search_dir }}">
+    <p class="help-block">Where NetHub stores this registry's uploaded images. Leave blank to use what the file already has (if it already has a software_registry block).</p>
+  </div>
+
+  <button type="submit" class="btn btn-primary">Create registry</button>
+  <a href="{{ url_for('registries.list_registries') }}" class="btn btn-default">Cancel</a>
+</form>
+
+{% endblock %}

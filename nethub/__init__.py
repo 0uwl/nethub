@@ -21,9 +21,11 @@ def create_app():
     from . import models  # noqa: F401 -- registers the user_loader; needed before first request
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
+    from .registries_routes import registries_bp
     from .registry_routes import registry_bp
 
     app.register_blueprint(auth_bp)
+    app.register_blueprint(registries_bp)
     app.register_blueprint(registry_bp)
     register_cli(app)
 
