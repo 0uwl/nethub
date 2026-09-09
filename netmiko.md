@@ -1,121 +1,178 @@
 # NetHub — replacing Ansible with Netmiko
 
-Plan for removing Ansible from NetHub entirely and moving the upgrade
-logic into NetHub's own Python. Supersedes the Ansible half of
-`design-document.md` §8/§8.1 and most of §9; the device-facing decisions
-those sections rest on are unchanged and are listed below so nobody
-re-derives them.
+**Status: plan, nothing built. Handoff document for a fresh session.**
 
-This is a plan not a description of committed code. Nothing here is
-built yet.
+This file exists so a new Claude Code session can pick up a decided-but-
+unstarted migration without re-deriving it. It records what was
+investigated, what was decided (and by whom), what is deliberately still
+open, and — most importantly — **which of `CLAUDE.md`'s hard rules this
+plan supersedes**, since `CLAUDE.md` loads automatically into every
+session and currently reads as though Ansible is permanent.
 
-## The decision
+Read in this order: this file → `CLAUDE.md` "Hard rules" (with the
+supersession table below in hand) → `design-document.md` §8/§8.1 and §9
+only if you need the reasoning behind a specific rule.
 
-NetHub stops outsourcing device work to Ansible and talks to devices
-directly with Netmiko. The playbooks, the task files, the rendered
-inventory, the execution environment, and `ansible-runner` all go away.
-The upgrade logic becomes ordinary Python in the `nethub/` package,
-called by the sibling process.
+## Where things stand
 
-The trade this accepts, stated up front because it is the real cost:
-**the upgrade path stops being runnable without NetHub.** Today
-`ansible/playbooks/*.yml` are deliberately standalone — CLAUDE.md forbids
-even naming NetHub inside `ansible/` — and they are hand-invoked against
-a real fleet right now. After this change, upgrading a device requires
-NetHub to be running and healthy. That escape hatch is worth replacing
-with something: at minimum a documented manual procedure, ideally a
-small CLI entry point (`nethub-upgrade`) that drives the same Python
-without the web layer.
+- Branch: `netmiko`, forked from `alpha` at `267217c`. Only this file has
+  been added (`2e4bc43`). No code has changed yet.
+- The Flask side is real and tested: 92 passing tests over
+  `nethub/{auth,bootstrap,credentials,models,registry,registry_routes}.py`.
+  `pytest -q` from the repo root, venv at `.venv`.
+- The Ansible side is hand-invoked scaffolding: 795 lines of YAML in
+  `ansible/playbooks/` (2 playbooks + 6 task files) plus a design-sketch
+  inventory in `ansible/inventory/`. **Zero test coverage** — CI runs
+  `ansible-lint` and nothing else against it.
+- `requirements.txt` does not contain Ansible at all. Ansible enters only
+  through CI (`.github/workflows/ci.yml` lines 19–30) and the local venv.
+- The `ansible/` tree was restructured recently (playbooks moved under
+  `ansible/playbooks/`, `ansible/inventory/rendered/` flattened into
+  `ansible/inventory/`). Paths in older docs may be stale; trust `find
+  ansible -type f`.
 
-## What this deletes
+## The decision (settled — do not relitigate)
 
-The Ansible layer is 795 lines of YAML across 8 files, but the module
-surface is much smaller than that suggests. Of 83 task invocations, only
-**17 touch a device**:
+The maintainer decided, explicitly:
+
+1. **Remove all traces of Ansible from NetHub.** Playbooks, task files,
+   inventory, `group_vars`, EE, `ansible-runner`. Device work moves into
+   ordinary Python in the `nethub/` package, driven by Netmiko.
+2. **`group_vars` goes too.** This is not just an execution-engine swap —
+   the YAML registry store is in scope. See "The registry store" below,
+   because it has a consequence that is easy to miss.
+3. **Netmiko alone, not Nornir.** Rationale in "Library choice" below.
+4. **TextFSM/ntc-templates for fact parsing is accepted**, with the
+   maintainer validating it against real hardware. Treat the parser
+   choice as made; treat *specific template output* as unverified until
+   that validation lands.
+
+The trade being accepted, stated because it is a real cost and a future
+session should not be surprised by it: **the upgrade path stops being
+runnable without NetHub.** Today `ansible/playbooks/*.yml` are
+deliberately standalone (`CLAUDE.md` forbids even naming NetHub inside
+`ansible/`) and are run by hand against a real fleet. Afterwards,
+upgrading a device requires NetHub healthy. Build order step 8 replaces
+that escape hatch; don't drop it.
+
+## CLAUDE.md rules this supersedes
+
+`CLAUDE.md` is authoritative for the repo and is loaded into every
+session, but it predates this decision. Work through it with this table.
+**Nothing here weakens a security property** — the rules that dissolve
+are ones whose *mechanism* disappears, and the properties they protected
+are re-listed under "What survives" with their new implementation.
+
+| CLAUDE.md rule | Fate |
+|---|---|
+| "No user-supplied playbooks" | **Dissolves as a rule, survives as a fact.** There is no playbook to supply. The closed-set property becomes structural. |
+| "No user-supplied inventories, and no user-supplied Jinja" | **Mechanism dissolves, intent survives.** No inventory, no Jinja. The request document is still validated and compiled — now into Python objects, not YAML. |
+| "No user-settable connection vars — except `ansible_host`" | **Survives, renamed.** `ansible_host` becomes an ordinary target-address field; the CIDR check and fail-closed host-key check are unchanged and still required. |
+| "No EE invocation from the Flask process" | **Half dissolves.** No EE, no Podman socket — that threat model goes. The sibling still owns dispatch, the job row is still the only control channel, and the §9.1 credential socket still exists. |
+| "No secrets in the `private_data_dir`" | **Fully dissolves.** No `private_data_dir`. The credential becomes a Python variable passed to `ConnectHandler`. |
+| "Day-2 transfer runs in whichever direction `image_transport` says" | **Direction survives; module detail replaced.** Everything about `net_put`/`paramiko`/`cli_command` and `tasks/*.yml` paths is obsolete. |
+| Entire "Ansible playbook notes" section + "Planned improvements" | **Superseded wholesale**, including "never name NetHub inside `ansible/`" and "shared logic lives in `ansible/playbooks/tasks/`". |
+| `ansible-lint` in the Commands block | **Removed** along with `.ansible-lint`. |
+
+Unaffected and still binding: one Flask worker with threads; `DEBUG` off;
+one host / separate Quadlet units; no shared service account; the
+SCP-server bracket rule; transport is deployment-level and its credential
+never lives in `settings`; NetHub is the sole source of image bytes; push
+is the default; all §7.3 job-state rules.
+
+**Update `CLAUDE.md` in the same pass as the code**, per its own
+"Keeping this file current" section. That is a large edit and should not
+be deferred to the end — a half-migrated `CLAUDE.md` actively misleads
+the next session.
+
+## What the investigation found
+
+Re-derive any of this rather than trusting it:
+
+```bash
+cat ansible/playbooks/*.yml ansible/playbooks/tasks/*.yml | wc -l   # 795
+grep -ohE '^\s+(ansible\.builtin\.[a-z_]+|ansible\.netcommon\.[a-z_]+|cisco\.ios\.[a-z_]+):' \
+  ansible/playbooks/*.yml ansible/playbooks/tasks/*.yml | sed 's/[: ]//g' | sort | uniq -c | sort -rn
+```
+
+Of 83 task invocations, **only 17 touch a device**:
 
 | Module | Uses | Replacement |
 |---|---|---|
 | `cisco.ios.ios_command` | 8 | `send_command` |
 | `cisco.ios.ios_config` | 4 | `send_config_set` — one real config change (`ip scp server enable`) |
-| `cisco.ios.ios_facts` | 2 | `show version` / `dir` + TextFSM (see "What gets harder") |
+| `cisco.ios.ios_facts` | 2 | `show version` / `dir` + TextFSM |
 | `ansible.netcommon.net_put` | 1 | `netmiko.file_transfer(...)`, SCP |
 | `ansible.netcommon.cli_command` | 1 | `send_command_timing` / `expect_string` |
 | `ansible.builtin.wait_for_connection` | 1 | hand-rolled reconnect loop |
 
 The other 66 — `set_fact` (27), `meta` (10), `debug` (10), `assert` (9),
-`include_tasks` (8), `pause`/`fail`/`stat` (5) — are Ansible ceremony for
-things Python has natively: variables, `if`, `raise`, `try/finally`,
-`logging`. That is where four-fifths of the YAML goes.
-`resolve_target_bundle.yml` is 90 lines of Jinja to `stat` a file and
-compare two integers; it is roughly 25 lines of Python.
+`include_tasks` (8), `pause`/`fail`/`stat` (5) — are ceremony for things
+Python has natively: variables, `if`, `raise`, `try/finally`, `logging`.
+That is where four-fifths of the YAML goes.
+`tasks/resolve_target_bundle.yml` is 90 lines of Jinja to `stat` a file
+and compare two integers; roughly 25 lines of Python.
 
-Also deleted: the rendered inventory layer (§3.5 — `hosts.yml`,
-`upgrade_batch.yml`, `group_vars/`), the EE container image, the
+**Estimated replacement: ~350–450 lines of Python for device-logic
+parity, plus ~150–250 for phase/batch/result plumbing** — and most of the
+second number is owed regardless of engine, since §7.3 demands
+`upgrade_host_phase_results` rows and a `failure_stage` enum. Today that
+means parsing them back out of `job_events`; with Netmiko the function
+returns a dict that gets inserted. **Net line count goes down.**
+
+Also deleted: the rendered inventory layer, the EE container image, the
 `ansible-runner` integration, and ~24 MB of Ansible packages plus ~23 MB
 of collections, against ~15 MB for Netmiko and ntc-templates.
 
-**Estimated replacement: ~350–450 lines of Python for device-logic
-parity, plus ~150–250 for phase/batch/result plumbing** — and most of
-that second number is owed anyway, since §7.3 demands
-`upgrade_host_phase_results` rows and a `failure_stage` enum regardless
-of engine. Today that means parsing them back out of `job_events`; with
-Netmiko the function returns a dict that gets inserted. Net line count
-goes **down**.
+## The registry store — the consequence most easily missed
 
-## The registry store question — the biggest consequence
+The `software_registry` YAML block exists **so an Ansible playbook can
+read it**. With no playbook, nothing in NetHub reads it.
 
-The `software_registry` YAML block exists so an Ansible playbook can read
-it. With no playbook, nothing reads it, and the registry becomes purely
-internal to NetHub — which is what `design-document.md` §5 always said it
-should be (the `artifacts` table, with the file as a rendered projection).
+That means the multi-registry alpha — `nethub/registry.py`, the
+`Registry` model, `REGISTRIES_ROOT`, file adoption, `search_dir`, the
+sibling-key-preserving atomic save, the path-escape guard, the
+`secure_filename` revalidation on read, `check_registry()`'s drift
+report, and a large share of those 92 tests — **loses its reason to
+exist.** It was built to manage an Ansible setup NetHub will no longer
+use.
 
-That means the alpha slice built in `nethub/registry.py` and the
-`Registry` model — `REGISTRIES_ROOT`, file adoption, `search_dir`, the
-sibling-key-preserving save — loses its original purpose. Three options,
-in order of preference:
+Decision: fold it into the `artifacts` table (`design-document.md` §5),
+which is what the target design always said. This deletes real, working,
+tested code, and that is correct when the thing it defended against
+(hand-edited YAML owned by someone else) no longer exists.
 
-1. **Move the registry into the database** (`artifacts`, §5) and drop the
-   YAML store. Cleanest, matches the target design, and removes the whole
-   class of hand-edited-file defenses currently in `registry.py`
-   (path-escape guard, `secure_filename` revalidation on read, the
-   check-registry drift report). Deletes real, working, tested code —
-   which is the right call when the thing it defends against no longer
-   exists.
-2. **Keep the YAML as an export**, written by NetHub, read by nobody in
-   NetHub. Only worth it if something outside NetHub still consumes it.
-3. **Keep it as-is** and let NetHub manage group_vars for an Ansible
-   setup it no longer uses itself. Rejected — this is the duplication
-   this whole change exists to remove.
-
-Recommendation: (1), but not in the same pass as the execution rewrite.
-Get Netmiko working against the existing registry first, migrate the
-store second, so only one thing is unproven at a time.
+**Sequencing recommendation: do this as its own pass, after the execution
+rewrite works.** Get Netmiko driving upgrades off the existing registry
+first, then migrate the store, so only one thing is unproven at a time.
+The build order below reflects that.
 
 ## What survives unchanged
 
-None of this is Ansible-specific. It is device and trust-boundary
-reality, and it carries over verbatim:
+Device and trust-boundary reality, not Ansible artifacts:
 
 - **Transport is deployment-level, never request-level** (§4.3.1).
-  `push_scp` default, `pull_sftp` alternative, and the reason is
-  unchanged: selecting the transport selects whose credential is spent.
+  `push_scp` default, `pull_sftp` alternative — selecting the transport
+  selects whose credential is spent.
 - **The SCP-server bracket** — capture prior state, enable only if
   needed, restore in a `finally:`, confirm by re-reading the
   running-config, fail the host outright if the restore is unconfirmed.
   `try/finally` expresses this better than `block/rescue/always` did.
+  Note the known gap survives too: a killed process never reaches
+  `finally` either.
 - **Privilege 15 at login, no `enable` escalation, no `become`.**
 - **Host-key pinning, fail-closed**, against `device_host_keys` (§4.3).
   Netmiko exposes this through Paramiko's host-key policy — set it
   explicitly, never `AutoAddPolicy`.
-- **SHA-512 verified on the device** after transfer, in either direction
-  — the third consumption of the ingest digest (§3.4). Match the digest
+- **SHA-512 verified on the device** after transfer, either direction —
+  the third consumption of the ingest digest (§3.4). Match the digest
   itself, never the word "Verified".
 - **The phase split and approval gates** (§8.1): pre-check / stage /
-  activate / verify / cleanup, with the credential collected per phase.
-- **The job row as the only control channel**, `registry_jobs`-style
-  state machine, the startup sweep, `cancel_requested_at` (§7.3).
+  activate / verify / cleanup, credential collected per phase.
+- **The job row as the only control channel**, the state machine, the
+  startup sweep, `cancel_requested_at` (§7.3).
 - **The §9.1 credential socket.** Flask collects the password at an
-  approval gate; the sibling needs it. That is unchanged by the engine.
+  approval gate; the sibling needs it. Unchanged by the engine.
 - **One Flask worker, more than one thread** (§3.2).
 
 ## What genuinely gets simpler
@@ -123,35 +180,32 @@ reality, and it carries over verbatim:
 1. **§9's central security argument dissolves.** The sibling-vs-nested-
    container decision exists because mounting the Podman socket into
    Flask would let the process behind the only unauthenticated route
-   start arbitrary containers. With no EE there is no Podman socket in
-   the picture. The sibling still exists, but only for the mundane §3.2
-   reason: don't occupy the process that owns the phone-home route.
-2. **The "no secrets in the `private_data_dir`" hard rule disappears.**
-   No `env/extravars`, no `env/passwords`, no `podman run -e` landing in
-   `/proc/<pid>/cmdline`, no tmpfs `private_data_dir` to engineer and
-   destroy, no scrubbing `stdout`/`job_events` before retention. The
-   credential is a Python variable passed as a `ConnectHandler` kwarg and
-   never touches a filesystem.
-3. **The upgrade path becomes testable.** There are currently 92 tests
-   covering the Flask side and **zero** covering the code that reloads
-   production switches; CI runs `ansible-lint` and stops. Netmiko logic
+   start arbitrary containers. No EE, no Podman socket. The sibling still
+   exists, but for the mundane §3.2 reason: don't occupy the process that
+   owns the phone-home route.
+2. **The `private_data_dir` hygiene problem disappears.** No
+   `env/extravars`, no `env/passwords`, no `podman run -e` in
+   `/proc/<pid>/cmdline`, no tmpfs directory to engineer and destroy, no
+   scrubbing `stdout`/`job_events` before retention.
+3. **The upgrade path becomes testable.** 92 tests cover Flask; **zero**
+   cover the code that reloads production switches. Netmiko logic
    unit-tests against a mocked connection. For the most dangerous code in
-   the system this is the strongest single argument in this document.
-4. **"No user-supplied playbooks" stops being a rule and becomes a
-   structural fact.**
-5. **Logging is ours.** The design currently warns that a pull-transport
-   phase must not run at `-vvv` because `no_log` does not redact
+   the system this is the strongest single argument in this document —
+   and the reason step 1 of the build order is a spike, not a rewrite.
+4. **Logging is ours.** The design currently warns a pull-transport phase
+   must not run at `-vvv` because `no_log` doesn't redact
    connection-plugin debug output. That caveat goes away.
 
 ## What gets harder
 
 - **Fact parsing.** `ios_facts` returns `net_filesystems_info`,
-  `net_version`, `net_serialnum` structured and free, from a vendor-
-  adjacent certified collection. Netmiko returns a string; ntc-templates
-  (TextFSM, `use_textfsm=True`) covers `show version` and `dir`, but the
-  templates are community-maintained and more version-fragile than
-  `cisco.ios`. **To be validated on real hardware** before this is
-  considered settled.
+  `net_version`, `net_serialnum` structured and free from a certified
+  collection. Netmiko returns a string; ntc-templates (`use_textfsm=True`)
+  covers `show version` and `dir`, but templates are community-maintained
+  and more version-fragile. **Decision accepted; hardware validation
+  pending with the maintainer.** The free-space number from `dir` gates
+  the stage phase, so a parse miss is not cosmetic — fail loudly on an
+  unparseable result rather than defaulting.
 - **Post-reload reconnect.** `wait_for_connection` is free; a poll loop
   with backoff and a hard deadline is not hard to write but is exactly
   the code you do not want subtly wrong inside a maintenance window.
@@ -161,20 +215,19 @@ reality, and it carries over verbatim:
 
 ## Library choice: Netmiko alone, not Nornir
 
-Nornir's value is its inventory model and its threaded runner. NetHub
-already owns both: the inventory is the request document compiled against
-the database (§3.5's argument survives even though its *output format*
-does not), batching is `serial` in the phase model (§8.1), and results go
-to `upgrade_host_phase_results` rows. Adding Nornir would mean
-maintaining a second inventory representation to feed it.
+Nornir's value is its inventory model and threaded runner. NetHub already
+owns both: inventory is the request document compiled against the
+database, batching is `serial` in the phase model (§8.1), results go to
+`upgrade_host_phase_results` rows. Adding Nornir means maintaining a
+second inventory representation to feed it.
 
 Start with Netmiko plus `concurrent.futures.ThreadPoolExecutor` bounded
-by the phase's serial setting. Revisit Nornir only if batching grows
-complex enough to justify it.
+by the phase's serial setting. Revisit only if batching grows complex
+enough to justify it.
 
 ## Proposed module layout
 
-Start flat; split only when a file earns it.
+Start flat; split only when a file earns it (the repo's YAGNI norm).
 
 ```
 nethub/devices/
@@ -188,35 +241,36 @@ nethub/devices/
 `errors.py` (exception → `failure_stage` enum) folds into `phases.py`
 until it doesn't fit.
 
-## Dependencies
+## Build order
 
-Add `netmiko` and `ntc-templates`. Remove `ansible`, `ansible-lint`, and
-the `cisco.ios`/`ansible.netcommon` collections — including the
-`ansible-lint` job and the collection install step in
-`.github/workflows/ci.yml`.
-
-## Rough build order
-
-1. Spike `facts.py` and the reconnect loop against one real switch.
-   These are the two genuinely uncertain pieces; resolve them before
-   writing anything that depends on their shape.
+1. **Spike `facts.py` and the reconnect loop against one real switch.**
+   The two genuinely uncertain pieces; resolve before writing anything
+   that depends on their shape. Throwaway script, not production code.
 2. `connection.py` with fail-closed host-key checking.
-3. `transfer.py` — push adapter first (the default), with the SCP
-   bracket and its confirmed restore. Pull adapter after.
+3. `transfer.py` — push adapter first (the default), with the SCP bracket
+   and its confirmed restore. Pull adapter after.
 4. `install.py`.
-5. `phases.py` and the sibling that calls it, writing job/phase rows.
-6. Delete `ansible/`, the EE references, and the CI Ansible steps.
-7. Migrate the registry store to `artifacts` (see above) as its own pass.
-8. Add the manual escape hatch — CLI entry point or documented procedure.
+5. `phases.py` plus the sibling that calls it, writing job/phase rows.
+6. Delete `ansible/`; remove `ansible`/`ansible-lint` from CI
+   (`.github/workflows/ci.yml` lines 19–30) and delete `.ansible-lint`;
+   drop the Ansible references in `.yamllint.yaml`'s comments; add
+   `netmiko` and `ntc-templates` to `requirements.txt`. **Rewrite
+   `CLAUDE.md`'s Ansible sections in this same pass.**
+7. Migrate the registry store to `artifacts` as its own pass.
+8. Restore the manual escape hatch — CLI entry point (`nethub-upgrade`)
+   or a documented procedure.
 
 ## Open questions
 
-- Does anything outside NetHub still read the rendered
-  `software_registry` YAML? Decides the registry-store option above.
+- Does anything **outside** NetHub still read the rendered
+  `software_registry` YAML? If yes, step 7 needs an export path rather
+  than a deletion. Ask the maintainer before step 7, not before step 1.
 - TextFSM parity for `dir` across the IOS-XE versions actually in the
-  fleet — the free-space number gates the stage phase, so a parse miss
-  is not cosmetic.
+  fleet (validation pending with the maintainer).
 - Does `netmiko.file_transfer` behave acceptably pushing ~500 MB to a
   Cat9K-lite? The Ansible path needed `paramiko` specifically because
-  `libssh` broke at image size; Netmiko is Paramiko-based, so this
-  should be the better-tested direction, but it is unverified here.
+  `libssh` broke at image size; Netmiko is Paramiko-based, so this should
+  be the better-tested direction, but it is unverified here.
+- The design doc's own §8/§8.1/§9 still describe an EE. They are not
+  updated by this plan. Decide whether `design-document.md` gets revised
+  or whether this file stands as its acknowledged supersession.
