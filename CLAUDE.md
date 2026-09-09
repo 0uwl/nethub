@@ -9,10 +9,14 @@ Netmiko.** `netmiko.md` is the handoff document, and it should be read
 before acting on "Ansible playbook notes" below or on any of the
 Ansible-specific hard rules — it records which of them dissolve, which
 survive under a different mechanism, and which are untouched. It is a plan
-with a numbered build order, not a description of finished work: steps 1–4
-(`nethub/devices/{facts,connection,transfer,install}.py`) are built, tested,
-and validated end-to-end against real hardware including two live upgrades;
-steps 5–8 are not started. Nothing under `ansible/` has been deleted — that
+with a numbered build order, not a description of finished work: steps 1–5
+are built and tested — the device layer
+(`nethub/devices/{facts,connection,transfer,install,phases}.py`) validated
+end-to-end against real hardware including two live upgrades, and step 5's
+schema, dispatcher and credential socket tested but never yet run against a
+device. Steps 6–8 are not started, and **nothing creates a job row**: there
+is no submit or approval route, so the queue the sibling works is one only a
+test fills. That is the missing half of step 5 and it is route work. Nothing under `ansible/` has been deleted — that
 is step 6 — so both layers are in the tree at once and this file describes
 both. See "Device layer" below for what exists on the Netmiko side.
 
@@ -131,7 +135,8 @@ Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}
 (`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
 fixture, registry-row creation/adoption, entry upload/checksum validation), plus
-`nethub/devices/{facts,connection,transfer,install}.py` — which need neither those fixtures nor a
+`nethub/devices/{facts,connection,transfer,install,phases}.py`, `nethub/sibling.py` and
+`nethub/credential_socket.py` — most of which need neither those fixtures nor a
 device, parsing the real output under `tests/captures/` and exercising the
 host-key policy against the same device's public host key. The
 `make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
@@ -862,9 +867,13 @@ Four of that plan's five modules exist:
 - `transfer.py` — `stage_image()` plus the two transport adapters.
 - `install.py` — the activate/reload/verify/cleanup half.
 
-`phases.py` is named in `netmiko.md`'s module layout and is absent. Nothing dispatches any of this: there is no sibling process and no job
-row yet, so the device layer is reachable only from a test or from
-`scripts/check_device_facts.py`.
+- `phases.py` — the per-host loop, the exception→`failure_stage` mapping, and
+  the rows.
+
+All five of the plan's modules now exist, and `nethub/sibling.py` dispatches
+them. What does not exist is anything that *creates* a job: no submit route,
+no approval route, and nothing that puts a credential into the store. The
+sibling works a queue only a test fills.
 
 `facts.py`, `connection.py` and `transfer.py` have been exercised against a
 real Catalyst 9200CX on IOS-XE 17.12.06, the push adapter included: enable, transfer, confirmed
@@ -1056,6 +1065,96 @@ procedure, and five things in it are load-bearing:
 
 Guards run before anything is written, which is what makes a refusal safe to
 re-run: `assert_ready_to_activate` issues only reads.
+
+## Dispatch (`nethub/sibling.py`, `nethub/credential_socket.py`)
+
+The schema is in `nethub/models.py` — `device_host_keys`, `upgrade_runs`,
+`upgrade_run_hosts`, `upgrade_phase_jobs`, `upgrade_host_phase_results`, with
+§7.3's vocabularies as module constants. Two deviations from §5, both because
+the EE is gone: there is no `private_data_dir`, and `playbook_log_path` is
+`log_path`. `upgrade_run_hosts.artifact_id` is a bare integer, not a foreign
+key — there is no `artifacts` table until step 7.
+
+**Two constraints were silently absent and are easy to lose again.**
+
+- **SQLite ignores `FOREIGN KEY` unless asked, per connection.** §5 leans on
+  the two keys on `upgrade_host_phase_results` rather than treating them as
+  documentation, so `nethub/extensions.py` sets `PRAGMA foreign_keys=ON` on
+  the generic SQLAlchemy `Engine` connect event — on the engine and not
+  per-app, so the test fixtures get it too. A database that enforces less
+  than production passes tests production would fail. There is a test
+  asserting the pragma is on, because every other FK test passes vacuously
+  without it.
+- **`Enum(create_constraint=...)` has defaulted to False since SQLAlchemy
+  1.4.** Found by reading the emitted DDL, not by trusting the declaration:
+  every vocabulary was a plain `VARCHAR` with no `CHECK`. `_enum()` passes
+  `create_constraint=True`. If a column starts accepting a typo'd value,
+  check the DDL rather than the model.
+
+The terminal-status trigger (§7.3) is real DDL attached to the table's
+`after_create`, and it raises `IntegrityError` — not `OperationalError`.
+
+**`phases.py` never lets a foreign exception message reach a row.**
+`error_summary` is retained for a year (§7.4), and §7.3 warns that a stray
+`str(exc)` there is a durable credential leak with no other symptom. Only
+exceptions this codebase raised itself get their message copied; anything
+else contributes its type and nothing more. There is a test that raises a
+`RuntimeError` containing the password and asserts it reaches no column.
+
+**Cancel and the deadline are checked between hosts, never mid-host** — there
+is no safe place to stop inside an activation, and polling more finely would
+not create one.
+
+**`phase_activate` owns the reconnect**, not `phase_verify`: a device that
+never returns is a `reload` failure, a different `failure_stage` and a
+different conversation than a wrong version.
+
+**SQLite returns naive datetimes for values written aware.** Comparing
+`now()` against a stored `deadline_at` raises `TypeError` for any row read
+back from the database — always in production, never in a test that skips the
+round trip. `phases._aware()` and `sibling._aware()` are the fix. This is
+latent everywhere else timestamps are stored and only bites where something
+compares; don't add a comparison without routing it through one of them.
+
+**The sibling's claim is the conditional update itself.** `UPDATE ... WHERE
+id=? AND status='queued'` with the rowcount as the answer: a read-then-write
+double-claims under WAL, and nothing enforces that only one sibling runs
+(§9.1). `runner_instance_id` is a UUID minted per start and never a PID.
+
+**The credential socket: Flask serves, the sibling connects.** Not the
+reverse — a deposit endpoint would leave the sibling holding secrets for
+executions it has not started, and could be flooded. Four things about
+`nethub/credential_socket.py` are load-bearing:
+
+- **Nothing in it calls `bind()`.** `systemd_socket()` adopts the descriptor
+  a `.socket` unit handed over, and returns `None` when the process was not
+  socket-activated — the caller then skips serving rather than creating a
+  path with the wrong ownership. Every dev run and every test takes that
+  branch; the tests make their own socket, which is why none of this is
+  exercised in-process by `create_app`.
+- **There is no `SO_PEERCRED` check and there should not be one.** Under one
+  rootless user a uid check tells Flask only "the peer shares my uid", which
+  anything a Flask compromise spawns also satisfies. The mount is the
+  authenticator (§9.2). Don't add a uid check and believe it discriminates.
+- **The store is keyed by `upgrade_phase_jobs.id`, never `run_id`**, and the
+  approving identity is cross-checked on release. Keying by run would
+  eventually hand one person's password to another person's approved
+  execution against an address that person chose.
+- **The reply is untrusted input on the sibling's side.** A compromised Flask
+  chooses those bytes and the sibling is the privileged side, so
+  `fetch_credential` caps, deadlines and allowlists what comes back before it
+  reaches any variable or command string.
+
+**`verify_running` runs on the serving thread and needs its own app
+context.** Flask-SQLAlchemy's session is thread-local, so without one every
+request fails with a generic refusal that says nothing about the cause. The
+wiring in `nethub/__init__.py` does this; a test that forgot it is how it was
+found.
+
+The sibling is `python -m nethub.sibling`, reading `NETHUB_CREDENTIAL_SOCKET`
+and `NETHUB_SEARCH_DIR`. It builds a bare Flask app for SQLAlchemy's context
+rather than calling `create_app()` — that would register routes and run the
+first-boot admin bootstrap, and the sibling must do neither.
 
 **This closes one of design doc §10's open questions, which has not been
 revised to say so.** §10 asks where NetHub's rendered `known_hosts` actually

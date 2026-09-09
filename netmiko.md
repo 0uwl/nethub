@@ -1,7 +1,7 @@
 # NetHub — replacing Ansible with Netmiko
 
-**Status: build order steps 1–4 done and hardware-validated, 5–8 not
-started. Handoff document for a fresh session.**
+**Status: build order steps 1–5 done, 6–8 not started. Handoff document
+for a fresh session.**
 
 This file exists so a new Claude Code session can pick up a decided-but-
 unstarted migration without re-deriving it. It records what was
@@ -17,9 +17,15 @@ only if you need the reasoning behind a specific rule.
 ## Where things stand
 
 - Branch: `netmiko`, forked from `alpha` at `267217c`. Build order steps
-  1–4 are committed: `nethub/devices/{facts,connection,transfer,install}.py`
-  plus `scripts/check_device_facts.py`, with tests. Steps 5–8 are untouched,
-  so nothing dispatches any of it and `ansible/` is still in the tree.
+  1–5 are committed: `nethub/devices/*.py`, the upgrade schema in
+  `nethub/models.py`, `nethub/sibling.py` and `nethub/credential_socket.py`,
+  with tests. Steps 6–8 are untouched, so `ansible/` is still in the tree.
+- **Step 5 has a missing half, and it is route work rather than device
+  work.** Nothing creates a job row: there is no submit route, no approval
+  route, and nothing puts a credential into the store. The sibling works a
+  queue only a test fills, so the whole path is tested but has never run
+  against a device. Closing it needs §6.1's API surface and §8.1's approval
+  gates — decide whether that is step 5's remainder or a step of its own.
 - `facts.py`, `connection.py` and `transfer.py` have been exercised against
   a real Catalyst 9200CX on IOS-XE 17.12.06, including a 408 MB SCP push
   through the full enable/restore bracket. `tests/captures/` holds the
