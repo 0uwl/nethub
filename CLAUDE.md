@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **The Ansible-to-Netmiko migration is most of the way done.** `netmiko.md`
 is the handoff document: a numbered build order, of which **steps 1–6 are
-complete**; only step 8 (a manual escape hatch) is left. Its supersession table is now a record of edits
+complete** — the migration is finished. Its supersession table is now a record of edits
 already applied to this file rather than a list of pending ones — read the
 hard rules below directly. The device layer is validated end-to-end against
 real hardware (two live upgrades, plus a live pre-check driven through the
 Flask app); step 6 deleted `ansible/` entirely, so there is only one layer in
-the tree now. Step 8 restores a manual escape hatch. The one thing not yet done on the day-2 path is a full
+the tree now. The one thing not yet done on the day-2 path is a full
 app-driven run past pre-check — stage/activate/verify/cleanup are each
 hardware-validated through the device layer, but not yet in one run started
 from the UI.
@@ -82,6 +82,13 @@ yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML f
 python -m nethub.sibling           # the dispatcher; reads NETHUB_CREDENTIAL_SOCKET
                                     # and NETHUB_SEARCH_DIR. Runs as its own unit, never
                                     # inside the Flask process.
+
+python -m nethub.upgrade_cli --scan <host>          # the manual escape hatch: print a
+python -m nethub.upgrade_cli --host <host> --user <name> \
+    --fingerprint "<type> SHA256:..." --image <path> --sha512 <hex> \
+    --version <v> --phases all                      # ...fingerprint, or upgrade a device
+                                    # with NetHub switched off entirely. Writes nothing.
+                                    # See "Manual escape hatch" below before using it.
 ```
 
 Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
@@ -1202,6 +1209,66 @@ are design decisions rather than fixes.
 **Operational note:** an `AF_UNIX` path is capped near 108 bytes. The socket
 path the Quadlet mount produces has to stay under it, and the failure is an
 `OSError` at bind time rather than anything about length.
+
+## Manual escape hatch (`nethub/upgrade_cli.py`)
+
+`python -m nethub.upgrade_cli` upgrades a device with NetHub switched off.
+Build step 8, and it exists to pay back a cost the migration knowingly
+incurred: the playbooks it replaced were deliberately standalone, so an
+operator could run them by hand against a fleet with nothing else running.
+Folding device work into `nethub/devices/` took that away, and `netmiko.md`
+recorded the loss as accepted rather than unnoticed.
+
+It needs **no Flask app, no sibling, no credential socket and no job rows**,
+because `nethub/devices/` never depended on any of them. That is why this is a
+few hundred lines rather than a parallel implementation, and it is worth
+protecting: a change that makes the device layer need the database would cost
+this tool as a side effect.
+
+**It writes nothing, and that is deliberate rather than lazy.** §7.3 assigns
+every job-row edge to Flask or the sibling. A third writer would put rows in
+the database that no approval and no `runner_instance_id` accounts for —
+worse than an honest gap, because they would look like a normal run. So a
+manual run is *absent from the audit trail*, the tool says so on every
+invocation and again when it finishes, and the answer to "we need this
+recorded" is to fix NetHub and use it.
+
+**It is a bypass of the web app, not of §4.3.** The one thing it must never
+become is a way around the host-key pin:
+
+- No confirmed pin and no `--fingerprint` is a **refusal**, never a silent
+  first-contact accept. The error tells the operator to `--scan`, compare
+  against the device, and pass what they saw.
+- A `--fingerprint` the operator typed *is* a confirmation — they compared it
+  out of band, which is exactly what the web flow asks of them. Someone with
+  host access could edit `device_host_keys` anyway, so this grants nothing
+  host access did not already imply (the same argument §4.4 makes for the
+  break-glass CLI); what it does not do is let a mismatch through quietly.
+- It reads a confirmed pin from the database when one is reachable, and
+  treats an unreachable database as ordinary — NetHub being down is the
+  reason the tool exists.
+
+**The confirmations are §8.1's gates collapsed onto a terminal**, because
+there is no second person to ask. Every phase in `MUTATING`
+(`stage`/`activate`/`cleanup`) prompts; `precheck` and `verify` are read-only
+and do not. `--phases` defaults to `precheck` alone, so a bare invocation
+cannot change anything; `--phases all` runs the lot. `--yes` skips the
+prompts, which is what a scripted recovery wants and what an interactive
+operator should not reach for.
+
+Two error-path details that matter more here than in a library:
+
+- **Netmiko's own exceptions are caught alongside ours.** A device that hangs
+  raises `NetmikoBaseException`, and an operator recovering a fleet should get
+  a sentence rather than a traceback.
+- **The first `connect()` is inside the `try`.** A host-key mismatch is raised
+  there, and it is the single message this tool most needs to print as prose:
+  `FAILED: HostKeyError: ... Refusing to send a credential.`
+
+Verified against the lab switch: `--scan` prints the same fingerprint
+`ssh-keygen -lf` does, a `precheck` runs to completion with the database
+deliberately unreachable, and a deliberately wrong `--fingerprint` fails
+closed without sending the credential.
 
 ## Keeping this file current
 

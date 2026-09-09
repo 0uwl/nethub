@@ -1,7 +1,7 @@
 # NetHub — replacing Ansible with Netmiko
 
-**Status: build order steps 1–7 done; only step 8 remains. Handoff
-document for a fresh session.**
+**Status: build order complete, steps 1–8. Handoff document for a fresh
+session — kept because the reasoning behind the decisions is still live.**
 
 This file exists so a new Claude Code session can pick up a decided-but-
 unstarted migration without re-deriving it. It records what was
@@ -76,13 +76,18 @@ The maintainer decided, explicitly:
    choice as made; treat *specific template output* as unverified until
    that validation lands.
 
-The trade being accepted, stated because it is a real cost and a future
-session should not be surprised by it: **the upgrade path stops being
-runnable without NetHub.** Today `ansible/playbooks/*.yml` are
-deliberately standalone (`CLAUDE.md` forbids even naming NetHub inside
-`ansible/`) and are run by hand against a real fleet. Afterwards,
-upgrading a device requires NetHub healthy. Build order step 8 replaces
-that escape hatch; don't drop it.
+The trade being accepted, stated because it was a real cost: **the upgrade
+path stops being runnable without NetHub.** The playbooks were deliberately
+standalone and were run by hand against a real fleet; afterwards, upgrading a
+device requires NetHub healthy.
+
+**Step 8 paid this back** with `python -m nethub.upgrade_cli`, which drives
+the device layer with no Flask app, no sibling, no socket and no job rows.
+Two properties of it are load-bearing and are documented in `CLAUDE.md`: it
+writes nothing (a third job-row writer would forge rows no approval accounts
+for), and a missing host-key pin is a refusal rather than a first-contact
+accept. It only stayed small because `nethub/devices/` has no database
+dependency — don't add one.
 
 ## CLAUDE.md rules this supersedes
 
@@ -287,8 +292,9 @@ until it doesn't fit.
    `netmiko` and `ntc-templates` to `requirements.txt`. **Rewrite
    `CLAUDE.md`'s Ansible sections in this same pass.**
 7. Migrate the registry store to `artifacts` as its own pass.
-8. Restore the manual escape hatch — CLI entry point (`nethub-upgrade`)
-   or a documented procedure.
+8. Restore the manual escape hatch — done as `python -m nethub.upgrade_cli`
+   rather than a `nethub-upgrade` console script, since nothing here is
+   packaged for installation and `python -m` matches how the sibling is run.
 
 ## Open questions
 
