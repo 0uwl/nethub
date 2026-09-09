@@ -1,6 +1,7 @@
 # NetHub — replacing Ansible with Netmiko
 
-**Status: plan, nothing built. Handoff document for a fresh session.**
+**Status: build order steps 1–4 done and hardware-validated, 5–8 not
+started. Handoff document for a fresh session.**
 
 This file exists so a new Claude Code session can pick up a decided-but-
 unstarted migration without re-deriving it. It records what was
@@ -15,11 +16,26 @@ only if you need the reasoning behind a specific rule.
 
 ## Where things stand
 
-- Branch: `netmiko`, forked from `alpha` at `267217c`. Only this file has
-  been added (`2e4bc43`). No code has changed yet.
-- The Flask side is real and tested: 92 passing tests over
-  `nethub/{auth,bootstrap,credentials,models,registry,registry_routes}.py`.
-  `pytest -q` from the repo root, venv at `.venv`.
+- Branch: `netmiko`, forked from `alpha` at `267217c`. Build order steps
+  1–4 are committed: `nethub/devices/{facts,connection,transfer,install}.py`
+  plus `scripts/check_device_facts.py`, with tests. Steps 5–8 are untouched,
+  so nothing dispatches any of it and `ansible/` is still in the tree.
+- `facts.py`, `connection.py` and `transfer.py` have been exercised against
+  a real Catalyst 9200CX on IOS-XE 17.12.06, including a 408 MB SCP push
+  through the full enable/restore bracket. `tests/captures/` holds the
+  verbatim output the parser tests run against.
+- **`install.py` is validated end-to-end, and step 1 is now fully closed.**
+  A round trip was run on the lab switch on 2026-09-09 — 17.12.6 → 17.12.08
+  → 17.12.6 — through `stage_image` → `activate` → `wait_for_device` →
+  `verify_upgrade` → `cleanup`, in both directions. Step 1's outstanding half
+  (spike the reconnect loop against a real switch) is covered by that.
+  Measured: stage ~370s for 471 MB, install 605–622s, reload 228–238s
+  against a 900s deadline, cleanup ~5s. Still untested: a switch stack, and
+  any device slower than this one.
+- The Flask side is real and tested: 92 of the suite's tests cover
+  `nethub/{auth,bootstrap,credentials,models,registry,registry_routes}.py`;
+  the device layer adds the rest. `pytest -q` from the repo root, venv at
+  `.venv`.
 - The Ansible side is hand-invoked scaffolding: 795 lines of YAML in
   `ansible/playbooks/` (2 playbooks + 6 task files) plus a design-sketch
   inventory in `ansible/inventory/`. **Zero test coverage** — CI runs
@@ -267,10 +283,26 @@ until it doesn't fit.
   than a deletion. Ask the maintainer before step 7, not before step 1.
 - TextFSM parity for `dir` across the IOS-XE versions actually in the
   fleet (validation pending with the maintainer).
-- Does `netmiko.file_transfer` behave acceptably pushing ~500 MB to a
-  Cat9K-lite? The Ansible path needed `paramiko` specifically because
-  `libssh` broke at image size; Netmiko is Paramiko-based, so this should
-  be the better-tested direction, but it is unverified here.
+- **Resolved (2026-09-09): SCP at image size works, but it is slow.**
+  408,739,840 bytes pushed to a Catalyst 9200CX with `transfer.py`'s push
+  adapter completed in 319.9s end-to-end, restore confirmed, digest
+  verified. Subtracting the `verify /sha512` pass (33.9s, measured
+  separately on a file of the same size) puts the transfer itself at
+  roughly 280s — about **1.4 MB/s**. No connection break of the kind
+  `libssh` produced under Ansible; the direction is sound.
+
+  Two consequences. A full image is ~15 min per device at 1.2 GB, which
+  is what §8's per-host stage bound has to be calibrated against — it is
+  minutes, not seconds, and a bound derived from a guess will be wrong.
+  And the rate is device-bound rather than link-bound, which cuts in
+  favour of §8.1's plan to drop the serial gate from staging: twenty
+  devices at 1.4 MB/s each is ~28 MB/s off NetHub's link, comfortably
+  within the concurrency cap that section calls for. The 500 MB figure
+  in the original question was the right order of magnitude; what was
+  unknown was the rate, not the feasibility.
+
+  Not answered: the same test on a device across a constrained WAN link,
+  where the bottleneck moves and the transfer stops being device-bound.
 - The design doc's own §8/§8.1/§9 still describe an EE. They are not
   updated by this plan. Decide whether `design-document.md` gets revised
   or whether this file stands as its acknowledged supersession.

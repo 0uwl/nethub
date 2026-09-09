@@ -9,9 +9,10 @@ Netmiko.** `netmiko.md` is the handoff document, and it should be read
 before acting on "Ansible playbook notes" below or on any of the
 Ansible-specific hard rules — it records which of them dissolve, which
 survive under a different mechanism, and which are untouched. It is a plan
-with a numbered build order, not a description of finished work: steps 1–2
-(`nethub/devices/facts.py`, `nethub/devices/connection.py`) are built and
-tested, steps 3–8 are not. Nothing under `ansible/` has been deleted — that
+with a numbered build order, not a description of finished work: steps 1–4
+(`nethub/devices/{facts,connection,transfer,install}.py`) are built, tested,
+and validated end-to-end against real hardware including two live upgrades;
+steps 5–8 are not started. Nothing under `ansible/` has been deleted — that
 is step 6 — so both layers are in the tree at once and this file describes
 both. See "Device layer" below for what exists on the Netmiko side.
 
@@ -130,7 +131,7 @@ Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}
 (`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
 fixture, registry-row creation/adoption, entry upload/checksum validation), plus
-`nethub/devices/{facts,connection}.py` — which need neither those fixtures nor a
+`nethub/devices/{facts,connection,transfer,install}.py` — which need neither those fixtures nor a
 device, parsing the real output under `tests/captures/` and exercising the
 host-key policy against the same device's public host key. The
 `make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
@@ -352,6 +353,49 @@ there is deliberately no `hash_algo` column** (design doc §3.4) — IOS-XE's
 would mean storing two digests or recomputing at egress. Don't add
 per-artifact algorithm support speculatively; it arrives with a platform
 that actually requires it.
+
+**Swapping SHA-512 for MD5 was considered on 2026-09-09 and rejected;
+this is settled** (design doc §3.4, and a resolved entry at the head of
+§10). It is worth repeating here because the rule above answers
+a *different* question — it forbids a second algorithm, and says nothing
+about changing which single one is used, so the swap reads as permitted
+on a first pass. Three findings, in the order they mattered:
+
+- **The apparent benefit does not exist.** Netmiko ships `compare_md5()` /
+  `verify_file()`, so MD5 looks like it would let NetHub delete its own
+  verification code. It would not: `compare_md5` compares the file *on
+  NetHub's mount* against the device, and NetHub needs the digest recorded
+  in the table at ingest compared against the device. §7.2 says the table
+  wins over the file, and a swapped file on the mount is one of the things
+  this check exists to catch — netmiko's built-in verify trusts exactly the
+  thing being verified. The compare stays ours either way, so the swap buys
+  no code. (This is also why `_scp_put` passes `hash_supported=False` — see
+  "Device layer".)
+- **The speed argument is real but small.** Measured on a C9200CX against
+  the 408 MB `cat9k_lite-rpbase.17.12.06.SPA.pkg`: `verify /md5` 18.5s,
+  `verify /sha512` 33.9s — about 1.8×. Extrapolated to a 1.2 GB image
+  that is roughly 55s versus 100s, and an upgrade verifies twice (after
+  staging, again before `install add`), so ~1.5 min per device against an
+  activate-and-reload of 5–10 min. Don't re-measure this to re-open the
+  question; re-measure it only if the numbers stop being plausible.
+- **The security difference is specific rather than generic, and the
+  generic version of the argument is wrong.** Substituting bytes to match
+  an already-recorded digest is a *preimage* attack, and MD5's preimage
+  resistance is intact — so "MD5 is broken" does not on its own decide
+  this. What decides it is *chosen-prefix collisions* (practical since
+  2019): an attacker who supplies the image to an admin can hand over a
+  benign image prepared to collide with a malicious one, let NetHub ingest
+  the benign one, and substitute later. Two places in this design have no
+  backstop if that works — under pull the device does not verify the
+  distribution host at all, so the digest is the only control (§4.3.1),
+  and day-0 names payload hash verification as one of three compensations
+  for deliberate plain HTTP (§4). Large binaries with slack space are good
+  collision carriers.
+
+The reopening condition is unchanged and is the one the rule above already
+states: a second platform that only offers MD5. That would be an *added*
+algorithm with the column §3.4 refuses today — a different decision from
+this one, argued on its own terms.
 
 **Everything the EE reads is rendered, not supplied** (design doc §3.5).
 `software_registry.yml`, the per-job inventory, and the connection vars are
@@ -810,16 +854,61 @@ seems to require one, the design is what needs revisiting, not the rule.
 ## Device layer (`nethub/devices/`)
 
 Ordinary Python driving Netmiko — what replaces the playbooks (`netmiko.md`).
-Two of that plan's five modules exist:
+Four of that plan's five modules exist:
 
 - `facts.py` — `show version`, `dir` and `show privilege`, parsed with
   ntc-templates where a template exists.
 - `connection.py` — the only way any NetHub process opens a device session.
+- `transfer.py` — `stage_image()` plus the two transport adapters.
+- `install.py` — the activate/reload/verify/cleanup half.
 
-`transfer.py`, `install.py` and `phases.py` are named in `netmiko.md`'s module
-layout and are absent. Nothing dispatches any of this: there is no sibling
-process and no job row yet, so the device layer is reachable only from a test
-or from `scripts/check_device_facts.py`.
+`phases.py` is named in `netmiko.md`'s module layout and is absent. Nothing dispatches any of this: there is no sibling process and no job
+row yet, so the device layer is reachable only from a test or from
+`scripts/check_device_facts.py`.
+
+`facts.py`, `connection.py` and `transfer.py` have been exercised against a
+real Catalyst 9200CX on IOS-XE 17.12.06, the push adapter included: enable, transfer, confirmed
+restore, `verify /sha512` against the ingest digest, and the
+skip-if-already-staged path. **Push throughput is the number to plan
+against: ~1.4 MB/s**, measured pushing 408,739,840 bytes in 319.9s
+end-to-end (less a 33.9s verify pass). That is device-bound, not
+link-bound — a full 1.2 GB image is roughly 15 minutes per device, which
+is what §8's per-host stage bound has to be calibrated against, and it is
+also why staging many devices at once costs NetHub's link little (twenty
+concurrent devices is ~28 MB/s). Untested: the same push across a
+constrained WAN link, where the bottleneck moves. The pull adapter has
+not been run against a device at all — its prompt sequence remains the
+open item.
+
+**`install.py` is fully validated too, including the reload.** A round trip
+was run on the lab switch — 17.12.6 → 17.12.08 → 17.12.6, both directions
+through `stage_image` → `activate` → `wait_for_device` → `verify_upgrade` →
+`cleanup`. That also closes `netmiko.md` build step 1, which had asked for
+the reconnect loop to be spiked against real hardware and never was.
+
+Timings, consistent across both runs and worth planning against:
+
+| step | duration |
+|---|---|
+| stage 471 MB over SCP | ~370s (1.28 MB/s) |
+| `install add … activate commit` | 605–622s |
+| reload → CLI serving again | 228–238s |
+| `install remove inactive` | ~5s |
+
+Three things the real runs settled that the ported code had guessed at:
+
+- **`install add … activate commit` does not drop the session.** It runs the
+  whole add/activate/commit and returns `SUCCESS` with the session still up,
+  about ten minutes in, and only *then* reboots. `activate()` handles a lost
+  session as well, but that branch is unobserved — it exists because a reload
+  taking the session is indistinguishable from a network drop, not because
+  that is what happens.
+- **The reload deadline has ample headroom.** 228–238s used against a 900s
+  default. Untested: a stack, or a device slower than this one.
+- **Version normalisation is load-bearing, not cosmetic.** The device reports
+  `17.12.8` where the target was `17.12.08`. A string comparison in
+  `verify_upgrade` would have failed a *successful* upgrade with
+  `wrong_version`; `facts.same_version` is why it did not.
 
 **Parsing is split from connecting so device output can be re-parsed with no
 device.** `check_device_facts.py <host>` captures `show version` / `dir` /
@@ -893,6 +982,80 @@ undo by accident:
 - The module's three exceptions are the three §7.3 `failure_stage` values a
   connection can produce — `hostkey`, `credential`, `connect` — so mapping them
   in `phases.py` is a lookup rather than a judgement.
+
+`transfer.py` ports the three `tasks/*.yml` transfer files, with four
+differences that are deliberate:
+
+- **`verify_sha512` asks the device for the digest instead of handing it the
+  expected one.** `verify /sha512 <file> <digest>` echoes the digest back, so
+  a substring test against that output can pass on the echo alone — the same
+  class of no-op as matching the word "Verified". Comparing in Python also
+  lets a mismatch report what the device actually computed. Real output format
+  is `verify /sha512 (flash:packages.conf) = <128 hex>`.
+- **`_scp_server_enabled` matches whole lines.** The Ansible original tested
+  `'ip scp server enable' in stdout`, and `no ip scp server enable` contains
+  that string — an explicitly negated config read as enabled, and the bracket
+  would have restored it backwards. It never bit because IOS omits the default
+  from running-config, but don't reintroduce the substring test.
+- **The unconfirmed-restore error is raised from `finally`,** so it supersedes
+  an in-flight push failure and keeps it as `__context__`. A device left
+  changed is the more urgent of the two facts. `_restore_scp_server` never
+  raises: a restore that could not be attempted *is* an unconfirmed restore.
+- **Skip-if-already-staged is a digest, not a `dir` presence check** — which
+  is the first item on "Planned improvements" below, now moot for this path.
+  A file of the right name is not the file staging checked (design doc §8.1).
+
+Two things about it that look like they could be simplified and cannot:
+
+- **`_scp_put` passes `hash_supported=False`, and that is not tuning.**
+  Netmiko's transfer class MD5s the source file in its constructor whenever
+  that flag is left on — including under `file_transfer(disable_md5=True)`,
+  which only skips the *comparison*. Left on, every push does a ~1.2 GB MD5
+  pass computing a digest nothing reads, in a system with one hash algorithm
+  (see the SHA-512 rule above, which records why MD5 stays rejected).
+- **`netmiko.file_transfer()` is not used at all**, for the same reason plus
+  its verification comparing the mount against the device rather than the
+  table against the device.
+
+The SCP put opens a *second* SSH session, and `SCPConn.establish_scp_conn`
+builds it with `ssh_conn._build_ssh_client()` — our override — so the pinned
+host-key policy and keyboard-interactive auth cover both connections. Design
+doc §10 asks whether the host-key question applies to both independently;
+under Netmiko it does, and both are answered by construction.
+
+`install.py` is driven by the phase model rather than written as one
+procedure, and five things in it are load-bearing:
+
+- **`wait_for_device()` takes a connection *factory*, not a connection.** The
+  reload takes the session with it, so there is nothing to reuse — and the
+  factory is where the caller supplies the credential and the pinned host key,
+  which keeps both out of this module.
+- **A device answering SSH is not a device that is ready.** IOS-XE accepts
+  connections while it is still coming up, so every reconnect attempt runs a
+  real command before the connection is accepted, and one that answers but
+  cannot be used is closed rather than returned.
+- **A lost session during `install add` is the expected ending, not an
+  error** — but a *clean* return that does not say `SUCCESS` is a failure.
+  IOS-XE reports some install failures in-band with the session still up, and
+  treating that as "rebooting" would burn the whole reload deadline before
+  reporting something visible immediately.
+- **The pre-activate image check is a `verify /sha512`, never a `dir`.** This
+  is the §8.1 requirement the playbook missed: a host whose staged image
+  failed verification is still sitting in flash under the target filename.
+  There is a test asserting no `install add` is issued in that case.
+- **A declined `install remove inactive` still prints `SUCCESS:
+  install_remove`.** Found by answering `n` to a real device before trusting
+  the accept path: the marker means "the command finished", not "files were
+  removed", and the transcript carries `User Rejected Deletion` instead.
+  `cleanup()` tests for the rejection *before* the success marker, and returns
+  the parsed list of what actually went. Don't reorder those two checks.
+- **`write memory` comes first, and that is why the stage phase's SCP restore
+  has to be *confirmed*.** This is the write that would carry an un-restored
+  `ip scp server enable` into startup-config (design doc §4.3.1) — the two
+  rules are one mechanism seen from two phases, so don't weaken either alone.
+
+Guards run before anything is written, which is what makes a refusal safe to
+re-run: `assert_ready_to_activate` issues only reads.
 
 **This closes one of design doc §10's open questions, which has not been
 revised to say so.** §10 asks where NetHub's rendered `known_hosts` actually
@@ -1060,7 +1223,8 @@ Known gaps, roughly in order of how much they mattered:
 
 - Have `install_cisco_upgrade.yml` re-run `verify /sha512` on the staged
   image before `install add`, instead of trusting a `dir` presence
-  check.
+  check. (Done on the Netmiko path — `transfer.py`'s skip-if-staged test
+  is a digest. Only the playbook still has the gap.)
 - Extract the per-host summary/report logic (`Build per-host status
   map` → `Print batch summary` → `Fail the run if any host failed`),
   currently duplicated verbatim between both playbooks, into a shared

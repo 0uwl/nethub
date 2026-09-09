@@ -383,6 +383,40 @@ scope. A second algorithm should arrive with a platform that requires
 one, and adding the column speculatively means carrying branching logic
 in all three consumers for a case that may never exist.
 
+That trade was tested rather than assumed. Swapping the system's single
+algorithm to MD5 was evaluated on 2026-09-09 — motivated by Netmiko
+shipping MD5 verification helpers, and by MD5 being measurably cheaper
+on a switch CPU — and rejected on three findings. The first disposes of
+the motivation: Netmiko's `compare_md5` compares the file on NetHub's
+own mount against the device, whereas the check this design needs
+compares the digest recorded at ingest against the device. §7.2's rule
+that the table wins over the file names exactly the case that
+comparison would miss, so the compare stays NetHub's own code whichever
+algorithm is chosen and the swap saves nothing. The second bounds the
+cost of keeping SHA-512: measured on a Catalyst 9200CX, a 408 MB
+package hashes in 18.5s under `verify /md5` and 33.9s under
+`verify /sha512`, so a 1.2 GB image costs roughly 45 extra seconds per
+verification and about a minute and a half per device across an
+upgrade's two verifications — against an activate-and-reload measured
+in minutes.
+
+The third finding is the one that decides it, and it is narrower than
+the argument usually made. Substituting bytes to match a digest already
+recorded is a preimage attack, and MD5's preimage resistance is not
+practically broken, so "MD5 is broken" is not on its own a reason here.
+Chosen-prefix collisions are, and they have been practical since 2019:
+they give an attacker who supplies an image to an operator a working
+path — hand over a benign build prepared to collide with a malicious
+one, let NetHub ingest and record the benign one, substitute later. Two
+places in this design have nothing standing behind the digest if that
+succeeds. Under the pull transport the device does not verify the
+distribution host at all (§4.3.1), and day-0 names payload hash
+verification as one of three compensations for its deliberate use of
+plain HTTP (§4). Large binaries with unused space are good collision
+carriers. The reopening condition is unchanged by any of this: a second
+platform that only supports MD5, which would be an *added* algorithm
+and the column this section refuses, argued on its own terms.
+
 A hash binds bytes, and it binds nothing about identity or freshness. A
 digest confirms that the file a device received is the file NetHub
 stored. It says nothing about whether that was the *right* file for that
@@ -3356,6 +3390,20 @@ the next attempt gets a credential.
 
 ## 10. Open Questions
 
+- **Resolved: the single hash algorithm stays SHA-512; MD5 was evaluated
+  and rejected.** Raised because Netmiko ships MD5 verification helpers
+  and MD5 is measurably cheaper on a switch CPU (408 MB: 18.5s against
+  33.9s on a Catalyst 9200CX). Rejected because those helpers compare
+  NetHub's mount against the device rather than the ingest digest
+  against the device — the comparison §7.2 exists to stop anything
+  relying on — so the swap saves no code; and because chosen-prefix
+  collisions give a supplier of images a practical substitution path
+  against the two places with no backstop behind the digest (§4.3.1's
+  unverified distribution host, §4's plain-HTTP day-0). Full reasoning
+  in §3.4. Worth carrying forward: the *generic* form of the security
+  argument is wrong — matching an already-recorded digest is a preimage
+  attack, which MD5 still resists — so anyone re-opening this on
+  "MD5 is broken" is arguing from the weaker case.
 - **Resolved: `net_put` is usable against IOS-XE at image size, but only
   under `paramiko`.** Tested against a real device at image size, not
   just the small text file a different playbook had moved successfully.
