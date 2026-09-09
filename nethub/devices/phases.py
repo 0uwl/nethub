@@ -19,9 +19,9 @@ codebase did not raise itself.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
 
 from nethub.devices import connection, facts, install, transfer
 from nethub.extensions import db
@@ -92,7 +92,7 @@ class PhaseContext:
     device_password: str
     search_dir: str
     pull_target: transfer.PullTarget | None = None
-    reload_wait: install.ReloadWait = install.ReloadWait()
+    reload_wait: install.ReloadWait = install.DEFAULT_RELOAD_WAIT
     #: Injectable so tests need no device and the sibling can pass its own.
     connect: Callable[..., object] | None = None
 
@@ -301,7 +301,7 @@ def run_host(host: UpgradeRunHost, job: UpgradePhaseJob, ctx: PhaseContext) -> H
         if conn is not None:
             try:
                 conn.disconnect()
-            except Exception:  # noqa: BLE001 -- a dead session is already gone
+            except Exception:  # noqa: BLE001, S110 -- a dead session is already gone
                 pass
 
 

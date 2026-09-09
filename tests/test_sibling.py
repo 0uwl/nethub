@@ -322,7 +322,6 @@ class TestEndToEndOverTheSocket:
     ):
         """Keying by job and cross-checking the approver is what stops one
         person's password serving another person's approved execution."""
-        import os
         import socket
         import threading
 

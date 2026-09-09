@@ -12,20 +12,20 @@ pre-check. §8.1 is explicit that device state is re-gathered per phase because
 image check specifically has to be a `verify /sha512` and not a `dir`: a file
 of the right name is not the file staging checked.
 
-Verified against hardware: the guards, the version comparison, and the facts
-they read. **Not verified: `install add ... activate commit`, the reload, the
-reconnect loop, and `install remove inactive`** -- none can be exercised
-without rebooting a real device. Their command strings and prompt handling are
-ported from `ansible/playbooks/install_cisco_upgrade.yml`, which has been run
-by hand against a fleet; the failure handling around them has not.
+Validated against hardware end to end, including two live reloads: a
+17.12.6 -> 17.12.08 -> 17.12.6 round trip through activate, the reconnect
+loop, the version check and `install remove inactive`. The command strings
+were ported from the hand-run playbooks this replaced (deleted at build step
+6); the failure handling around them is this module's own.
 """
 
 from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 from nethub.devices import facts, transfer
 
@@ -79,6 +79,10 @@ class ReloadWait:
     delay: float = 60.0
     interval: float = 30.0
     timeout: float = 900.0
+
+
+#: One shared instance, so it is never constructed in a default argument.
+DEFAULT_RELOAD_WAIT = ReloadWait()
 
 
 @dataclass(frozen=True)
@@ -174,7 +178,7 @@ def activate(
     )
     try:
         output = conn.send_command(command, read_timeout=read_timeout)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 -- any failure here may be the reload
         # Observed against a real 17.12.08 install: the command runs the whole
         # add/activate/commit and returns `SUCCESS` with the session still up,
         # roughly ten minutes in, and only then reboots. So this branch is the
@@ -200,7 +204,7 @@ def activate(
 def wait_for_device(
     connect: Callable[[], BaseConnection],
     *,
-    wait: ReloadWait = ReloadWait(),
+    wait: ReloadWait = DEFAULT_RELOAD_WAIT,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> BaseConnection:
@@ -226,12 +230,12 @@ def wait_for_device(
             conn = connect()
             facts.get_facts(conn)  # proves the CLI is actually serving
             return conn
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- every failure is just 'not back yet'
             last = exc
             if conn is not None:
                 try:
                     conn.disconnect()
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 -- already-dead session
                     pass
         if clock() >= deadline:
             raise ReloadTimeout(

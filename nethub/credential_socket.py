@@ -169,7 +169,7 @@ def handle_request(raw: bytes, store: CredentialStore, verify_running) -> bytes:
         body = {"ok": True, "username": username, "password": password}
     except CredentialError as exc:
         body = {"ok": False, "error": str(exc)}
-    except Exception:
+    except Exception:  # noqa: BLE001 -- deliberate: see below
         # Never echo an unexpected failure back across this socket: the reply
         # is parsed by the privileged side, and a library message here could
         # quote whatever was being handled.
@@ -198,13 +198,13 @@ def serve(listening: socket.socket, store: CredentialStore, verify_running,
     while stop is None or not stop.is_set():
         try:
             conn, _ = listening.accept()
-        except socket.timeout:
+        except TimeoutError:
             continue
         except OSError:
             break
         try:
             serve_once(conn, store, verify_running)
-        except Exception:  # noqa: BLE001 -- one bad peer must not stop the server
+        except Exception:  # noqa: BLE001, S110 -- one bad peer must not stop the server
             pass
 
 

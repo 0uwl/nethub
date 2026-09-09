@@ -9,6 +9,30 @@ nothing else -- which NetHub validates and compiles into rows (design doc
 connection var a request may carry is the target address, and it is validated
 rather than trusted. Everything that says *who someone is* is read
 server-side.
+
+**What a request may set.** This table used to live in
+`ansible/inventory/README.md`, which build step 6 deleted along with the rest
+of that layer; it is the contract itself rather than documentation of the
+playbooks, so it moved here with the code that enforces it.
+
+| Field | Notes |
+|---|---|
+| `platform` | Must be supported. `iosxe` only today, and currently implicit. |
+| `hosts[].name` | The inventory hostname, unique within a run. |
+| `hosts[].ansible_host` | Address. An IP literal inside a configured CIDR. |
+| `hosts[].bundle` | A bare registry key. Resolved server-side. |
+| `hosts[].flash_dir` | Optional. `flash:` / `bootflash:`. |
+
+Anything else is rejected. Connection vars, credentials and registry entries
+are NetHub's to write -- `image_transport` especially, because choosing the
+transport chooses whose credential gets spent (§4.3.1). Beyond this set the
+answer is a pull request against the code, not a runtime upload.
+
+**Two deliberate narrowings against that table, both worth knowing:** this
+implementation takes *one* bundle for the whole run rather than one per host,
+and `flash_dir` is not submittable at all (it defaults on the column). Both
+are simplifications of the contract, not disagreements with it -- widening
+them is additive and needs no rule revisited.
 """
 
 from __future__ import annotations
@@ -18,6 +42,7 @@ import ipaddress
 import json
 from datetime import datetime, timezone
 
+from . import artifacts as artifact_store
 from .extensions import db
 from .models import (
     DeviceHostKey,
@@ -106,17 +131,19 @@ def confirmed_key(address: str) -> DeviceHostKey:
     return row
 
 
-def entry_for(entries: dict, bundle: str) -> dict:
-    entry = entries.get(bundle)
-    if not isinstance(entry, dict):
-        raise RequestError(f'No registry entry named "{bundle}".')
-    missing = [f for f in ('file_name', 'sha512', 'file_size', 'version') if f not in entry]
-    if missing:
-        raise RequestError(f'Registry entry "{bundle}" is missing: {", ".join(missing)}.')
-    return entry
+def resolve_bundle(bundle: str, platform: str = 'iosxe'):
+    """A request names a key; NetHub resolves it to a row.
+
+    Never a filename and never a digest -- a submitted pair would name any
+    bytes against any checksum and bypass the table that owns both.
+    """
+    try:
+        return artifact_store.get_published(bundle, platform=platform)
+    except artifact_store.ArtifactError as exc:
+        raise RequestError(str(exc)) from None
 
 
-def build_document(bundle: str, hosts, registry_name: str) -> str:
+def build_document(bundle: str, hosts) -> str:
     """The request as NetHub understood it, stored beside its digest.
 
     §3.4 hashes what it ingests, and a document deciding which images land on
@@ -125,7 +152,6 @@ def build_document(bundle: str, hosts, registry_name: str) -> str:
     """
     return json.dumps(
         {
-            'registry': registry_name,
             'bundle': bundle,
             'hosts': [{'hostname': h, 'ansible_host': a} for h, a in hosts],
         },
@@ -134,8 +160,8 @@ def build_document(bundle: str, hosts, registry_name: str) -> str:
     )
 
 
-def submit(*, user, registry, entries, bundle, hosts_raw, transport,
-           cidrs, shared_account_mode=False, flash_dir='flash:'):
+def submit(*, user, bundle, hosts_raw, transport, cidrs,
+           shared_account_mode=False, flash_dir='flash:', platform='iosxe'):
     """Compile a request into a run, its host rows, and a queued pre-check.
 
     Flask writes exactly one job edge in the whole system and this is it: the
@@ -148,7 +174,7 @@ def submit(*, user, registry, entries, bundle, hosts_raw, transport,
             'will not take it from a request -- set it on your profile first.'
         )
     hosts = parse_hosts(hosts_raw)
-    entry = entry_for(entries, bundle)
+    artifact = resolve_bundle(bundle, platform=platform)
     targets = []
     for hostname, address in hosts:
         checked = check_target(address, cidrs)
@@ -160,7 +186,7 @@ def submit(*, user, registry, entries, bundle, hosts_raw, transport,
         device_username_used=user.device_username,
         shared_account_mode=bool(shared_account_mode),
         image_transport_used=transport,
-        request_document=build_document(bundle, targets, registry.name),
+        request_document=build_document(bundle, targets),
         request_sha512='',
         state='pre_checking',
         created_at=_utcnow(),
@@ -174,11 +200,12 @@ def submit(*, user, registry, entries, bundle, hosts_raw, transport,
             run_id=run.id,
             hostname=hostname,
             ansible_host=address,
+            artifact_id=artifact.id,
             bundle_key=bundle,
-            filename=entry['file_name'],
-            sha512=str(entry['sha512']).lower(),
-            version=str(entry['version']),
-            file_size=int(entry['file_size']),
+            filename=artifact.filename,
+            sha512=artifact.sha512,
+            version=artifact.version,
+            file_size=artifact.file_size,
             flash_dir=flash_dir,
             state='pending',
         ))

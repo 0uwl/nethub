@@ -22,11 +22,16 @@ CONTAINER="nethub-dev"
 echo "==> Building dev container image"
 podman build -f Containerfile.dev -t "$IMAGE" .
 
+# Bind-mount source must exist first; podman would otherwise create it
+# root-owned. This replaced a mount of ansible/inventory/rendered/, a path
+# that had already stopped existing before ansible/ was deleted.
+mkdir -p ./instance/registries
+
 echo "==> Starting dev container (Flask debug/reload on :$NETHUB_PORT)"
 podman run --rm --name "$CONTAINER" \
     -p "${NETHUB_PORT}:${NETHUB_PORT}" \
     -v "$PWD:/app:Z" \
-    -v "./ansible/inventory/rendered/group_vars:/app/instance/registries:Z" \
+    -v "./instance/registries:/app/instance/registries:Z" \
     -e NETHUB_PORT \
     -e SECRET_KEY \
     -e ADMIN_USERNAME \

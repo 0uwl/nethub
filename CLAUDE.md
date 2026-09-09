@@ -4,19 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**A decided migration is in progress: Ansible is being replaced by
-Netmiko.** `netmiko.md` is the handoff document, and it should be read
-before acting on "Ansible playbook notes" below or on any of the
-Ansible-specific hard rules — it records which of them dissolve, which
-survive under a different mechanism, and which are untouched. It is a plan
-with a numbered build order, not a description of finished work: steps 1–5
-are built and tested, including the routes that submit runs and approve
-gates. The device layer is validated end-to-end against real hardware
-(two live upgrades); the dispatch half — schema, sibling, credential socket,
-routes — is tested and has been driven end-to-end through the Flask app, but
-only as far as a device that does not answer. Steps 6–8 are not started. Nothing under `ansible/` has been deleted — that
-is step 6 — so both layers are in the tree at once and this file describes
-both. See "Device layer" below for what exists on the Netmiko side.
+**The Ansible-to-Netmiko migration is most of the way done.** `netmiko.md`
+is the handoff document: a numbered build order, of which **steps 1–6 are
+complete**; only step 8 (a manual escape hatch) is left. Its supersession table is now a record of edits
+already applied to this file rather than a list of pending ones — read the
+hard rules below directly. The device layer is validated end-to-end against
+real hardware (two live upgrades, plus a live pre-check driven through the
+Flask app); step 6 deleted `ansible/` entirely, so there is only one layer in
+the tree now. Step 8 restores a manual escape hatch. The one thing not yet done on the day-2 path is a full
+app-driven run past pre-check — stage/activate/verify/cleanup are each
+hardware-validated through the device layer, but not yet in one run started
+from the UI.
 
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
 package, built as an application factory (`nethub.create_app()`) rather
@@ -29,57 +27,16 @@ expression and only invokes it if written as a call; there is no
 `--factory` flag in this version (older gunicorn releases used one —
 don't assume it still exists without checking `gunicorn --help` against
 whatever version `requirements.txt` actually resolves). It implements a
-first slice of the Software Lifecycle module: local username/password
-auth (everyone who can log in is an admin — no roles, no OIDC),
-admin-driven user creation (`nethub/auth.py`), and a multi-registry
-publish flow. NetHub tracks any number of `software_registry`-bearing
-files rather than one hardcoded file: an admin bind-mounts each file
-somewhere under `REGISTRIES_ROOT`, then registers it from the
-Registries settings page (`nethub/registry_routes.py`'s `registries_bp`)
-— NetHub reads the file for an existing `software_registry` key
-(adopting its entries if there are any) or collects a `search_dir` and
-writes a fresh one in. Each registered file is a `Registry` row
-(`nethub/models.py`) — a pointer NetHub owns, not a copy of the data;
-the file and its images stay the admin's. Entry-level publish/delete
-(`nethub/registry.py`, `nethub/registry_routes.py`'s `registry_bp`,
-scoped under `/registries/<id>/entries`) is otherwise the same flow as before: an
-uploaded image plus a typed-in checksum become a new entry, deletable
-from the same list page. Entry delete is a hard, unaudited removal (the
-entry and its image file) — no `state`/`superseded_by_id` machinery,
-matching alpha's existing no-supersede stance on adds; *registry* delete
-(forgetting a `Registry` row) is deliberately the opposite — it never
-touches the file or its images, only NetHub's own pointer to them.
-Because the registry YAML is hand-editable on disk (there's no
-`artifacts` table behind it — see below) and, per the settings flow
-above, may not even originate from NetHub, every route that reads or
-writes it treats both a broken file and a hostile one as recoverable,
-not fatal: `registry.load_registry()` raises `RegistryError` (flashed,
-not a 500) on invalid YAML or a `software_registry` key that isn't a
-mapping; `registry._save_registry()` is a path-escape-guarded,
-read-modify-write, atomic (temp file + `os.replace`) save that preserves
-every sibling key in the file (`image_transport`, `distribution_host`,
-...) rather than overwriting the whole document; a `file_name` read back
-out of the file is revalidated through `secure_filename` before
-`delete_entry`/`check_registry` will touch a path built from it, since a
-hand-edited value there is exactly as untrusted as one a submitter typed
-in; and `registry.check_registry()` — wired to a "Check registry"
-button, not run implicitly on page load, since it hashes every
-registered image on disk — walks every entry, silently re-deriving a
-stale `file_size` (cheap, non-security, always recoverable from the file
-itself) and flagging anything it can't safely fix on its own: a missing
-file, a checksum that no longer matches the bytes on disk, a malformed
-or incomplete entry. It never guesses at a wrong checksum. `alpha.md` is
-that slice's plan and
-records its deliberate deviations from `design-document.md` — no
-`artifacts` table, no Ansible dispatch, no `registry_jobs`/git-committed
-registry, sessions are Flask-Login's signed cookie rather than a
-`sessions` row (§4.5); the multi-registry `Registry` table is an alpha
-addition with no design-doc counterpart, not a stand-in for one.
+first slice of the Software Lifecycle module: local username/password auth
+(everyone who can log in is an admin — no roles, no OIDC), admin-driven user
+creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
+`alpha.md` is that slice's plan and records its deliberate deviations from
+`design-document.md` — no `registry_jobs`/git-committed registry, and sessions
+are Flask-Login's signed cookie rather than a `sessions` row (§4.5).
 Provisioning (day-0) is entirely unimplemented.
-The playbooks under `ansible/` are hand-invoked scaffolding, never wired
-to anything NetHub provides — "Ansible playbook notes" below describes
-them as committed, but they are now a layer being retired rather than
-one being finished, and `netmiko.md` is where they are headed. Treat
+The `ansible/` tree is gone (build step 6) along with `.ansible-lint` and
+the `ansible-lint` CI job. Nothing in the repo runs Ansible any more; the
+device layer below replaced it. Treat
 `design-document.md` as the design document / target architecture, not
 a description of current code — always verify a described component
 actually exists before assuming it's implemented.
@@ -91,11 +48,6 @@ NetHub containerizes as a single-process image (`Containerfile` —
 Podman Quadlet unit at `quadlet/nethub.container`. See "Container" below
 for the full environment-variable list and the systemd-credential
 mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
-
-`ansible/inventory/` is a design sketch, not working config. It shows
-the ownership boundary between the user-uploaded upgrade request and the
-inventory NetHub renders around it (design doc §3.5/§8.1); its
-`rendered/` tree illustrates output NetHub does not yet produce.
 
 ## Commands
 
@@ -121,12 +73,15 @@ python scripts/check_device_facts.py --replay <dir>         # re-parse a capture
 ruff check .                       # Python lint (pyproject.toml: 100-char lines,
                                     # N999 ignored for nethub/gunicorn.conf.py --
                                     # gunicorn requires that exact filename)
-yamllint .                         # YAML lint (.yamllint.yaml: default ruleset minus
-                                    # document-start/truthy, which the Ansible content
-                                    # doesn't follow; line length capped at 150)
-ansible-lint ansible/              # Ansible lint, gated at `profile: min` (.ansible-lint)
-                                    # -- `basic` flags stylistic choices that are
-                                    # deliberate here (see "Ansible playbook notes")
+yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML files
+                                    # are left -- this config and the CI workflow -- but
+                                    # document-start/truthy stay disabled for new
+                                    # reasons: ci.yml has no `---`, and Actions' `on:`
+                                    # key is a YAML 1.1 boolean.
+
+python -m nethub.sibling           # the dispatcher; reads NETHUB_CREDENTIAL_SOCKET
+                                    # and NETHUB_SEARCH_DIR. Runs as its own unit, never
+                                    # inside the Flask process.
 ```
 
 Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
@@ -144,43 +99,11 @@ file under a temp `REGISTRIES_ROOT` and creates its `Registry` row. `pyproject.t
 `sys.path` itself) could.
 
 `.github/workflows/ci.yml` runs on every push/PR against `main`: a `lint`
-job (`ruff`/`yamllint`/`ansible-lint` from the block above, plus `Containerfile` — not
-`Containerfile.dev`, which is dev-only — via the `immanuwell/dockerfile-roast`
-action also used by Drawbridge), a `test` job (`pytest -v`), and a `publish`
-job that builds and pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on
-push to `main` once both prior jobs pass. `ansible-lint` needs
-`cisco.ios`/`ansible.netcommon` installed to resolve the playbooks' FQCN
-modules (no `requirements.yml` declares them), so the lint job installs
-both explicitly before running it.
-
-The Ansible playbooks (`ansible/playbooks/stage_cisco_upgrade.yml`,
-`ansible/playbooks/install_cisco_upgrade.yml`) are currently invoked by hand,
-against a network device inventory not present in this repo:
-```bash
-ansible-playbook ansible/playbooks/stage_cisco_upgrade.yml -e stage_serial=1
-ansible-playbook ansible/playbooks/install_cisco_upgrade.yml -e install_serial=1
-```
-They target Cisco IOS-XE devices (`cisco.ios` collection, `network_cli`
-connection) and expect each host to define a `software_bundle` var
-(filename, sha512, version, file_size) — see §5/§8 of
-`design-document.md`. The staging playbook also reads `image_transport`
-(`push_scp` default, or `pull_sftp` plus `distribution_host` /
-`distribution_user` and a password from
-`DISTRIBUTION_PASSWORD`); it lives in
-`ansible/inventory/group_vars/all.yml` and is deployment-level,
-never per-request. `stage_serial`/`install_serial` control how many
-hosts run per wave in each playbook (both default to 1); with a value
->1, hosts in the same wave share this terminal's stdin for the
-interactive `pause` prompts, so they can interleave.
-
-That manual, interactive, two-file form is what is committed today. The
-split previews the idea behind design doc §8.1's phase split (stage vs.
-activate/verify/cleanup) without implementing the rest of it — both
-playbooks still run by hand, still pause for confirmation, and NetHub
-dispatches neither. §8.1 supersedes this in the target design: NetHub
-dispatches each phase with no TTY, and the `pause` prompts become UI
-approval gates. Don't "fix" either playbook's prompts without
-implementing the phase model that replaces them.
+job (`ruff`/`yamllint`, plus `Containerfile` — not `Containerfile.dev`, which
+is dev-only — via the `immanuwell/dockerfile-roast` action also used by
+Drawbridge), a `test` job (`pytest -v`), and a `publish` job that builds and
+pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on push to `main` once both
+prior jobs pass.
 
 ## Container
 
@@ -233,7 +156,9 @@ Environment variables the unit (or a plain `podman run`) can set:
 |---|---|---|
 | `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
-| `REGISTRIES_ROOT` | `<repo root>/instance/registries` | Root directory an admin bind-mounts registry files into — every `Registry.file_path` is resolved (and path-escape-checked) relative to this. Replaces the old `IMAGE_DIR`/`REGISTRY_FILE` pair; there is no separate images root, since each registry's own `search_dir` (set from the Registries settings page, not an env var) is typically a much larger, independently-mounted volume. |
+| `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
+| `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |
+| `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
 | `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
@@ -271,39 +196,38 @@ database, one admin frontend**:
   an authenticated session; the phone-home route is the system's only
   unauthenticated entry point.
 
-**Publishing and installing are two separate operations, and only one is
-an EE dispatch** (design doc §6, §8/§8.1). Publishing is local to NetHub
+**Publishing and installing are two separate operations, and only one
+touches a device** (design doc §6, §8/§8.1). Publishing is local to NetHub
 now that NetHub owns the store (§3.3): upload → SHA-512 verify → promote
-bytes and row → registry re-render → git commit → audit trail. It never
-touches a network device and no longer runs a playbook. Installing runs
-`upgrade_iosxe.yml` against devices, split into phases, and is the only
-thing in the system that dispatches an EE. Two things that did *not*
-change when publish stopped being a dispatch: it stays in the **sibling**
-(§3.2's argument is unchanged — it must not run in a Flask handler), and
-it keeps its `registry_jobs` row, the serial queue, `render_state`, the
-`flock`, the startup sweep, and every state in §7.3. Conflating publish
-with install is still the easiest mistake to make here; they're now
-separate in kind rather than two instances of one mechanism.
+bytes and row → registry re-render → git commit → audit trail. Installing
+runs the phase model in `nethub/devices/phases.py` against devices. Two
+things that did *not* change when publish stopped being a dispatch: it stays
+in the **sibling** (§3.2's argument is unchanged — it must not run in a Flask
+handler), and it keeps its `registry_jobs` row, the serial queue,
+`render_state`, the `flock`, the startup sweep, and every state in §7.3.
+Conflating publish with install is still the easiest mistake to make here;
+they're separate in kind rather than two instances of one mechanism.
 
 **NetHub requires one thing of a device at login, and the list should
 stay short** (design doc §4.3): **privilege level 15**. NetHub otherwise
 writes no configuration outside the upgrade itself, and asserts privilege
-15 at pre-check. One exception is deliberate, bracketed rather than
+15 at pre-check (`phases.phase_precheck`). One exception is deliberate,
+bracketed rather than
 standing, **and belongs to the push transport alone**: the stage phase
 enables the device's own SCP server for the duration of the push and
 restores whatever it found — enabled or not — in an `always:` block,
 confirmed by re-reading the running-config rather than trusted from the
-module's exit status (design doc §4.3.1). A host whose restore can't be
-confirmed is failed outright (`end_host`), because an unconfirmed enable
-would otherwise ride into startup-config on `write memory`. Under the
+adapter's exit status (design doc §4.3.1). A host whose restore can't be
+confirmed is failed outright, because an unconfirmed enable would otherwise
+ride into startup-config on `write memory`. Under the
 pull transport nothing on the device is reconfigured at all, so the
 exception doesn't arise. The pre-check asserts no
 `ip ssh source-interface` in either mode — it was a pull-era carryover
 and push confirmed it doesn't gate the device's SCP server, an unrelated
 service. It's relevant again *for a deployment running pull* (the device
 is an SSH client again), but as a device-side prerequisite an operator
-satisfies, not as a check NetHub makes; there is no pre-check assertion
-task file in the playbooks to hang one on today.
+satisfies rather than a check NetHub makes — `phase_precheck` asserts
+privilege, boot mode and free space, and deliberately nothing about it.
 
 **On privilege 15 specifically — there is no `enable` escalation
 anywhere** (design doc §4.3). Every command an upgrade runs —
@@ -312,14 +236,14 @@ level 15, so an account that can't reach it can't upgrade anything.
 Asking for it at login rather than via `enable` removes a second secret
 (no `become_password` is ever collected) and removes the shared-enable-
 secret problem, which is the same shared-credential objection §4.3 raises
-about service accounts. Don't add `ansible_become`/`ansible_become_method`
-back to the rendered inventory, and don't add a `become_password` to the
-credential path. It's also a *property* rather than a tax: §4.3 says
+about service accounts. Don't reintroduce an escalation step, and don't add
+an enable secret to the credential path — `connection.connect()` passes no
+`secret` and nothing calls Netmiko's `.enable()`. It's also a *property* rather than a tax: §4.3 says
 NetHub's `role` gates NetHub's screens and never substitutes for what a
 credential authorizes on the device — the privilege requirement makes
-that concrete, since the refusal comes from the device. The playbook
-asserts it at pre-check so an under-privileged account fails once and
-clearly (`failure_stage: privilege`) rather than part-way through a wave.
+that concrete, since the refusal comes from the device. Pre-check asserts it
+so an under-privileged account fails once and clearly
+(`failure_stage: privilege`) rather than part-way through a wave.
 
 **The day-0 HTTP daemon authorizes nothing, and must never be asked to**
 (design doc §3.3/§3.4). A static file server is path-addressed: it cannot
@@ -339,10 +263,10 @@ mint, not the boot, so the log records what was *offered*, never
 ingest path (upload → hash → size → store → record) feeds both days —
 day-0 devices pull over HTTP; day-2 goes in whichever direction the
 deployment's `image_transport` setting selects (design doc §4.3.1),
-either NetHub pushing over SCP (`net_put`, riding the same `network_cli`
-session already authenticated with the submitter's device credential —
-the default, and the mode with no distribution credential at all) or the
-device pulling over SFTP from a distribution daemon. One `artifacts`
+either NetHub pushing over SCP (a second session to the same pinned
+address, under the submitter's device credential — the default, and the mode
+with no distribution credential at all) or the device pulling over SFTP from
+a distribution daemon. One `artifacts`
 table backs both days; a `kind` discriminator (script/config/image)
 distinguishes rows rather than splitting into separate tables. The SHA-512
 is computed once at ingest and consumed three times: day-0 verification,
@@ -400,12 +324,12 @@ states: a second platform that only offers MD5. That would be an *added*
 algorithm with the column §3.4 refuses today — a different decision from
 this one, argued on its own terms.
 
-**Everything the EE reads is rendered, not supplied** (design doc §3.5).
-`software_registry.yml`, the per-job inventory, and the connection vars are
-all projections of the `artifacts` and `users` tables, written at dispatch
-into a `private_data_dir` that is discarded with the job. On any
-inconsistency between table and file, the table wins (§7.2). The whole
-registry is re-rendered on every publish rather than patched in place,
+**Everything a phase acts on is read from rows, not supplied** (design doc
+§3.5). There is no longer anything rendered to a directory — the per-host
+filename, digest, size and version are snapshotted onto `upgrade_run_hosts`
+at submit, so a run is self-contained and a mid-run change cannot re-target
+it. On any inconsistency between table and file, the table wins (§7.2). The
+whole registry is re-rendered on every publish rather than patched in place,
 which is what makes that reconcile possible. **Kea's reservations are the
 fourth store and follow the same rule** (§7.4): rendered whole from
 `allowlist_entries` and reconciled, because a reservation outliving a
@@ -455,7 +379,7 @@ backend will yield, so an upgrade run collects the submitter's device
 credential at each approval gate, holds it in memory only for the life
 of the *phase execution* that approval releases (design doc §4.3/§9.1 —
 not for the life of the run, since a run can park at a gate for days),
-and never writes it to the `private_data_dir` or the session. The device
+and never writes it to a row, a log or the session. The device
 username comes from `users.device_username`, mapped server-side and
 never read from a submitted request. The property this buys is
 two-sided attribution: the same human in `upgrade_runs.submitted_by` and
@@ -530,14 +454,14 @@ but the table, the admin confirmation screen, and the rendered
 a policy object rather than a file.
 
 **Failure, concurrency, and staleness semantics live in design doc §7** and
-are load-bearing rather than aspirational — EE runs are dispatched
+are load-bearing rather than aspirational — phase executions are dispatched
 out-of-band by a sibling process (never synchronously in a Flask request
 handler, which would stall the phone-home route), registry writes are
 serialized by an advisory `flock`, and job status is a state machine with
 explicit terminal states
 (`succeeded`/`failed`/`timed_out`/`abandoned`/`cancelled`/`expired`), not
 a success flag. Serialization applies to a *phase execution*, not to a
-whole run: a run parked at an approval gate holds no EE process. Consult
+whole run: a run parked at an approval gate holds no running process. Consult
 §7 before implementing anything that writes to the database, the registry
 file, or git.
 
@@ -594,7 +518,8 @@ with an `outcome` enum and a `provisioning_log_artifacts` junction,
 and `upgrade_host_phase_results`. Four columns recur on both job tables
 because §7/§9 assume them and none existed: `created_at` (the queue has
 nothing else to order by — `started_at` is null until dispatch),
-`deadline_at`, `runner_instance_id`, `private_data_dir`. Two constraints
+`deadline_at`, `runner_instance_id`, and (in the design, not here) a
+`private_data_dir` that the Netmiko rewrite removed. Two constraints
 are load-bearing rather than tidy: `UNIQUE(run_id, phase, attempt)` is
 what makes two admins clicking "approve: reload" a `409` instead of two
 reloads (§8.1's serialization is scoped to *execution*, so it stops
@@ -632,58 +557,59 @@ addition, not a rework.
 These are settled decisions with reasoning in the design doc. If a change
 seems to require one, the design is what needs revisiting, not the rule.
 
-- **No user-supplied playbooks.** The playbook set is closed at build
-  time and selected by `platform` (design doc §2 Non-goals, §8.1). Accepting
-  one is arbitrary code execution inside the EE with the live device
-  credential in reach — an authenticated RCE primitive sitting beside the
-  unauthenticated route §4 spends its length on. There is no longer a
-  separate distribution credential for a playbook to reach for (push
-  removed it, design doc §4.3.1); the device credential §9.1 injects for
-  the phase execution is the one that matters, and per-phase collection
-  bounds what it is worth after the phase ends. It does nothing about a
-  playbook running while it is still valid, so the rule is unaffected.
-- **No user-supplied inventories, and no user-supplied Jinja.** A user
-  submits a *request document* — hosts, one bundle key each, a small
-  closed set of typed knobs — which NetHub validates and compiles. An
-  uploaded inventory carries `software_registry`, which would let a request
-  name any filename against any SHA-512 and bypass the `artifacts` table.
-  A `{{ ... }}` expression in a submitted field is the playbook hole in a
-  different costume.
-- **No user-settable connection vars — except `ansible_host`, which is
-  validated rather than trusted.** `ansible_user` is the submitter's own
-  device identity (or, only under shared account mode, one
-  admin-configured value — never something a submitter's request
-  supplies either way). An identity the submitter can type is not
-  evidence of anything, and the audit property in §4.3 depends on it.
-  The same goes for credentials and `become` settings. `ansible_host` is
-  different and the rule used to be wrong about it: a request has to
-  name its targets, and `ansible/inventory/README.md` has always listed
-  it as an allowed field. It is accepted under two constraints — a
-  deployment-level target CIDR (a `settings` row, §5), and a fail-closed
-  host-key check against `device_host_keys` (design doc §4.3/§8.1). The line is between vars
-  asserting *who someone is* (never submitted) and the address of the
-  thing being acted on (necessarily submitted).
-- **No EE invocation from the Flask process.** Flask holds the only
-  unauthenticated route; giving it Podman access turns any Flask RCE into
-  host-level container control (design doc §9). The sibling owns dispatch
-  and the job row is the only *control* channel between them — which is
-  also why there is no PTY streamed to the browser. There is exactly one
-  other channel and it is not a general one: a sibling-initiated Unix
-  socket carrying per-execution credentials and nothing else (design doc
-  §9.1). Don't widen it into RPC, don't let control information or
-  status onto it, and don't let Flask be the side that connects — the
-  reason is window minimisation (a deposit endpoint means the sibling
-  holds secrets for executions it hasn't started, and can be flooded),
-  not that a deposit socket would be "the Podman socket in miniature".
-  The construction is §9.2, and three things about it are easy to get
-  wrong: the **mount** is the
-  authenticator, not `SO_PEERCRED` — under one shared rootless user a
-  uid check discriminates nothing, so don't write one and believe it
-  means something; the socket is created by a systemd `.socket` unit,
-  never by `unlink()`+`bind()` in either container; and the sibling
-  parses bytes Flask chose, so the response surface needs framing,
-  caps, deadlines, and a character allowlist on the credential before
-  it reaches any variable or command string.
+- **No user-supplied playbooks — now a structural fact rather than a rule.**
+  There are no playbooks. Device work is `nethub/devices/`, closed at build
+  time because it is code in this repo. The rule existed because accepting
+  one was arbitrary code execution with the live device credential in reach,
+  an authenticated RCE primitive sitting beside the unauthenticated route §4
+  spends its length on. Nothing offers that surface now — but the property is
+  worth remembering the next time something proposes an "advanced" hook that
+  executes submitted text, because the credential §9.1 injects for the phase
+  execution is exactly what it would reach.
+- **No user-supplied inventories, and no user-supplied Jinja — the
+  mechanism is gone, the intent is enforced in code.** There is no inventory
+  to upload and no template to render. A submitter sends a *request
+  document* — hosts, a bundle key, a closed set of typed knobs — which
+  `nethub/upgrades.py` validates and compiles into rows; the contract is
+  tabulated in that module's docstring, where it moved when
+  `ansible/inventory/README.md` was deleted. The reason it stays closed is
+  unchanged: a submitted registry would let a request name any filename
+  against any SHA-512 and bypass whatever owns those values.
+- **No user-settable connection vars — except the target address, which is
+  validated rather than trusted.** The device username is the submitter's
+  own `users.device_username`, read server-side (or, only under shared
+  account mode, one admin-configured value — never something a request
+  supplies either way). An identity the submitter can type is not evidence
+  of anything, and §4.3's audit property depends on it. The same goes for
+  credentials and any escalation setting. The address is different, because
+  a request has to name its targets: it is accepted under two constraints,
+  both implemented in `nethub/upgrades.py` — a deployment-level target CIDR
+  (`DEVICE_TARGET_CIDRS`, standing in for §5's `settings` row) and a
+  fail-closed check against a *confirmed* `device_host_keys` row. The line
+  is between vars asserting *who someone is* (never submitted) and the
+  address of the thing being acted on (necessarily submitted).
+- **No device work in the Flask process; the sibling owns dispatch.** Half
+  of this rule's original reasoning dissolved with the EE — there is no
+  Podman socket to mount into Flask, so "a Flask RCE becomes host-level
+  container control" no longer applies. What survives is §3.2's plainer
+  reason and it is enough: Flask holds the only unauthenticated route, and a
+  handler that opened a device session would hold it for minutes. So Flask
+  writes a `queued` row and nothing else; `nethub/sibling.py` does the rest,
+  and the job row is the only *control* channel between them — which is also
+  why there is no terminal streamed to a browser. There is exactly one other
+  channel and it is not general: a **sibling-initiated** Unix socket carrying
+  per-execution credentials and nothing else (§9.1, `nethub/credential_socket.py`).
+  Don't widen it into RPC, don't let control or status onto it, and don't let
+  Flask be the side that connects — the reason is window minimisation (a
+  deposit endpoint leaves the sibling holding secrets for executions it hasn't
+  started, and can be flooded). Three construction details are easy to get
+  wrong: the **mount** is the authenticator, not `SO_PEERCRED` — under one
+  shared rootless user a uid check discriminates nothing, so don't write one
+  and believe it means something; the listening socket comes from a systemd
+  `.socket` unit, never from `unlink()`+`bind()` in either container; and the
+  sibling parses bytes Flask chose, so the response needs framing, caps,
+  deadlines and a character allowlist on the credential before it reaches any
+  variable or command string.
 - **Flask runs exactly one worker — and more than one thread.**
   `gunicorn` with `workers = 2` silently breaks the credential path: a
   credential submitted to worker A is invisible to worker B (design doc
@@ -691,25 +617,25 @@ seems to require one, the design is what needs revisiting, not the rule.
   about workers. Threads are the other half of the same rule and are
   *required*, not optional: §3.2 now notes that a 1.2 GB image upload
   plus its SHA-512 pass is the longest operation in the system after the
-  EE, and single-threaded it would hold the phone-home route for the
-  whole window — the exact failure §3.2 legislated against, arriving
-  through ingest instead of through `ansible_runner.run()`. Hash
+  device work, and single-threaded it would hold the phone-home route for
+  the whole window — the exact failure §3.2 legislated against, arriving
+  through ingest rather than through a dispatch call. Hash
   incrementally over the chunks as they're written so "hashed once at
   ingest" survives. The socket is served on its own thread with
   deadlines, for the same reason. §3.2 also now names the budget the
   whole design is calibrated against: **2 s p99 on phone-home, 15 min of
   device backoff.** Check changes to the request path against those
   numbers.
-- **No secrets in the `private_data_dir`, and don't trust
-  `ansible-runner` to keep them out.** `extravars` lands in
-  `env/extravars`, `passwords` in `env/passwords`, `envvars` becomes
-  `podman run -e` and shows up in `/proc/<pid>/cmdline`. The design says
-  credentials live only in memory (design doc §4.3/§4.3.1/§9.2), and
-  that is something you have to engineer: tmpfs-backed
-  `private_data_dir`, `env/` and `inventory/` destroyed with the
-  execution, and only scrubbed `stdout`/`job_events` retained as
-  `playbook_log_path`. Retaining the directory wholesale would park
-  credentials on disk for §7.4's full 365 days.
+- **The device credential never reaches disk, and this is now easy rather
+  than delicate.** The whole `private_data_dir` problem is gone: nothing
+  renders a directory for an execution to read, so there is no `extravars`,
+  no `env/passwords`, and no `podman run -e` showing up in
+  `/proc/<pid>/cmdline`. The credential is a Python attribute on
+  `phases.PhaseContext`, held for the life of one phase execution. What still
+  has to be *engineered* is the other end: `error_summary` is retained for a
+  year (§7.4), so `phases._summarise` copies a message only from exceptions
+  this codebase raised itself and reduces anything else to its type. A stray
+  `str(exc)` there is a durable credential leak with no other symptom (§7.3).
 - **`DEBUG` must be off wherever a credential path exists** (and wherever
   §4.5's session model applies — the same debugger renders a session
   cookie alongside a device password). It already applies to the local
@@ -739,7 +665,7 @@ seems to require one, the design is what needs revisiting, not the rule.
 - **No shared service account for device login — except one explicit,
   deployment-level opt-in.** Per-user credentials are the default; a
   deployment with no per-human device logins can turn on **shared
-  account mode** (design doc §4.4), which fixes `ansible_user` to one
+  account mode** (design doc §4.4), which fixes the device username to one
   admin-configured value for every run instead of reading
   `users.device_username`. It is a knowingly-made deployment setting, not
   a per-user choice and not a fallback that engages itself when an IdP
@@ -751,62 +677,59 @@ seems to require one, the design is what needs revisiting, not the rule.
   to a device except under shared account mode.
 - **The device-side SCP-server toggle (push transport only) must always
   be bracketed by a confirmed restore, and a host whose restore can't be
-  confirmed must fail, not warn.** The push adapter captures the device's prior
+  confirmed must fail, not warn.** `transfer.py`'s push adapter captures the device's prior
   `ip scp server enable` state before touching it, changes it only if not
-  already enabled, and restores it in an `always:` block regardless of
+  already enabled, and restores it in a `finally:` block regardless of
   whether the push succeeded (design doc §4.3.1). The restore is
   *confirmed* by re-reading the running-config, not trusted from a module
-  exit status — an unconfirmed restore fails the host outright
-  (`end_host`), because an unconfirmed enable would otherwise ride into
+  exit status — an unconfirmed restore fails the host outright, because an
+  unconfirmed enable would otherwise ride into
   startup-config on the activate phase's own `write memory`. Don't relax
   this to a logged warning: a device left with its SCP server on and no
   record of it is exactly the "cannot enumerate afterward" failure the
   design used to reject push over. Known, accepted, and *not* covered by
   this mechanism: a killed process, an abandoned run, or a crashed EE
-  container never reaches the `always:` block at all (design doc §4.3.1,
+  process never reaches the `finally:` block at all (design doc §4.3.1,
   §10) — don't claim this is fully closed. All of this is scoped to
-  `push_image_scp.yml`; the pull adapter reconfigures nothing and has no
+  `transfer.py`'s push adapter; the pull adapter reconfigures nothing and has no
   bracket, which is why `scp_restore_confirmed` is null for a
   pull-transport stage row and why that null must be read together with
   `upgrade_runs.image_transport_used` rather than alone (design doc §5).
 - **Day-2 transfer runs in whichever direction `image_transport` says,
   and the adapters are not interchangeable in their costs** (design doc
-  §4.3.1). `push_scp` is the default: `ansible.netcommon.net_put` under
-  the `paramiko` connection type, in `ansible/playbooks/tasks/push_image_scp.yml`.
-  IOS-XE has no SFTP *server* (client only), so a push has no SFTP
-  option — SCP is the only wire protocol available in that direction.
-  `pull_sftp` is the alternative: one `copy sftp://…` on the device's own
-  CLI in `ansible/playbooks/tasks/pull_image_sftp.yml`, driven with
-  `ansible.netcommon.cli_command` prompt/answer. `tasks/transfer_image.yml`
+  §4.3.1). Both live in `nethub/devices/transfer.py`; `stage_image()`
   dispatches between them and owns the shared `verify /sha512`.
-  - The isolation layer is now *required*, reversing the previous rule
-    against a `push_image_net_put.yml`. That rule's reason — "which
-    connection type to use is a settled decision, not something to keep
-    isolated for a later swap" — doesn't survive: the split now serves a
-    live configurable choice, not a speculative future one. Don't
-    re-inline either adapter.
-  - `net_put` under `libssh` was tested against a real device and found
-    unusable (SSH connection broke repeatedly, nothing useful in the
-    debug log). `paramiko` is deprecated upstream but is the only thing
-    that works, so that's what's committed for push. Pull touches
-    neither library, which is one of its arguments (design doc §10).
-  - Shelling out to OpenSSH `scp` inside the EE was considered and
-    rejected — it needs the device password on an interface `net_put`
-    doesn't, with no secure way yet to hand a credential to a subprocess
-    without it landing on a command line or on disk (design doc §3.3,
-    §10). Don't add an OpenSSH-`scp` fallback without revisiting that.
-  - The pull password is answered at the device's own `Password:`
-    prompt with `no_log`, **never** embedded as `sftp://user:pass@host/`
-    — that form lands in the device's command history and AAA command
-    accounting, which is the record §4.3's attribution property depends
-    on. `no_log` does not redact connection-plugin debug logging, so a
-    pull-transport phase must not run at `-vvv` or with
-    `ansible_persistent_log_messages`.
-  - The pull adapter's prompt sequence is **unverified against a real
-    device** (design doc §10). Naming only the filesystem as the copy
-    destination is deliberate: it forces the `Destination filename`
-    prompt so both prompts always appear in a known order. A wrong
-    prompt list hangs until the task timeout rather than failing fast.
+  - `push_scp` is the default: `CiscoIosFileTransfer` over Netmiko, which is
+    Paramiko underneath. IOS-XE has no SFTP *server* (client only), so a push
+    has no SFTP option — SCP is the only wire protocol available in that
+    direction.
+  - `pull_sftp` is the alternative: one `copy sftp://…` on the device's own
+    CLI, prompts answered on the channel.
+  - **`paramiko` is not an incidental choice.** Under Ansible, `net_put` with
+    the `libssh` connection type was tested against a real device and found
+    unusable — the SSH connection broke repeatedly at image size, with nothing
+    useful in the debug log. Netmiko is Paramiko-based, which is why push works
+    here; validated at 471 MB. Paramiko is deprecated upstream, so if it is
+    ever swapped, re-test at image size rather than assuming a smaller transfer
+    generalises.
+  - Shelling out to OpenSSH `scp` was considered and rejected — it needs the
+    device password on an interface the library API doesn't, with no secure way
+    to hand a credential to a subprocess without it landing on a command line
+    or on disk (design doc §3.3, §10). Don't add an OpenSSH-`scp` fallback
+    without revisiting that.
+  - The pull password is answered at the device's own `Password:` prompt and
+    **never** embedded as `sftp://user:pass@host/` — that form lands in the
+    device's command history and AAA command accounting, which is the record
+    §4.3's attribution property depends on. `_pull_sftp` also refuses to put
+    exception text in its error, because a channel read can quote what was
+    written to that channel. Don't enable Netmiko's `session_log` on a
+    pull-transport phase for the same reason.
+  - **The pull adapter's prompt sequence is still unverified against a real
+    device** (design doc §10) — the one item from the deleted playbooks that
+    outlived them. Naming only the filesystem as the destination is
+    deliberate: it forces the `Destination filename` prompt so both prompts
+    appear in a known order. A wrong list hangs until the read timeout rather
+    than failing fast.
 - **Transport is deployment-level and never request-level, and its
   credential never lives in the `settings` table** (design doc §4.3.1,
   §5). `settings` holds `image_transport`, `distribution_host`,
@@ -816,18 +739,19 @@ seems to require one, the design is what needs revisiting, not the rule.
   credential in the sibling's unit that Flask never sees. A request may
   not select the transport, because selecting the transport selects whose
   credential gets spent. And **don't reach for Ansible Vault**: the file
-  the EE would read is on a tmpfs `private_data_dir` destroyed with the
-  execution, so vault would protect the least-exposed copy using a second
-  secret delivered by the same means — the key-disposal problem this
+  it would protect is a Python variable that exists for the life of one
+  phase execution, so vault would protect the least-exposed copy using a
+  second secret delivered by the same means — the key-disposal problem this
   design already removed once. `image_transport` and `distribution_host`
   belong in §7.2's signed set: repointing the distribution host is the
   highest-yield settings write in the system.
 - **NetHub is the sole source of the image bytes, and that is not
   modular** (design doc §2 Non-goals, §3.3). The *source* is fixed even
   though the *direction* is configurable: both adapters read the same
-  published subtree on the NetHub host — pushed off a read-only EE
-  mount, or served from it by the pull transport's SFTP daemon. There is
-  no remote distribution target, no mirror, and no second store. The cost
+  published subtree on the NetHub host — pushed from it directly, or served
+  from it by the pull transport's SFTP daemon. There is
+  no remote distribution target, no mirror, and no second store — both
+  adapters read `PhaseContext.search_dir`. The cost
   is written down: every byte crosses whatever link separates NetHub from
   the device either way, which bites first on a branch site behind a
   narrow link. Reopening it (§10) is now two questions — a push mirror
@@ -856,20 +780,19 @@ seems to require one, the design is what needs revisiting, not the rule.
 
 ## Device layer (`nethub/devices/`)
 
-Ordinary Python driving Netmiko — what replaces the playbooks (`netmiko.md`).
-Four of that plan's five modules exist:
+Ordinary Python driving Netmiko. This replaced `ansible/`, which build step
+6 deleted (`netmiko.md`). The five modules:
 
 - `facts.py` — `show version`, `dir` and `show privilege`, parsed with
   ntc-templates where a template exists.
 - `connection.py` — the only way any NetHub process opens a device session.
 - `transfer.py` — `stage_image()` plus the two transport adapters.
 - `install.py` — the activate/reload/verify/cleanup half.
-
 - `phases.py` — the per-host loop, the exception→`failure_stage` mapping, and
   the rows.
 
-All five of the plan's modules now exist, `nethub/sibling.py` dispatches
-them, and `nethub/upgrade_routes.py` creates the rows they work from.
+`nethub/sibling.py` dispatches them and `nethub/upgrade_routes.py` creates the
+rows they work from.
 
 `facts.py`, `connection.py` and `transfer.py` have been exercised against a
 real Catalyst 9200CX on IOS-XE 17.12.06, the push adapter included: enable, transfer, confirmed
@@ -1045,7 +968,7 @@ procedure, and five things in it are load-bearing:
   treating that as "rebooting" would burn the whole reload deadline before
   reporting something visible immediately.
 - **The pre-activate image check is a `verify /sha512`, never a `dir`.** This
-  is the §8.1 requirement the playbook missed: a host whose staged image
+  is the §8.1 requirement the old playbook missed: a host whose staged image
   failed verification is still sitting in flash under the target filename.
   There is a test asserting no `install add` is issued in that case.
 - **A declined `install remove inactive` still prints `SUCCESS:
@@ -1159,25 +1082,78 @@ same place. Under Netmiko the paramiko client is ours: there is no rendered
 `known_hosts` and no question — the check is a policy object in
 `connection.py`.
 
+## Artifact store (`nethub/artifacts.py`, `nethub/artifact_routes.py`)
+
+The single ingest record behind both days (design doc §3.4, §5). Build step 7
+replaced the `software_registry` YAML store with this: `nethub/registry.py`,
+`registry_routes.py`, the `Registry` pointer rows, `REGISTRIES_ROOT`, file
+adoption, `search_dir`, the sibling-key-preserving atomic save, the
+path-escape guard and `check_registry()` are all gone, along with 69 tests.
+That block existed so an Ansible playbook could read it; the maintainer
+confirmed nothing outside NetHub reads those files, so it was a deletion
+rather than an export path.
+
+**`ARTIFACT_STORE` is NetHub's own directory**, which is the difference from
+the `REGISTRIES_ROOT` it replaced: that was a place an admin bind-mounted
+*their* files into for NetHub to point at. It is one flat directory because
+both transports address the source by filename (§3.3).
+
+**Two constraints live in the schema rather than in the code that writes it.**
+
+- `UNIQUE(filename) WHERE state IN ('staged','published')`. Without it two
+  uploads sharing an original filename promote to the same path and silently
+  overwrite each other's bytes — and *every downstream hash check still
+  passes*, because each compares a row's own `sha512` against whatever now
+  sits at that path, never confirming the row and the disk agree on which
+  artifact this is. That would quietly break the "hashed once, consumed three
+  times" chain of custody §3.4 is built on.
+- `UNIQUE(platform, bundle_key)` over published images. One published image
+  per key, enforced by the database rather than by whatever writes the row
+  remembering to check.
+
+Both are also checked in `artifacts.ingest()` so the UI gets a message rather
+than an `IntegrityError`; the schema is the backstop, and there are tests
+against each independently.
+
+**Ingest hashes over the chunks as they are written**, not by re-reading the
+file. A 1.2 GB upload plus its digest is the longest operation in the system
+after a device transfer and Flask holds the only unauthenticated route, so a
+second pass doubles a window §3.2 spends its length bounding. Bytes stream to
+a temp file in the same directory and are moved with `os.replace` only after
+the digest matches — a failed or interrupted upload cannot leave a
+half-written image under a name something would later push. The submitted
+checksum is the *claim being verified* and is never what gets recorded.
+
+**`state`, `superseded_by_id` and `bytes_state` exist but only `published`
+and `present` are ever written.** There is no promotion step to reach
+`staged` through and no supersede flow — the same no-supersede stance the
+YAML store had, and delete is still a hard removal of row and bytes. The
+columns are there because the partial indexes are defined over them and §7.4's
+retention story references them. Don't add `superseded_by_id` handling without
+the flow that reads it.
+
+**`check_store()` keeps the drift check's one rule**: re-derive what is cheap
+and always recoverable (a stale `file_size`), flag what is not (a missing file,
+or a digest that no longer matches). It never guesses at a wrong checksum, and
+it is a button rather than a page load because it hashes every image.
+
 ## Upgrade routes (`nethub/upgrade_routes.py`, `nethub/upgrades.py`)
 
 Thin routes over a service module, the way `registry_routes.py` sits over
 `registry.py`. `/upgrades` submits and approves; `/hostkeys` is the separate
 confirmation flow §4.3 requires before any address may be named.
 
-**The registry is still YAML, and step 7 has not happened.** `Registry` is a
-table but it is a *pointer* — name, file path, search dir. The entries
-(`file_name`, `sha512`, `file_size`, `version`) still live under a
-`software_registry:` key in an Ansible-shaped file. Submit reads an entry
-*once* and snapshots those four fields onto `upgrade_run_hosts`, so the
-device layer never touches YAML and step 7 changes only where `submit()`
-reads from. One field has already migrated and the two stores disagree by
-design: `search_dir` is DB-authoritative, overwritten on every
-`load_registry()`.
+**The store is the `artifacts` table (build step 7).** Submit resolves a
+bundle key to a row and snapshots `filename`/`sha512`/`version`/`file_size`
+onto `upgrade_run_hosts`, so a run is self-contained and a later change to the
+artifact cannot re-target it. A request names a *key* and never a filename or
+a digest — a submitted pair would name any bytes against any checksum and
+bypass the table that owns both.
 
-Three deployment settings §5 puts in a `settings` table are env vars in
+Four deployment settings §5 puts in a `settings` table are env vars in
 `config.py`, because alpha has neither that table nor its audit:
-`IMAGE_TRANSPORT`, `DEVICE_TARGET_CIDRS`, `SHARED_ACCOUNT_MODE`. **An empty
+`ARTIFACT_STORE`, `IMAGE_TRANSPORT`, `DEVICE_TARGET_CIDRS`,
+`SHARED_ACCOUNT_MODE`. **An empty
 `DEVICE_TARGET_CIDRS` refuses every submit** rather than allowing any address
 — an unset security setting is not "allow all". `SHARED_ACCOUNT_MODE` is
 hardcoded False and must not be inferred from anything (§4.4).
@@ -1226,183 +1202,6 @@ are design decisions rather than fixes.
 **Operational note:** an `AF_UNIX` path is capped near 108 bytes. The socket
 path the Quadlet mount produces has to stay under it, and the failure is an
 `OSError` at bind time rather than anything about length.
-
-## Ansible playbook notes (`ansible/playbooks/stage_cisco_upgrade.yml`, `ansible/playbooks/install_cisco_upgrade.yml`)
-
-Describes the playbooks as committed — hand-invoked scaffolding, not
-final. They're deliberately split in two to preview the idea behind
-design doc §8.1's phase split (stage vs. activate/verify/cleanup), not
-to implement it: neither playbook is dispatched by NetHub, both still
-`pause` for confirmation, and per-host results are still `debug` output
-rather than rows. The image moves in whichever direction
-`image_transport` selects (design doc §4.3.1) — `push_scp` is the
-default, `pull_sftp` the alternative — so don't describe the staging
-playbook as doing only one of the two.
-
-- **Never name NetHub or the design document inside `ansible/`.** No
-  "NetHub renders this", no section numbers, no `artifacts` table — in
-  comments, `name:` strings, or `fail_msg` text. The playbooks must read
-  as a standalone Ansible project that happens to take its inventory from
-  somewhere; rationale belongs in `design-document.md`, not in the layer
-  that is meant to have no dependency on it. `ansible/inventory/`'s docs
-  are the exception — they describe the contract with NetHub, so they
-  name it.
-- **Keep comments to 2–3 lines.** Say what the file does and what would
-  bite someone changing it; leave the argument in the design doc. The
-  `## in`/`## out` headers at the top of each task file stay — they are
-  the contract between task files and are worth the lines.
-- **Shared logic lives in `ansible/playbooks/tasks/`, not roles.** There is no
-  `iosxe_facts`/`batch_summary` role anymore:
-  `tasks/collect_iosxe_facts.yml`, `tasks/resolve_target_bundle.yml`,
-  `tasks/check_disk_space.yml`, `tasks/transfer_image.yml`,
-  `tasks/push_image_scp.yml`, and `tasks/pull_image_sftp.yml` are plain
-  `include_tasks` files, each with an `in`/`out` comment naming the vars
-  it reads and sets. `tasks/stage_image.yml` is gone — it was split into
-  the three transfer files. Both playbooks still duplicate their own
-  preview/summary plays rather than sharing them — see "Planned
-  improvements" below.
-- **`tasks/transfer_image.yml` is the dispatcher and owns everything
-  transport-independent.** It asserts `image_transport` is one of the
-  two known values (an unrecognised value would skip both adapters and
-  leave the host with no image, which the `verify` would then report as
-  a confusing verification failure), includes one adapter, and then runs
-  `verify /sha512` — the third consumption of the ingest digest (design
-  doc §3.4), unchanged by direction. The `wait_for`/`assert` pair checks
-  for the expected SHA-512 digest itself, not the presence of the word
-  "Verified" — a bare substring match on one English word would pass on
-  any device message containing it for an unrelated reason, silently
-  turning that third consumption into a no-op. Don't revert to a
-  `contains Verified` check.
-- **`tasks/push_image_scp.yml` brackets the whole push in one
-  `block`/`rescue`/`always`, and an unconfirmed restore now fails the
-  host.** It reads `show running-config | include ^ip scp server` before
-  touching anything, enables the server only if it wasn't already,
-  pushes with `net_put` (`protocol: scp`, `paramiko`), and restores the
-  captured state in `always:`, confirmed by re-reading the
-  running-config rather than trusted from the config module's exit
-  status. An unconfirmed restore sets `staging_result.success: false`
-  with status `scp_not_restored` and calls `end_host` — the earlier
-  debug-only warning was a known gap against the hard rule and is
-  closed. `transfer_image.yml`'s final success task is additionally
-  gated on `scp_restore_confirmed | default(true)` as a backstop.
-- **`tasks/pull_image_sftp.yml` is one `cli_command` and no device
-  config change.** It issues `copy sftp://user@host/dir/file <flash_dir>`
-  and answers the device's `Destination filename` and `Password:`
-  prompts, `no_log: true`. Naming only the filesystem as the destination
-  is deliberate (forces the first prompt so the pair is deterministic).
-  The prompt sequence is **unverified against a real device** — treat it
-  like `net_put`'s connection type before it was tested, and record the
-  answer when someone runs it. For hand runs the password comes from
-  `DISTRIBUTION_PASSWORD` in the environment rather than `-e`,
-  which would put it on the command line.
-- Each playbook has exactly one `pause` now, in its own preview play,
-  before any device connection is opened. The old single-file playbook
-  also paused immediately before touching the SCP server, calling out
-  that this step mutates and later restores device config; that
-  second pause didn't carry over into the split and isn't in either
-  file today. Worth restoring in the stage playbook specifically, since
-  it's still the one step here that changes something on the device
-  besides the upgrade itself.
-- Each playbook runs its own preview play, its own `serial`-gated main
-  play (`stage_serial`/`install_serial`), and its own inline summary
-  play — `staging_result`/`install_result` are set early enough that the
-  summary's per-host lookup never hits an undefined key, even for a host
-  that fails a pre-check and never reaches the "record result" task.
-  Per-host state moves to `upgrade_run_hosts` under the phase model,
-  which is what eventually retires all of this.
-- **`install_cisco_upgrade.yml` checks image presence via `dir`, not a
-  fresh `verify /sha512`, before `install add`.** Design doc §8.1 is
-  explicit that "still verifies" for a later phase has to mean
-  re-running `verify /sha512`, not stat-ing the file — a file of the
-  right name isn't the file staging checked. Since staging and install
-  are now genuinely separate playbook runs (not just separate blocks in
-  one play), a host whose staged image failed verification but is still
-  sitting in flash under the target filename can pass the install
-  playbook's presence check and get installed anyway. Tracked below.
-- **`tasks/resolve_target_bundle.yml` measures the image itself; a
-  rendered `file_size` is a cross-check, not a dependency.** One
-  `stat` (`delegate_to: localhost`, `connection: local`,
-  `get_checksum: false` — a sha1 pass over ~500 MB to learn a size is
-  not free) against `software_registry.search_dir`. If the registry also
-  declares `file_size` and the two disagree, the run stops before any
-  transfer: the bytes on the mount aren't the bytes the registry
-  describes, and the device-side `verify /sha512` would only catch that
-  after moving the whole image. If only one is available, it's used; if
-  neither, it fails. The motivation is decoupling — a task file that
-  can't resolve a size without NetHub having rendered one is a NetHub
-  dependency in the layer that's meant to have none.
-  - **This is not the old three-tier cascade coming back**, and don't
-    let it grow back into one. That was `software_bundle.file_size` → a
-    per-run `localhost` cache via `delegate_facts` → a remote stat
-    shelling out to `files/remote_image_size.py` (referenced but never
-    present in this repo), preferring the declaration and discovering
-    only in its absence. This is one local stat plus one fallback, in
-    the opposite order, with no cache, no helper script and no remote
-    execution.
-  - **There is no remote tier because there is no remote filesystem**,
-    for the same reason there's no `remote_dir`. Push reads the image
-    off the EE's read-only mount; pull has the SFTP daemon export that
-    same path. "The image is on the distribution host" names the address
-    the *device* dials, not a second filesystem. If §10's mirror
-    question is ever answered yes, that stops being true and the
-    declared-`file_size` fallback becomes load-bearing again.
-  - NetHub still computes `file_size` at ingest and still renders and
-    snapshots it (design doc §5, §8): §8's per-host stage bound is
-    derived from it **at dispatch**, before any play runs, so the
-    playbook measuring the file itself doesn't remove NetHub's need for
-    the value.
-- **Removed: `remote_dir`, end to end.** It addressed a device's own
-  `copy sftp://…` path under the old pull design — a remnant from when
-  the distribution host could have been a separate remote machine (design
-  doc §3.3). Both transports address the source by filename under
-  `software_registry.search_dir` — push off the EE's mount, pull via the
-  path the SFTP daemon exposes, which must be that same path — so
-  there's still no per-artifact directory to name.
-  `software_bundle.remote_dir` no longer exists in the schema or the
-  rendered registry, and the playbooks no longer resolve it. Don't
-  reintroduce it; the return of a pull mode is not a reason to.
-- There is no `become` in either playbook and there must not be one.
-  NetHub requires privilege 15 at login (design doc §4.3). Note the
-  design says pre-check asserts this via `show privilege`; **the
-  committed playbooks assert nothing of the kind** — there is no
-  pre-check assertion task file at all, which is also why the
-  pull-transport `ip ssh source-interface` prerequisite (design doc
-  §4.3.1) has nowhere to live and is documented as an operator
-  prerequisite instead. Don't add a lone `ip ssh source-interface`
-  check. Adding `ansible_become: true` back
-  would reintroduce an enable secret the credential path deliberately
-  does not carry.
-
-### Planned improvements
-
-**Read this against `netmiko.md` first.** These were written when the
-playbooks were the plan; the decision to replace them with Netmiko means
-most of this list is work on a layer scheduled for deletion at build step
-6. Nothing here should be started without deciding it is still worth
-doing — the pull-adapter prompt list is the one item whose answer
-outlives the playbooks, since `transfer.py` needs it too.
-
-Known gaps, roughly in order of how much they mattered:
-
-- Have `install_cisco_upgrade.yml` re-run `verify /sha512` on the staged
-  image before `install add`, instead of trusting a `dir` presence
-  check. (Done on the Netmiko path — `transfer.py`'s skip-if-staged test
-  is a digest. Only the playbook still has the gap.)
-- Extract the per-host summary/report logic (`Build per-host status
-  map` → `Print batch summary` → `Fail the run if any host failed`),
-  currently duplicated verbatim between both playbooks, into a shared
-  task file.
-- Extract the "is the image already present in flash" check into a
-  shared task file — both playbooks run a near-identical `dir`/
-  `regex_search` check for a different purpose (skip-if-staged vs.
-  fail-if-missing).
-- Run `tasks/pull_image_sftp.yml` against a real device and correct its
-  prompt list from what IOS-XE actually emits (design doc §10). A wrong
-  list hangs until the task timeout instead of failing fast.
-- Restore the `pause` that used to sit immediately before the SCP server
-  is touched — it didn't carry over into the split, and under the push
-  transport it's the one step that mutates device config outside the
-  upgrade itself. Not needed under pull, which mutates nothing.
 
 ## Keeping this file current
 

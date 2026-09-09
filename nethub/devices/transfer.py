@@ -401,7 +401,7 @@ def _restore_scp_server(conn: BaseConnection, prior_enabled: bool) -> bool:
     try:
         conn.send_config_set([line])
         return _scp_server_enabled(conn.send_command(_SCP_SHOW)) is prior_enabled
-    except Exception:
+    except Exception:  # noqa: BLE001 -- an unattemptable restore is an unconfirmed one
         return False
 
 

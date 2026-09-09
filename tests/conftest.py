@@ -10,19 +10,19 @@ import pytest
 _tmp_dir = tempfile.mkdtemp()
 os.environ['SECRET_KEY'] = 'test-secret'
 os.environ['DATABASE_PATH'] = os.path.join(_tmp_dir, 'test.db')
-os.environ['REGISTRIES_ROOT'] = os.path.join(_tmp_dir, 'registries')
+os.environ['ARTIFACT_STORE'] = os.path.join(_tmp_dir, 'artifacts')
 
 from nethub import create_app
 from nethub.extensions import db
-from nethub.models import Registry, User
+from nethub.models import Artifact, User
 
 
 @pytest.fixture
 def app():
-    # registry.py writes files under REGISTRIES_ROOT directly, outside the
-    # db, so it needs the same fresh-per-test treatment.
-    shutil.rmtree(os.environ['REGISTRIES_ROOT'], ignore_errors=True)
-    os.makedirs(os.environ['REGISTRIES_ROOT'])
+    # artifacts.py writes image bytes under ARTIFACT_STORE, outside the db,
+    # so the store needs the same fresh-per-test treatment as the database.
+    shutil.rmtree(os.environ['ARTIFACT_STORE'], ignore_errors=True)
+    os.makedirs(os.environ['ARTIFACT_STORE'])
     flask_app = create_app()
     flask_app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield flask_app
@@ -57,25 +57,28 @@ def logged_in_client(client, make_user):
 
 
 @pytest.fixture
-def make_registry(app):
-    """Create a tracked Registry row backed by a real file under
-    REGISTRIES_ROOT and a writable search_dir.
-
-    Returns a plain namespace (id, name, file_path, search_dir) rather than
-    the ORM object itself -- accessing the ORM object outside the
-    app_context that created it hits a detached-session error, same reason
-    make_user returns username/password rather than the User row.
-    """
-    def _make(filename='os_iosxe.yml', content='', name='iosxe', search_dir=None):
-        root = app.config['REGISTRIES_ROOT']
-        with open(os.path.join(root, filename), 'w') as f:
-            f.write(content)
-        if search_dir is None:
-            search_dir = tempfile.mkdtemp()
+def make_artifact(app):
+    """Publish an artifact with real bytes on disk, mirroring make_user."""
+    def _make(bundle_key='iosxe-17-12-06', version='17.12.06',
+              filename='cat9k_lite_iosxe.17.12.06.SPA.bin', content=b'image-bytes'):
+        import hashlib
         with app.app_context():
-            registry = Registry(name=name, file_path=filename, search_dir=search_dir)
-            db.session.add(registry)
+            store = os.environ['ARTIFACT_STORE']
+            os.makedirs(store, exist_ok=True)
+            path = os.path.join(store, filename)
+            with open(path, 'wb') as handle:
+                handle.write(content)
+            artifact = Artifact(
+                kind='image', platform='iosxe', bundle_key=bundle_key,
+                filename=filename, sha512=hashlib.sha512(content).hexdigest(),
+                file_size=len(content), storage_path=path, version=version,
+                state='published', bytes_state='present',
+            )
+            db.session.add(artifact)
             db.session.commit()
-            registry_id = registry.id
-        return SimpleNamespace(id=registry_id, name=name, file_path=filename, search_dir=search_dir)
+            return SimpleNamespace(
+                id=artifact.id, bundle_key=bundle_key, filename=filename,
+                version=version, sha512=artifact.sha512, path=path,
+                file_size=len(content),
+            )
     return _make

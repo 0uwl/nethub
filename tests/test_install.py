@@ -7,7 +7,7 @@ output handling, which is where the ported playbook had no coverage at all.
 
 import pytest
 
-from nethub.devices import facts, install
+from nethub.devices import install
 from tests.test_transfer import DIGEST, OTHER_DIGEST, dir_output
 
 IMAGE = "cat9k_lite_iosxe.17.12.06.SPA.bin"
@@ -207,7 +207,7 @@ class TestWaitForDevice:
 
     def test_a_device_answering_ssh_but_not_serving_cli_is_not_ready(self):
         """IOS-XE accepts connections before it is done booting."""
-        now, clock, sleep = self.make_clock()
+        _now, clock, sleep = self.make_clock()
         half_up = FakeDevice()
         half_up.send_command = lambda command, **kw: (_ for _ in ()).throw(OSError("not ready"))
         results = [half_up, FakeDevice(version="17.12.6")]
@@ -216,7 +216,7 @@ class TestWaitForDevice:
         assert conn.version == "17.12.6"
 
     def test_a_half_up_connection_is_closed_rather_than_leaked(self):
-        now, clock, sleep = self.make_clock()
+        _now, clock, sleep = self.make_clock()
         half_up = FakeDevice()
         half_up.send_command = lambda command, **kw: (_ for _ in ()).throw(OSError("not ready"))
         closed = []

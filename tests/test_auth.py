@@ -9,11 +9,11 @@ def test_login_with_wrong_password_fails(client, make_user):
     assert b'Invalid username or password' in resp.data
 
 
-def test_login_with_correct_password_redirects_to_registries(client, make_user):
+def test_login_with_correct_password_redirects_to_artifacts(client, make_user):
     username, password = make_user()
     resp = client.post('/login', data={'username': username, 'password': password})
     assert resp.status_code == 302
-    assert resp.headers['Location'] == '/registries'
+    assert resp.headers['Location'] == '/artifacts'
 
 
 def test_logout_requires_login(client):

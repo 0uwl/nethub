@@ -1,0 +1,32 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Publish an image{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Publish an image</h1></div>
+<p>The checksum you type is what NetHub verifies the upload against &mdash; it is
+the claim being checked, so it is never what gets recorded. A mismatch rejects
+the upload and nothing enters the store.</p>
+<form method="post" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+  <div class="form-group">
+    <label>Bundle key</label>
+    <input type="text" name="bundle_key" class="form-control" value="{{ form.bundle_key }}" required/>
+    <p class="help-block">What an upgrade request names to select this image.</p>
+  </div>
+  <div class="form-group">
+    <label>Version</label>
+    <input type="text" name="version" class="form-control" value="{{ form.version }}"
+           placeholder="17.12.06" required/>
+    <p class="help-block">Compared against what the device reports, before installing and after the reload.</p>
+  </div>
+  <div class="form-group">
+    <label>SHA-512</label>
+    <input type="text" name="sha512" class="form-control" value="{{ form.sha512 }}" required/>
+  </div>
+  <div class="form-group">
+    <label>Image file</label>
+    <input type="file" name="image" required/>
+  </div>
+  <button type="submit" class="btn btn-primary">Upload and publish</button>
+  <a href="{{ url_for('artifacts.list_artifacts') }}" class="btn btn-default">Cancel</a>
+</form>
+{% endblock %}

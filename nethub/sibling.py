@@ -16,9 +16,9 @@ stays dead is swept by nobody. Flask reads `heartbeat_at` and renders
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 
 from nethub.credential_socket import CredentialError, fetch_credential
 from nethub.devices import install, phases, transfer
@@ -67,7 +67,7 @@ class Sibling:
     now: Callable[[], datetime] = _utcnow
     gate_ttl: timedelta = DEFAULT_GATE_TTL
     pull_target: transfer.PullTarget | None = None
-    reload_wait: install.ReloadWait = install.ReloadWait()
+    reload_wait: install.ReloadWait = install.DEFAULT_RELOAD_WAIT
 
     def __post_init__(self):
         self.runner_instance_id = self.runner_instance_id or str(uuid.uuid4())
@@ -269,7 +269,7 @@ def main(poll_interval: float = 5.0) -> None:
         while True:
             try:
                 status = worker.run_once()
-            except Exception:  # noqa: BLE001 -- one bad job must not stop the queue
+            except Exception:
                 log.exception('phase execution raised; continuing')
                 db.session.rollback()
                 status = None

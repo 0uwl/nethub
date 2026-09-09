@@ -1,7 +1,7 @@
 # NetHub — replacing Ansible with Netmiko
 
-**Status: build order steps 1–5 done, 6–8 not started. Handoff document
-for a fresh session.**
+**Status: build order steps 1–7 done; only step 8 remains. Handoff
+document for a fresh session.**
 
 This file exists so a new Claude Code session can pick up a decided-but-
 unstarted migration without re-deriving it. It records what was
@@ -17,9 +17,13 @@ only if you need the reasoning behind a specific rule.
 ## Where things stand
 
 - Branch: `netmiko`, forked from `alpha` at `267217c`. Build order steps
-  1–5 are committed: `nethub/devices/*.py`, the upgrade schema in
-  `nethub/models.py`, `nethub/sibling.py` and `nethub/credential_socket.py`,
-  with tests. Steps 6–8 are untouched, so `ansible/` is still in the tree.
+  1–6 are committed: `nethub/devices/*.py`, the upgrade schema in
+  `nethub/models.py`, `nethub/sibling.py`, `nethub/credential_socket.py`,
+  `nethub/upgrades.py` and `nethub/upgrade_routes.py`, with tests — and
+  step 6 deleted `ansible/` (1002 lines), `.ansible-lint` and the
+  `ansible`/`ansible-lint` CI job, and step 7 replaced the YAML registry
+  store with the `artifacts` table (a further 1351 lines and 69 tests
+  removed). Step 8 is untouched.
 - **Step 5 is complete, routes included.** `nethub/upgrade_routes.py` and
   `nethub/upgrades.py` submit runs, confirm host keys, and work the approval
   gates; the whole path has been driven end-to-end through the Flask app
@@ -82,11 +86,12 @@ that escape hatch; don't drop it.
 
 ## CLAUDE.md rules this supersedes
 
-`CLAUDE.md` is authoritative for the repo and is loaded into every
-session, but it predates this decision. Work through it with this table.
-**Nothing here weakens a security property** — the rules that dissolve
-are ones whose *mechanism* disappears, and the properties they protected
-are re-listed under "What survives" with their new implementation.
+**Applied at step 6 — this table is now a record of what was changed, not a
+list of pending edits.** `CLAUDE.md`'s hard rules have been rewritten
+accordingly; read it directly rather than reading it through this table.
+**Nothing here weakened a security property** — the rules that dissolved are
+ones whose *mechanism* disappeared, and the properties they protected are
+re-listed under "What survives" with their new implementation.
 
 | CLAUDE.md rule | Fate |
 |---|---|
@@ -287,9 +292,10 @@ until it doesn't fit.
 
 ## Open questions
 
-- Does anything **outside** NetHub still read the rendered
-  `software_registry` YAML? If yes, step 7 needs an export path rather
-  than a deletion. Ask the maintainer before step 7, not before step 1.
+- **Answered (2026-09-09): nothing outside NetHub reads the
+  `software_registry` YAML.** So step 7 was a deletion rather than an export
+  path: the store is the `artifacts` table and NetHub no longer writes YAML
+  at all.
 - TextFSM parity for `dir` across the IOS-XE versions actually in the
   fleet (validation pending with the maintainer).
 - **Resolved (2026-09-09): SCP at image size works, but it is slow.**

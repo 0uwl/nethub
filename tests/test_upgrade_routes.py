@@ -12,19 +12,12 @@ import pytest
 
 from nethub import upgrades
 from nethub.extensions import db
-from nethub.models import DeviceHostKey, UpgradePhaseJob, UpgradeRun, User
+from nethub.models import Artifact, DeviceHostKey, UpgradePhaseJob, UpgradeRun, User
 
 NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
 DIGEST = "a" * 128
 PASSWORD = "d3vice-pass"
-ENTRIES = {
-    "iosxe-17-12-06": {
-        "file_name": "cat9k_lite_iosxe.17.12.06.SPA.bin",
-        "sha512": DIGEST,
-        "file_size": 471084127,
-        "version": "17.12.06",
-    }
-}
+IMAGE = "cat9k_lite_iosxe.17.12.06.SPA.bin"
 
 
 @pytest.fixture
@@ -40,6 +33,12 @@ def user(app):
         u = User(username="alice", device_username="jsmith")
         u.set_password("hunter2")
         db.session.add(u)
+        db.session.add(Artifact(
+            kind="image", platform="iosxe", bundle_key="iosxe-17-12-06",
+            filename=IMAGE, sha512=DIGEST, file_size=471084127,
+            storage_path="/images/" + IMAGE, version="17.12.06",
+            state="published", bytes_state="present",
+        ))
         db.session.commit()
         yield u.id
 
@@ -53,15 +52,9 @@ def confirmed(app, user):
         db.session.commit()
 
 
-class FakeRegistry:
-    name = "prod"
-
-
 def submit(user_id, hosts="sw01, 192.0.2.10", bundle="iosxe-17-12-06", cidrs=None):
     return upgrades.submit(
         user=db.session.get(User, user_id),
-        registry=FakeRegistry(),
-        entries=ENTRIES,
         bundle=bundle,
         hosts_raw=hosts,
         transport="push_scp",
@@ -125,16 +118,26 @@ class TestSubmit:
                 submit(user)
 
     def test_an_unknown_bundle_is_refused(self, app, user, confirmed):
+        with app.app_context(), pytest.raises(
+            upgrades.RequestError, match="No published image"
+        ):
+            submit(user, bundle="nope")
+
+    def test_a_pruned_artifact_cannot_be_installed(self, app, user, confirmed):
+        """The row outlives the bytes and says so (§7.4)."""
         with app.app_context():
-            with pytest.raises(upgrades.RequestError, match="No registry entry"):
-                submit(user, bundle="nope")
+            Artifact.query.one().bytes_state = "pruned"
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="pruned"):
+                submit(user)
 
     def test_a_successful_submit_snapshots_the_entry(self, app, user, confirmed):
         with app.app_context():
-            run, job = submit(user)
+            run, _job = submit(user)
             host = run.hosts[0]
             assert (host.filename, host.sha512, host.version, host.file_size) == (
-                ENTRIES["iosxe-17-12-06"]["file_name"], DIGEST, "17.12.06", 471084127)
+                IMAGE, DIGEST, "17.12.06", 471084127)
+            assert host.artifact_id == Artifact.query.one().id
             assert host.state == "pending"
 
     def test_submit_queues_precheck_with_no_approval(self, app, user, confirmed):
@@ -233,7 +236,7 @@ class TestThroughTheClient:
     def test_the_password_is_never_written_to_a_row(self, app, client, user, confirmed):
         self.login(client, app, user)
         resp = client.post('/upgrades/new', data={
-            'registry_id': '0', 'bundle': 'iosxe-17-12-06',
+            'bundle': 'iosxe-17-12-06',
             'hosts': 'sw01, 192.0.2.10', 'device_password': PASSWORD,
         }, follow_redirects=True)
         assert resp.status_code == 200
@@ -244,7 +247,8 @@ class TestThroughTheClient:
             assert PASSWORD not in blob
 
     def test_pages_require_login(self, client):
-        for path in ('/upgrades', '/upgrades/new', '/hostkeys', '/hostkeys/scan'):
+        for path in ('/upgrades', '/upgrades/new', '/hostkeys', '/hostkeys/scan',
+                     '/artifacts', '/artifacts/new'):
             resp = client.get(path)
             assert resp.status_code in (302, 401), path
 
@@ -269,7 +273,7 @@ class TestCredentialInterlock:
     def test_precheck_verifies_against_the_submitter(self, app, user, confirmed):
         """Pre-check has no gate, so `approved_by` is null by design."""
         with app.app_context():
-            run, job = submit(user)
+            _run, job = submit(user)
             assert job.approved_by is None
             job.status = 'running'
             db.session.commit()
@@ -290,7 +294,7 @@ class TestCredentialInterlock:
         """What the route holds under must be what the socket checks against."""
         from nethub.credential_socket import CredentialStore
         with app.app_context():
-            run, job = submit(user)
+            _run, job = submit(user)
             job.status = 'running'
             db.session.commit()
             store = CredentialStore()

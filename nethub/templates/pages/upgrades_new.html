@@ -7,16 +7,17 @@ afterwards waits for an approval, and each approval collects the credential agai
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
   <div class="form-group">
-    <label>Registry</label>
-    <select name="registry_id" class="form-control">
-      {% for reg in registries %}
-      <option value="{{ reg.id }}" {% if form.registry_id == reg.id|string %}selected{% endif %}>{{ reg.name }}</option>
+    <label>Bundle</label>
+    <select name="bundle" class="form-control">
+      {% for a in available %}
+      <option value="{{ a.bundle_key }}" {% if form.bundle == a.bundle_key %}selected{% endif %}>
+        {{ a.bundle_key }} &mdash; {{ a.version }} ({{ a.filename }})
+      </option>
       {% endfor %}
     </select>
-  </div>
-  <div class="form-group">
-    <label>Bundle key</label>
-    <input type="text" name="bundle" class="form-control" value="{{ form.bundle }}" required/>
+    {% if not available %}
+    <p class="help-block">No published images. <a href="{{ url_for('artifacts.new_artifact') }}">Upload one first.</a></p>
+    {% endif %}
   </div>
   <div class="form-group">
     <label>Hosts &mdash; one <code>hostname, address</code> per line</label>

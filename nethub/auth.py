@@ -11,7 +11,7 @@ auth_bp = Blueprint('auth', __name__)
 @auth_bp.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
-        return redirect(url_for('registries.list_registries'))
+        return redirect(url_for('artifacts.list_artifacts'))
 
     if request.method == 'POST':
         username = request.form.get('username', '')
@@ -19,7 +19,7 @@ def login():
         user = User.query.filter_by(username=username).first()
         if user and user.check_password(password):
             login_user(user)
-            return redirect(url_for('registries.list_registries'))
+            return redirect(url_for('artifacts.list_artifacts'))
         flash('Invalid username or password.')
 
     return render_template('pages/login.html')

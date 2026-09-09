@@ -1,0 +1,38 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Artifacts{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Artifacts</h1></div>
+<p>Every byte NetHub serves has one row here. Stored under <code>{{ store }}</code>,
+which NetHub owns &mdash; both transports read it by filename.</p>
+<p>
+  <a href="{{ url_for('artifacts.new_artifact') }}" class="btn btn-primary">Publish an image</a>
+  <form method="post" action="{{ url_for('artifacts.check_artifacts') }}" style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+    <button type="submit" class="btn btn-default">Check the store</button>
+  </form>
+</p>
+{% if artifacts %}
+<table class="table table-striped">
+  <thead><tr><th>Bundle key</th><th>Version</th><th>File</th><th>Size</th><th>SHA-512</th><th>Uploaded by</th><th></th></tr></thead>
+  <tbody>
+  {% for a in artifacts %}
+    <tr>
+      <td><code>{{ a.bundle_key }}</code></td>
+      <td>{{ a.version }}</td>
+      <td><code>{{ a.filename }}</code></td>
+      <td>{{ "{:,}".format(a.file_size) }}</td>
+      <td><code title="{{ a.sha512 }}">{{ a.sha512[:16] }}&hellip;</code></td>
+      <td>{{ users.get(a.uploaded_by, '') }} {{ a.uploaded_at }}</td>
+      <td>
+        <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}"
+              onsubmit="return confirm('Delete this artifact and its image file? This is a hard removal.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+          <button type="submit" class="btn btn-link">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="lead">Nothing published yet.</p>{% endif %}
+{% endblock %}

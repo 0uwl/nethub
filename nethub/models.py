@@ -25,20 +25,84 @@ class User(db.Model, UserMixin):
         return check_password_hash(self.password_hash, password)
 
 
-class Registry(db.Model):
-    """A tracked `software_registry` block inside some file under
-    REGISTRIES_ROOT. NetHub owns this row, not the file -- deleting a
-    Registry only forgets the pointer (see nethub/registry.py).
+def _enum(values, name):
+    # native_enum=False keeps this a VARCHAR plus a CHECK constraint, which is
+    # what SQLite can actually enforce -- and `create_constraint=True` is not
+    # optional decoration: SQLAlchemy has defaulted it to False since 1.4, so
+    # without it these columns are plain strings and every vocabulary below is
+    # documentation rather than a constraint. Verified by reading the emitted
+    # DDL, not by assuming.
+    return db.Enum(*values, name=name, native_enum=False, create_constraint=True)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+#: §5's artifact vocabulary. Only `published` is ever written today: there is
+#: no promotion step to reach `staged` through and no supersede flow, matching
+#: the no-supersede stance the YAML store had. The values exist because the
+#: partial unique indexes below are defined over them and §7.4's retention
+#: story references them.
+ARTIFACT_STATES = ('staged', 'published', 'superseded')
+ARTIFACT_KINDS = ('script', 'config', 'image')
+#: §7.4 splits blob retention from row retention: the row outlives the bytes
+#: and says so, rather than leaving a path that silently stops resolving.
+BYTES_STATES = ('present', 'pruned')
+
+
+class Artifact(db.Model):
+    """The single ingest record behind both days (design doc §3.4, §5).
+
+    Every byte NetHub serves has exactly one row here. This replaced the
+    `software_registry` YAML store and its `Registry` pointer rows at build
+    step 7 -- that block existed so an Ansible playbook could read it, and
+    there is no playbook.
     """
+
+    __tablename__ = 'artifacts'
+    __table_args__ = (
+        # Load-bearing rather than tidy (§5). Both transports address the
+        # source by *filename* under one directory, so without this two
+        # uploads sharing an original filename promote to the same path and
+        # silently overwrite each other's bytes -- and every downstream hash
+        # check still passes, because each compares a row's own sha512 against
+        # whatever currently sits at that path. That would quietly break the
+        # "hashed once, consumed three times" chain of custody §3.4 is built on.
+        db.Index('uq_artifact_filename_live', 'filename', unique=True,
+                 sqlite_where=db.text("state IN ('staged', 'published')")),
+        # One published image per bundle key per platform, enforced by the
+        # database rather than by whatever writes the row remembering to check.
+        db.Index('uq_artifact_bundle_key', 'platform', 'bundle_key', unique=True,
+                 sqlite_where=db.text("kind = 'image' AND state = 'published'")),
+    )
+
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(80), unique=True, nullable=False)
-    # Relative to REGISTRIES_ROOT -- never store an absolute path here, it's
-    # re-joined against the (possibly redeployed) root at every use.
-    file_path = db.Column(db.String(255), unique=True, nullable=False)
-    # Absolute path where this registry's images live -- may be outside
-    # REGISTRIES_ROOT entirely (see nethub/registry.py's path-safety note).
-    search_dir = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    kind = db.Column(_enum(ARTIFACT_KINDS, 'artifact_kind'), nullable=False, default='image')
+    platform = db.Column(db.String(32), nullable=False, default='iosxe')
+    #: The key a request names to select this artifact. What made the registry
+    #: renderable, and what a submitted request resolves against.
+    bundle_key = db.Column(db.String(80), nullable=False)
+
+    filename = db.Column(db.String(255), nullable=False)
+    sha512 = db.Column(db.String(128), nullable=False)
+    file_size = db.Column(db.BigInteger, nullable=False)
+    #: Where the blob actually lives, and what a retention purge collects by.
+    #: There is no `remote_dir` and a returning pull transport does not bring
+    #: one back -- both directions address one deployment-wide directory by
+    #: filename (§5).
+    storage_path = db.Column(db.String(500), nullable=False)
+    version = db.Column(db.String(32), nullable=False)
+
+    state = db.Column(_enum(ARTIFACT_STATES, 'artifact_state'),
+                      nullable=False, default='published')
+    superseded_by_id = db.Column(db.Integer, db.ForeignKey('artifacts.id'))
+    bytes_state = db.Column(_enum(BYTES_STATES, 'artifact_bytes_state'),
+                            nullable=False, default='present')
+    bytes_pruned_at = db.Column(db.DateTime)
+
+    uploaded_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    uploaded_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
 
 
 @login_manager.user_loader
@@ -91,20 +155,6 @@ PHASE_FAILURE_STAGES = (
 )
 
 TRANSPORTS = ('push_scp', 'pull_sftp')
-
-
-def _enum(values, name):
-    # native_enum=False keeps this a VARCHAR plus a CHECK constraint, which is
-    # what SQLite can actually enforce -- and `create_constraint=True` is not
-    # optional decoration: SQLAlchemy has defaulted it to False since 1.4, so
-    # without it these columns are plain strings and every vocabulary below is
-    # documentation rather than a constraint. Verified by reading the emitted
-    # DDL, not by assuming.
-    return db.Enum(*values, name=name, native_enum=False, create_constraint=True)
-
-
-def _utcnow():
-    return datetime.now(timezone.utc)
 
 
 def is_terminal(status):

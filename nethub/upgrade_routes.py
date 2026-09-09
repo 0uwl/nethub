@@ -14,18 +14,23 @@ Thin over `nethub/upgrades.py`, the way `registry_routes.py` is over
 import ipaddress
 
 from flask import (
-    Blueprint, current_app, flash, redirect, render_template, request, url_for,
+    Blueprint,
+    current_app,
+    flash,
+    redirect,
+    render_template,
+    request,
+    url_for,
 )
 from flask_login import current_user, login_required
 
-from . import registry as registry_store
+from . import artifacts as artifact_store
 from . import upgrades
 from .credential_socket import CredentialError
 from .devices import connection
 from .extensions import db
 from .models import (
     DeviceHostKey,
-    Registry,
     UpgradeHostPhaseResult,
     UpgradePhaseJob,
     UpgradeRun,
@@ -137,24 +142,17 @@ def list_runs():
 @upgrade_bp.route('/upgrades/new', methods=['GET', 'POST'])
 @login_required
 def new_run():
-    registries = Registry.query.order_by(Registry.name).all()
+    available = artifact_store.list_artifacts()
     form = {
-        'registry_id': request.form.get('registry_id', ''),
         'bundle': request.form.get('bundle', '').strip(),
         'hosts': request.form.get('hosts', ''),
     }
 
     if request.method == 'POST':
-        registry = db.session.get(Registry, int(form['registry_id'] or 0))
         password = request.form.get('device_password', '')
         try:
-            if registry is None:
-                raise upgrades.RequestError('Choose a registry.')
-            entries = registry_store.list_entries(registry)
             run, job = upgrades.submit(
                 user=current_user,
-                registry=registry,
-                entries=entries,
                 bundle=form['bundle'],
                 hosts_raw=form['hosts'],
                 transport=current_app.config['IMAGE_TRANSPORT'],
@@ -173,10 +171,10 @@ def new_run():
                 raise upgrades.RequestError(str(exc)) from None
             flash(f'Submitted run #{run.id}; pre-check is queued.')
             return redirect(url_for('upgrades.show_run', run_id=run.id))
-        except (upgrades.RequestError, registry_store.RegistryError) as exc:
+        except upgrades.RequestError as exc:
             flash(str(exc))
 
-    return render_template('pages/upgrades_new.html', registries=registries, form=form)
+    return render_template('pages/upgrades_new.html', available=available, form=form)
 
 
 @upgrade_bp.route('/upgrades/<int:run_id>')

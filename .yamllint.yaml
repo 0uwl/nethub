@@ -5,11 +5,14 @@ ignore: |
   .venv/
 
 rules:
-  # Ansible content commonly starts without `---`, and this project's
-  # task/playbook files are a mix of both -- not worth enforcing.
+  # Both rules below survived the deletion of ansible/ but for new reasons,
+  # so don't drop them as leftovers: the only YAML left is this file and the
+  # GitHub Actions workflow.
+  #
+  # .github/workflows/ci.yml does not open with `---`.
   document-start: disable
-  # Ansible/Python-style True/False shows up throughout the playbooks
-  # (see ansible/*.yml) -- both are valid YAML booleans.
+  # GitHub Actions' `on:` trigger key is a YAML 1.1 boolean, which the truthy
+  # rule flags on every workflow file there is.
   truthy: disable
   line-length:
     max: 150

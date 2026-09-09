@@ -22,14 +22,13 @@ def create_app():
     csrf.init_app(app)
 
     from . import models  # noqa: F401 -- registers the user_loader; needed before first request
+    from .artifact_routes import artifacts_bp
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
-    from .registry_routes import registries_bp, registry_bp
     from .upgrade_routes import hostkeys_bp, upgrade_bp
 
     app.register_blueprint(auth_bp)
-    app.register_blueprint(registries_bp)
-    app.register_blueprint(registry_bp)
+    app.register_blueprint(artifacts_bp)
     app.register_blueprint(upgrade_bp)
     app.register_blueprint(hostkeys_bp)
     register_cli(app)

@@ -167,14 +167,12 @@ class TestVocabularies:
                 make_job(run, phase=bad)
 
     def test_an_unknown_run_state_is_refused(self, app, user):
-        with app.app_context():
-            with pytest.raises((IntegrityError, LookupError, ValueError)):
-                make_run(user, state="halfway")
+        with app.app_context(), pytest.raises((IntegrityError, LookupError, ValueError)):
+            make_run(user, state="halfway")
 
     def test_an_unknown_transport_is_refused(self, app, user):
-        with app.app_context():
-            with pytest.raises((IntegrityError, LookupError, ValueError)):
-                make_run(user, image_transport_used="tftp")
+        with app.app_context(), pytest.raises((IntegrityError, LookupError, ValueError)):
+            make_run(user, image_transport_used="tftp")
 
     def test_precheck_may_have_no_approver_but_other_phases_record_one(self, app, user):
         """Pre-check runs on submit with no gate (§8.1)."""

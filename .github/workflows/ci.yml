@@ -16,18 +16,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff yamllint ansible ansible-lint
+      - run: pip install ruff yamllint
       - name: Ruff (Python)
         run: ruff check .
       - name: yamllint
         run: yamllint .
-      # cisco.ios/ansible.netcommon aren't declared anywhere in ansible/ (no
-      # requirements.yml) -- install them so ansible-lint can resolve the
-      # FQCN modules the playbooks use instead of flagging every one.
-      - name: Install Ansible collections used by the playbooks
-        run: ansible-galaxy collection install cisco.ios ansible.netcommon
-      - name: ansible-lint
-        run: ansible-lint ansible/
       # Containerfile.dev is dev-only, deliberately incomplete (no COPY of
       # app code -- see its own header comment) and never used in
       # production, so it's not linted against the production preset --

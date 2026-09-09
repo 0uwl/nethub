@@ -27,17 +27,16 @@ SQLALCHEMY_DATABASE_URI = 'sqlite:///' + DATABASE_PATH
 SQLALCHEMY_TRACK_MODIFICATIONS = False
 
 # Cap request size so an upload can't exhaust disk/memory (1.5 GB, comfortably
-# above the largest IOS-XE images in ansible/inventory's example registry).
+# above the largest IOS-XE images seen so far -- a cat9k_lite bundle is ~450 MB).
 MAX_CONTENT_LENGTH = 1_500 * 1024 * 1024
 
-# Root directory an admin bind-mounts registry files into (e.g. a real
-# Ansible group_vars/os_iosxe.yml) so NetHub can list and adopt them --
-# every Registry.file_path is resolved relative to this, and validated to
-# stay inside it (see nethub/registry.py). Each registry's own search_dir
-# (where its images live) is a separate, admin-supplied absolute path --
-# there's no shared "images root", since that's typically a much larger,
-# independently-mounted volume.
-REGISTRIES_ROOT = os.getenv('REGISTRIES_ROOT', os.path.join(basedir, 'instance', 'registries'))
+# Where NetHub keeps the image bytes it was given. NetHub owns this directory
+# now (design doc §3.3 -- it is the sole source of the bytes), which is the
+# difference from the REGISTRIES_ROOT this replaced at build step 7: that was
+# a place an admin bind-mounted *their* files into for NetHub to point at.
+# Both transports address it by filename, so it is one flat directory and
+# Artifact.storage_path is a path inside it.
+ARTIFACT_STORE = os.getenv('ARTIFACT_STORE', os.path.join(basedir, 'instance', 'artifacts'))
 
 # Deployment-level upgrade settings. Design doc §5 puts these in a `settings`
 # table with an append-only audit; alpha has neither, so they are env vars and
