@@ -1,0 +1,52 @@
+Directory of flash:/
+
+8516    -rw-                0   Sep 7 2026 12:53:44 +00:00  dope_hist
+8188    -rw-            15528   Sep 7 2026 12:53:44 +00:00  rdope_out.txt
+8198    -rw-          2097152   Sep 7 2026 12:53:42 +00:00  nvram_config_bkup
+8197    -rw-          2097152   Sep 7 2026 12:53:42 +00:00  nvram_config
+8169    -rw-               89   Sep 7 2026 12:53:41 +00:00  rdope.log
+8192    drwx            32768   Sep 7 2026 12:53:38 +00:00  license_evlog
+8211    -rw-              616   Sep 7 2026 12:53:36 +00:00  vlan.dat
+8175    -rw-               17   Sep 7 2026 12:52:38 +00:00  rmon_var_template
+8160    -rw-           138115   Sep 7 2026 12:52:31 +00:00  memleak.tcl
+8165    -rw-             2305   Sep 7 2026 12:52:30 +00:00  boothelper.log
+8154    drwx             4096   Sep 7 2026 12:52:25 +00:00  dc_profile_dir
+8119    -rw-            18389   Sep 7 2026 12:52:05 +00:00  bootloader_evt_handle.log
+8124    drwx             4096   Sep 7 2026 12:52:03 +00:00  .installer
+81144   drwx             4096  Aug 26 2026 12:44:02 +00:00  .images
+8123    drwx             4096  Aug 26 2026 12:00:00 +00:00  .prst_sync
+8155    -rw-             2306  Aug 26 2026 11:59:03 +00:00  boothelper.log.old
+8157    -rw-              265  Aug 26 2026 11:57:27 +00:00  lateshutdown.log
+48673   drwx             4096  Aug 26 2026 11:56:46 +00:00  .rollback_timer
+8588    -rw-             4905  Aug 26 2026 11:56:01 +00:00  packages.conf
+8579    -rw-             4905  Aug 26 2026 11:52:42 +00:00  cat9k_lite_iosxe.17.12.06.SPA.conf
+81153   -rw-         44468295  Aug 26 2026 11:52:39 +00:00  cat9k_lite-rpboot.17.12.06.SPA.pkg
+81152   -rw-         11788288  Aug 26 2026 11:51:03 +00:00  cat9k_lite-webui.17.12.06.SPA.pkg
+81151   -rw-          6504448  Aug 26 2026 11:51:03 +00:00  cat9k_lite-srdriver.17.12.06.SPA.pkg
+81150   -rw-        408739840  Aug 26 2026 11:51:03 +00:00  cat9k_lite-rpbase.17.12.06.SPA.pkg
+8730    -rw-             1923  Aug 13 2026 11:32:03 +00:00  IdenTrustCommercialRootCA1.ca
+8199    drwx             4096  Aug 11 2026 10:21:55 +00:00  pnp-tech
+8193    drwx             4096  Jul 29 2026 14:14:24 +00:00  guest-share
+8152    drwx             4096  Jul 29 2026 13:50:27 +00:00  .dbpersist
+8774    -rw-             1054  Jul 28 2026 08:36:39 +00:00  drawbridge-ca.pem
+8191    drwx             4096  Jul 24 2026 12:44:37 +00:00  pnp-info
+8161    drwx             4096  Aug 14 2025 11:24:47 +00:00  Tbot
+8295    -rw-            10993   Jun 4 2025 12:31:20 +00:00  y
+8256    -rw-             1294   Jun 2 2025 07:29:33 +00:00  DigiCertGlobalRootG2.ca
+8206    -rw-             2336  Aug 13 2024 01:45:30 +00:00  2024_08_13T01_45_56.459817.xml
+8118    drwx             4096  Aug 13 2024 01:22:08 +00:00  core
+8189    drwx             4096  Aug 13 2024 01:21:47 +00:00  onep
+8174    -rw-             1261  Aug 13 2024 01:11:10 +00:00  Baltimore.ca
+8173    -rw-             1606  Aug 13 2024 01:11:10 +00:00  StarfieldServicesRootCA.ca
+8172    -rw-             1924  Aug 13 2024 01:11:10 +00:00  ISRGRootX1CrossSignDST.ca
+8171    -rw-             1338  Aug 13 2024 01:11:10 +00:00  DigiCertGlobalRootCA.ca
+8159    drwx             4096  Aug 13 2024 01:11:04 +00:00  fp_cc_crash
+8158    drwx             4096  Aug 13 2024 01:11:04 +00:00  sys_report
+8156    drwx             4096  Aug 13 2024 01:11:01 +00:00  EDScisco
+8121    drwx             4096  Aug 13 2024 01:11:01 +00:00  tech_support
+113576  drwx             4096  Jul 30 2024 03:10:12 +00:00  .rommon_sync
+8117    drwx             4096  Dec 16 2020 17:25:21 +00:00  pcap
+8116    -rwx                0  Dec 16 2020 17:25:21 +00:00  mode_event_log
+8115    drwx             4096  Dec 16 2020 17:25:21 +00:00  SHARED-IOX
+
+4967505920 bytes total (3723296768 bytes free)

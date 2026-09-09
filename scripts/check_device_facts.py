@@ -25,6 +25,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nethub.devices import facts as F
 
 
+def _interactive_ios_class():
+    """Netmiko's cisco_ios driver, authenticating with keyboard-interactive.
+
+    An IOS-XE box running `aaa new-model` advertises `publickey,
+    keyboard-interactive` and not `password`, so Paramiko's password auth is
+    rejected -- and Paramiko only falls back to keyboard-interactive when no
+    password was supplied at all. Answer every prompt with the password, the
+    way OpenSSH does. One failed attempt drops the session, so this cannot be
+    a retry after a normal connect.
+    """
+    import paramiko
+    from netmiko.cisco import CiscoIosSSH
+
+    class SSHClientInteractive(paramiko.SSHClient):
+        def _auth(self, username, password, *args):
+            self.get_transport().auth_interactive(
+                username, handler=lambda title, instructions, prompts: [password for _ in prompts]
+            )
+
+    class CiscoIosInteractiveSSH(CiscoIosSSH):
+        def _get_ssh_client_instance(self) -> paramiko.SSHClient:
+            return SSHClientInteractive()
+
+    return CiscoIosInteractiveSSH
+
+
 def capture(args) -> Path:
     from getpass import getpass
 
@@ -34,15 +60,19 @@ def capture(args) -> Path:
     out = Path(args.out or f"captures/{args.host}-{datetime.now(tz=timezone.utc):%Y%m%d-%H%M%S}")
     out.mkdir(parents=True, exist_ok=True)
 
-    with ConnectHandler(
+    connect = ConnectHandler if args.auth == "password" else _interactive_ios_class()
+
+    with connect(
         device_type="cisco_ios",
         host=args.host,
         username=args.user,
+        secret=password,
         password=password,
     ) as conn:
         (out / "show_version.txt").write_text(conn.send_command("show version"))
+        (out / "show_privilege.txt").write_text(conn.send_command("show privilege"))
         (out / "dir.txt").write_text(
-            conn.send_command(F.dir_command(args.file_system), read_timeout=120)
+            conn.send_command(F.dir_command(args.file_system), read_timeout=F.DIR_READ_TIMEOUT)
         )
     print(f"captured to {out}")
     return out
@@ -58,6 +88,7 @@ def report(directory: Path, expect_version: str | None, expect_image: str | None
         print(f"model         {f.model!r}   <- empty means the template missed it")
         print(f"serial        {f.serial!r}   <- empty means the template missed it")
         print(f"running_image {f.running_image!r}")
+        print(f"boot_mode     {f.boot_mode!r}   <- empty means neither packages.conf nor .bin")
         if expect_version:
             same = F.same_version(f.version, expect_version)
             print(f"matches {expect_version!r}: {same}")
@@ -65,6 +96,16 @@ def report(directory: Path, expect_version: str | None, expect_image: str | None
     except F.FactsError as exc:
         print(f"show version FAILED: {exc}")
         failures += 1
+
+    privilege_capture = directory / "show_privilege.txt"
+    if privilege_capture.exists():
+        try:
+            level = F.parse_privilege(privilege_capture.read_text())
+            print(f"privilege     {level}   <- an upgrade needs 15")
+            failures += level < 15
+        except F.FactsError as exc:
+            print(f"show privilege FAILED: {exc}")
+            failures += 1
 
     try:
         fs = F.parse_dir((directory / "dir.txt").read_text())
@@ -87,10 +128,18 @@ def report(directory: Path, expect_version: str | None, expect_image: str | None
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("host", nargs="?", help="device to connect to")
     p.add_argument("--user", default=os.environ.get("USER"), help="device username")
     p.add_argument("--file-system", default="flash:", help="default flash:")
+    p.add_argument(
+        "--auth",
+        choices=("keyboard-interactive", "password"),
+        default="keyboard-interactive",
+        help="SSH auth method; IOS-XE with aaa new-model offers only the default",
+    )
     p.add_argument("--out", help="capture directory (default captures/<host>-<timestamp>)")
     p.add_argument("--replay", help="re-parse an existing capture directory, no device")
     p.add_argument("--expect-version", help="registry version to compare against, e.g. 17.12.06")
