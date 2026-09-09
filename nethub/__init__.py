@@ -6,11 +6,14 @@ import logging
 
 from flask import Flask, render_template
 
-from . import config as config_module
 from .extensions import csrf, db, login_manager
 
 
 def create_app():
+    # Imported here, not at module scope: config.py raises without SECRET_KEY,
+    # and importing nethub.devices shouldn't require Flask's settings.
+    from . import config as config_module
+
     app = Flask(__name__)
     app.config.from_object(config_module)
 

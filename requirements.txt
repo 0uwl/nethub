@@ -5,3 +5,5 @@ Flask-WTF
 PyYAML
 gunicorn
 pytest
+netmiko
+ntc-templates
