@@ -1,9 +1,0 @@
----
-# The playbooks are deliberately-styled hand-invoked scaffolding (see
-# CLAUDE.md's "Ansible playbook notes"), not yet the target design --
-# mid-string Jinja in task names and run_once in the batch-summary tasks
-# are intentional there, not lint debt. Gate on `min` (real bugs: syntax,
-# undefined vars, deprecated syntax) rather than `basic`'s style opinions.
-profile: min
-exclude_paths:
-  - .venv/
