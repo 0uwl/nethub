@@ -4,6 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
+**A decided migration is in progress: Ansible is being replaced by
+Netmiko.** `netmiko.md` is the handoff document, and it should be read
+before acting on "Ansible playbook notes" below or on any of the
+Ansible-specific hard rules — it records which of them dissolve, which
+survive under a different mechanism, and which are untouched. It is a plan
+with a numbered build order, not a description of finished work: steps 1–2
+(`nethub/devices/facts.py`, `nethub/devices/connection.py`) are built and
+tested, steps 3–8 are not. Nothing under `ansible/` has been deleted — that
+is step 6 — so both layers are in the tree at once and this file describes
+both. See "Device layer" below for what exists on the Netmiko side.
+
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
 package, built as an application factory (`nethub.create_app()`) rather
 than a module-level `app`. Flask's CLI autodetects it directly
@@ -62,9 +73,10 @@ registry, sessions are Flask-Login's signed cookie rather than a
 `sessions` row (§4.5); the multi-registry `Registry` table is an alpha
 addition with no design-doc counterpart, not a stand-in for one.
 Provisioning (day-0) is entirely unimplemented.
-The playbooks under `ansible/` are hand-invoked scaffolding, not yet
-wired to anything NetHub provides — see "Ansible playbook notes" below
-for their current shape and where they're headed. Treat
+The playbooks under `ansible/` are hand-invoked scaffolding, never wired
+to anything NetHub provides — "Ansible playbook notes" below describes
+them as committed, but they are now a layer being retired rather than
+one being finished, and `netmiko.md` is where they are headed. Treat
 `design-document.md` as the design document / target architecture, not
 a description of current code — always verify a described component
 actually exists before assuming it's implemented.
@@ -86,7 +98,8 @@ inventory NetHub renders around it (design doc §3.5/§8.1); its
 
 ```bash
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, PyYAML, gunicorn, pytest
+                                   # Flask-WTF, PyYAML, gunicorn, pytest,
+                                   # netmiko, ntc-templates
 
 export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
@@ -96,6 +109,11 @@ flask --app nethub create-admin <username>   # bootstrap the first login user --
 
 pytest                             # runs tests/ -- see tests/conftest.py for the
                                     # app/client fixtures (temp DB + registry root per test)
+
+python scripts/check_device_facts.py <host> --user <name>   # capture from a real
+                                    # device and report what parsed; the password comes
+                                    # from NETHUB_DEVICE_PASSWORD or an interactive prompt
+python scripts/check_device_facts.py --replay <dir>         # re-parse a capture, no device
 
 ruff check .                       # Python lint (pyproject.toml: 100-char lines,
                                     # N999 ignored for nethub/gunicorn.conf.py --
@@ -111,7 +129,10 @@ ansible-lint ansible/              # Ansible lint, gated at `profile: min` (.ans
 Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
 (`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
-fixture, registry-row creation/adoption, entry upload/checksum validation). The
+fixture, registry-row creation/adoption, entry upload/checksum validation), plus
+`nethub/devices/{facts,connection}.py` — which need neither those fixtures nor a
+device, parsing the real output under `tests/captures/` and exercising the
+host-key policy against the same device's public host key. The
 `make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
 file under a temp `REGISTRIES_ROOT` and creates its `Registry` row. `pyproject.toml`'s
 `[tool.pytest.ini_options] pythonpath = ["."]` is why bare `pytest` can
@@ -119,7 +140,7 @@ file under a temp `REGISTRIES_ROOT` and creates its `Registry` row. `pyproject.t
 `sys.path` itself) could.
 
 `.github/workflows/ci.yml` runs on every push/PR against `main`: a `lint`
-job (the three commands above, plus `Containerfile` — not
+job (`ruff`/`yamllint`/`ansible-lint` from the block above, plus `Containerfile` — not
 `Containerfile.dev`, which is dev-only — via the `immanuwell/dockerfile-roast`
 action also used by Drawbridge), a `test` job (`pytest -v`), and a `publish`
 job that builds and pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on
@@ -443,12 +464,23 @@ doc §2, §4.3, §5). `network_cli` sends the password after key exchange
 and `ansible_host` is submitter-supplied, so without verification an
 operator can name a machine they control and be handed a colleague's
 AAA credential. A `device_host_keys` table (keyed on address, not on a
-device identity) backs a rendered `known_hosts` and a fail-closed
-check; first contact is TOFU with the fingerprint shown at the submit
-gate and recorded against the approver. These rows are deliberately
+device identity) backs a fail-closed check. **First contact is not
+TOFU** — pinning fails closed only on a *changed* key, and "an operator
+names a machine they control" is always a *first* contact, so an address
+with no already-confirmed row cannot be named by a run at all.
+Confirming one is a separate, explicit admin action — connect with no
+device credential, show the fingerprint, record `confirmed_by` —
+decoupled from any run's submit or approval flow, which pre-check
+(running on submit, with no gate) would otherwise swallow. §4.3 says so
+in as many words; an earlier version of it put first contact at the
+submit gate, and that wording is superseded. These rows are deliberately
 exempt from §7.4's retention purge — expiring one silently downgrades a
 fail-closed mismatch back to a first-contact prompt. §2's non-goal
-names this exception explicitly so nobody "fixes" it later.
+names this exception explicitly so nobody "fixes" it later. The check
+itself is built — `nethub/devices/connection.py`, see "Device layer" —
+but the table, the admin confirmation screen, and the rendered
+`known_hosts` §4.3 describes are not; under Netmiko the last of those is
+a policy object rather than a file.
 
 **Failure, concurrency, and staleness semantics live in design doc §7** and
 are load-bearing rather than aspirational — EE runs are dispatched
@@ -775,6 +807,100 @@ seems to require one, the design is what needs revisiting, not the rule.
   substituted *host*. That asymmetry is why the transport is an admin's
   decision and never a submitter's.
 
+## Device layer (`nethub/devices/`)
+
+Ordinary Python driving Netmiko — what replaces the playbooks (`netmiko.md`).
+Two of that plan's five modules exist:
+
+- `facts.py` — `show version`, `dir` and `show privilege`, parsed with
+  ntc-templates where a template exists.
+- `connection.py` — the only way any NetHub process opens a device session.
+
+`transfer.py`, `install.py` and `phases.py` are named in `netmiko.md`'s module
+layout and are absent. Nothing dispatches any of this: there is no sibling
+process and no job row yet, so the device layer is reachable only from a test
+or from `scripts/check_device_facts.py`.
+
+**Parsing is split from connecting so device output can be re-parsed with no
+device.** `check_device_facts.py <host>` captures `show version` / `dir` /
+`show privilege` to a directory and reports what parsed; `--replay <dir>`
+re-parses one offline. That split is what makes `tests/captures/` possible,
+and validating a new IOS-XE release means capturing it and replaying it, not
+reading the template.
+
+**`tests/captures/` is evidence, not fixtures.** Each directory is verbatim
+output from real hardware (`c9200cx-12p-2x2g-17.12.06`: a Catalyst 9200CX on
+IOS-XE 17.12.06, INSTALL mode, plus that device's public SSH host key and the
+fingerprint `ssh-keygen -lf` prints for it). Editing a capture to make a test
+pass destroys the only evidence that ntc-templates parses what this fleet
+actually runs. Add a directory per release; synthetic samples belong in the
+test file, labelled there as synthetic.
+
+Before changing `facts.py`:
+
+- **`boot_mode` is derived, not read.** ntc-templates does not expose `show
+  version`'s per-switch `Mode` column, so INSTALL/BUNDLE comes from the boot
+  file — `packages.conf` versus `.bin`. An unrecognised boot file yields `""`,
+  which means *refuse*, not BUNDLE: `install add … activate commit` is an
+  INSTALL-mode procedure and a wrong guess runs the wrong one.
+- **`parse_dir` excludes directories.** They carry a size too, and `size_of`
+  answers "is the staged image here, at the right length" — a directory must
+  not be able to answer that. On the captured device it is 20 of 48 entries.
+- **Nothing defaults on a parse miss.** The free-space number gates the stage
+  phase and a silently-wrong one fills a device's flash, so a parse failure
+  raises `FactsError` rather than returning a zero or a guess.
+- **`facts.py` parses; it does not police.** `get_privilege` returns the
+  number, and the "must be 15" refusal (design doc §4.3) belongs to the phase.
+
+`connection.py` carries the security properties, and each of these is easy to
+undo by accident:
+
+- **`connect()` takes the pinned host key as a required positional argument.**
+  That signature *is* the enforcement of design doc §4.3's rule that an address
+  with no confirmed `device_host_keys` row cannot be named by any run: there is
+  no path to a device without a pin and no TOFU branch in the module.
+  `scan_host_key()` is the separate admin confirmation action — key exchange
+  only, so it spends no device credential — and it deliberately **writes
+  nothing**, because persisting what it fetched would rebuild the silent pin
+  §4.3 exists to refuse.
+- **The client loads no host keys from disk, and that is the mechanism.**
+  Paramiko consults a missing-host-key policy only for a host it has no loaded
+  key for, so `_build_ssh_client` loads none: every connection reaches our
+  policy and the comparison is ours. Restoring `load_system_host_keys()` would
+  let a line in this host's `~/.ssh/known_hosts` switch the fail-closed check
+  off silently, with no error anywhere.
+- **`HostKeyError` must not subclass `paramiko.SSHException`.** Netmiko catches
+  that around its own connect and re-raises it as `NetmikoTimeoutException`, so
+  a host-key mismatch would reach an operator as "try increasing conn_timeout".
+- **The device credential is a password; NetHub uses no SSH client key.** The
+  pinned key is the *device's* identity, not ours. `use_keys` and `allow_agent`
+  stay off and `connect()` takes no `**kwargs`, so there is no way to turn them
+  on — verified by connecting with `HOME` pointed at an empty directory and no
+  agent running.
+- **IOS-XE with `aaa new-model` offers `publickey,keyboard-interactive`, not
+  `password`.** Paramiko falls back to keyboard-interactive only when no
+  password was supplied at all, so netmiko's ordinary password auth is rejected
+  outright — and the error is a misleading `transport shut down or saw EOF`
+  rather than anything about auth methods.
+  `_SSHClientKeyboardInteractive` answers the prompt instead. **There is no
+  auto-detection and there must not be one**: the device drops the session
+  after a single failed attempt — a bare `auth_none` probe is enough — so
+  try-then-fall-back cannot work on one connection. The method is a parameter
+  the caller states (`DEFAULT_AUTH`).
+- **No `secret` is passed and `.enable()` is never called.** Privilege 15 at
+  login is the point (design doc §4.3); an enable secret reintroduces the
+  second credential the design removes.
+- The module's three exceptions are the three §7.3 `failure_stage` values a
+  connection can produce — `hostkey`, `credential`, `connect` — so mapping them
+  in `phases.py` is a lookup rather than a judgement.
+
+**This closes one of design doc §10's open questions, which has not been
+revised to say so.** §10 asks where NetHub's rendered `known_hosts` actually
+takes effect, since Ansible's connection plugins don't all read one from the
+same place. Under Netmiko the paramiko client is ours: there is no rendered
+`known_hosts` and no question — the check is a policy object in
+`connection.py`.
+
 ## Ansible playbook notes (`ansible/playbooks/stage_cisco_upgrade.yml`, `ansible/playbooks/install_cisco_upgrade.yml`)
 
 Describes the playbooks as committed — hand-invoked scaffolding, not
@@ -923,9 +1049,14 @@ playbook as doing only one of the two.
 
 ### Planned improvements
 
-These playbooks are expected to keep changing; the two-file split is a
-step toward §8.1, not the end state. Known gaps, roughly in order of
-how much they matter:
+**Read this against `netmiko.md` first.** These were written when the
+playbooks were the plan; the decision to replace them with Netmiko means
+most of this list is work on a layer scheduled for deletion at build step
+6. Nothing here should be started without deciding it is still worth
+doing — the pull-adapter prompt list is the one item whose answer
+outlives the playbooks, since `transfer.py` needs it too.
+
+Known gaps, roughly in order of how much they mattered:
 
 - Have `install_cisco_upgrade.yml` re-run `verify /sha512` on the staged
   image before `install add`, instead of trusting a `dir` presence
