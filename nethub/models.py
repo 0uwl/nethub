@@ -10,6 +10,12 @@ class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    # The name this person logs into *devices* with -- separate from their
+    # NetHub login, and mapped server-side so a submitted request can never
+    # assert it (design doc §4.3). Null until set: an upgrade cannot be
+    # submitted without it, because the two-sided attribution property is
+    # what the whole credential path is built for.
+    device_username = db.Column(db.String(80))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def set_password(self, password):

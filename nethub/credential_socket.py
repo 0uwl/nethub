@@ -111,6 +111,11 @@ class CredentialStore:
         which identity approved the execution, and a mismatch means the job
         row and the held credential disagree about whose secret this is.
         """
+        # Popped before it is validated, deliberately: a release that fails
+        # its checks destroys the credential rather than leaving it for a
+        # retry. That makes replay worthless, at the cost that a stray request
+        # forces a re-approval -- acceptable, since only the sibling can reach
+        # this socket at all (§9.2's mount argument).
         with self._lock:
             held = self._held.pop(job_id, None)
         if held is None:

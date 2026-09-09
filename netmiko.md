@@ -20,12 +20,15 @@ only if you need the reasoning behind a specific rule.
   1–5 are committed: `nethub/devices/*.py`, the upgrade schema in
   `nethub/models.py`, `nethub/sibling.py` and `nethub/credential_socket.py`,
   with tests. Steps 6–8 are untouched, so `ansible/` is still in the tree.
-- **Step 5 has a missing half, and it is route work rather than device
-  work.** Nothing creates a job row: there is no submit route, no approval
-  route, and nothing puts a credential into the store. The sibling works a
-  queue only a test fills, so the whole path is tested but has never run
-  against a device. Closing it needs §6.1's API surface and §8.1's approval
-  gates — decide whether that is step 5's remainder or a step of its own.
+- **Step 5 is complete, routes included.** `nethub/upgrade_routes.py` and
+  `nethub/upgrades.py` submit runs, confirm host keys, and work the approval
+  gates; the whole path has been driven end-to-end through the Flask app
+  (submit → queued row → sibling claim → credential over the socket → phase
+  execution → result rows), though only against an address that does not
+  answer. A live pre-check against the lab switch still wants doing.
+- Routes read the bundle from the **existing YAML registry** and snapshot it
+  onto `upgrade_run_hosts`, so step 7 changes only where `upgrades.submit()`
+  reads from — the device layer already never touches YAML.
 - `facts.py`, `connection.py` and `transfer.py` have been exercised against
   a real Catalyst 9200CX on IOS-XE 17.12.06, including a 408 MB SCP push
   through the full enable/restore bracket. `tests/captures/` holds the

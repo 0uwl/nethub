@@ -1,0 +1,24 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Upgrades{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Upgrade runs</h1></div>
+<p><a href="{{ url_for('upgrades.new_run') }}" class="btn btn-primary">New run</a></p>
+{% if runs %}
+<table class="table table-striped">
+  <thead><tr><th>#</th><th>State</th><th>Waiting at</th><th>Submitted by</th><th>Device user</th><th>Transport</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td><a href="{{ url_for('upgrades.show_run', run_id=r.id) }}">{{ r.id }}</a></td>
+      <td>{{ r.state }}</td>
+      <td>{{ r.awaiting_phase or '' }}</td>
+      <td>{{ users.get(r.submitted_by, '?') }}</td>
+      <td>{{ r.device_username_used }}{% if r.shared_account_mode %} <em>(shared)</em>{% endif %}</td>
+      <td>{{ r.image_transport_used }}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p>No runs yet.</p>{% endif %}
+{% endblock %}

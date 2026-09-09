@@ -1,0 +1,111 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Run {{ run.id }}{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Run {{ run.id }} &mdash; {{ run.state }}</h1></div>
+
+<dl class="dl-horizontal">
+  <dt>Submitted by</dt><dd>{{ users.get(run.submitted_by, '?') }} on {{ run.created_at }}</dd>
+  <dt>Device username</dt><dd>{{ run.device_username_used }}
+      {% if run.shared_account_mode %}<em>(shared account mode &mdash; not per-human)</em>{% endif %}</dd>
+  <dt>Transport</dt><dd>{{ run.image_transport_used }}</dd>
+  <dt>Request digest</dt><dd><code>{{ run.request_sha512[:32] }}&hellip;</code></dd>
+  {% if run.cancel_requested_at %}
+  <dt>Cancel requested</dt><dd>{{ run.cancel_requested_at }} by {{ users.get(run.cancel_requested_by, '?') }}</dd>
+  {% endif %}
+</dl>
+
+{% if run.state == 'awaiting_approval' %}
+<div class="alert alert-block">
+  <h4>Approve: {{ run.awaiting_phase }}</h4>
+  {% if run.awaiting_phase == 'activate' %}
+  <p><strong>This reloads every host below and drops traffic.</strong></p>
+  {% elif run.awaiting_phase == 'cleanup' %}
+  <p>Cleanup frees flash but removes the packages a rollback would need.</p>
+  {% endif %}
+  <p>Each targeted address, and who confirmed its host key, is listed below &mdash;
+  check that before releasing your credential against it.</p>
+  <form method="post" action="{{ url_for('upgrades.approve', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+    <input type="hidden" name="phase" value="{{ run.awaiting_phase }}"/>
+    <input type="password" name="device_password" placeholder="Your device password"
+           class="form-control" required autocomplete="off"/>
+    <br/>
+    <button type="submit" class="btn btn-primary">Approve {{ run.awaiting_phase }}</button>
+  </form>
+  {% if run.awaiting_phase == 'cleanup' %}
+  <form method="post" action="{{ url_for('upgrades.decline_cleanup', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+    <button type="submit" class="btn btn-default">Decline cleanup and close the run</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if run.state not in ('completed', 'failed', 'cancelled', 'expired') %}
+<form method="post" action="{{ url_for('upgrades.cancel', run_id=run.id) }}"
+      onsubmit="return confirm('Request cancel? A running phase stops between hosts, not mid-host.');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+  <button type="submit" class="btn btn-link">Request cancel</button>
+</form>
+{% endif %}
+
+<h3>Hosts</h3>
+<table class="table table-striped">
+  <thead><tr><th>Host</th><th>Address</th><th>Image</th><th>Target</th><th>State</th><th>Was</th><th>Now</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for h in run.hosts %}
+    <tr>
+      <td>{{ h.hostname }}</td>
+      <td><code>{{ h.ansible_host }}</code></td>
+      <td><code>{{ h.filename }}</code></td>
+      <td>{{ h.version }}</td>
+      <td>{{ h.state }}</td>
+      <td>{{ h.reported_version_pre or '' }}</td>
+      <td>{{ h.reported_version_post or '' }}</td>
+      <td>{{ h.error_summary or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h3>Phase executions</h3>
+<table class="table table-striped">
+  <thead><tr><th>Phase</th><th>Attempt</th><th>Status</th><th>Approved by</th><th>Started</th><th>Heartbeat</th><th>Failure</th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+    <tr>
+      <td>{{ j.phase }}</td>
+      <td>{{ j.attempt }}</td>
+      <td>{{ j.status }}</td>
+      <td>{{ users.get(j.approved_by, '') if j.approved_by else '' }}</td>
+      <td>{{ j.started_at or '' }}</td>
+      <td>{{ j.heartbeat_at or '' }}</td>
+      <td>{{ j.failure_stage or '' }}{% if j.error_summary %} &mdash; {{ j.error_summary }}{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if results %}
+<h3>Per-host results</h3>
+<table class="table table-striped">
+  <thead><tr><th>Host</th><th>Phase</th><th>Attempt</th><th>Status</th><th>Failure</th><th>SCP restored</th><th>Finished</th></tr></thead>
+  <tbody>
+  {% for r in results %}
+    <tr>
+      <td>{{ r.hostname }}</td>
+      <td>{{ r.phase }}</td>
+      <td>{{ r.attempt }}</td>
+      <td>{{ r.status }}</td>
+      <td>{{ r.failure_stage or '' }}{% if r.error_summary %} &mdash; {{ r.error_summary }}{% endif %}</td>
+      <td>{% if r.scp_restore_confirmed is none %}&mdash;{% else %}{{ r.scp_restore_confirmed }}{% endif %}</td>
+      <td>{{ r.finished_at or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran &mdash; under
+<code>pull_sftp</code> nothing on the device is reconfigured at all. It never means
+&ldquo;a change may be outstanding&rdquo;; read it together with the run's transport.</p>
+{% endif %}
+{% endblock %}

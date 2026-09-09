@@ -25,10 +25,13 @@ def create_app():
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
     from .registry_routes import registries_bp, registry_bp
+    from .upgrade_routes import hostkeys_bp, upgrade_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(registries_bp)
     app.register_blueprint(registry_bp)
+    app.register_blueprint(upgrade_bp)
+    app.register_blueprint(hostkeys_bp)
     register_cli(app)
 
     with app.app_context():
@@ -106,9 +109,13 @@ def _serve_credential_socket(app):
             job = db.session.get(UpgradePhaseJob, job_id)
             if job is None or job.status != 'running':
                 raise CredentialError("no running execution with that id")
-            if job.approved_by is None:
-                raise CredentialError("that execution has no approval on file")
-            return job.approved_by
+            # §9.1 cross-checks the identity that *supplied* the credential,
+            # which is the approver for every gated phase -- but pre-check has
+            # no gate by design (§8.1), so its `approved_by` is null and the
+            # supplying identity is the submitter. Refusing a null here would
+            # fail every pre-check ever dispatched, which is how this was
+            # found: the two halves each looked right alone.
+            return job.approved_by if job.approved_by is not None else job.run.submitted_by
 
     thread = threading.Thread(
         target=serve, args=(listening, store, verify_running),

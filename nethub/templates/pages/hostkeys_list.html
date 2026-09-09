@@ -1,0 +1,32 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Device host keys{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Device host keys</h1></div>
+<p>An address with no <strong>confirmed</strong> pin cannot be named by any run.
+Confirming one is a deliberate action, separate from submitting a run.</p>
+<p><a href="{{ url_for('hostkeys.scan_hostkey') }}" class="btn btn-primary">Scan an address</a></p>
+{% if keys %}
+<table class="table table-striped">
+  <thead><tr><th>Address</th><th>Type</th><th>Fingerprint</th><th>First seen</th><th>Confirmed by</th><th></th></tr></thead>
+  <tbody>
+  {% for k in keys %}
+    <tr>
+      <td><code>{{ k.ansible_host }}</code></td>
+      <td>{{ k.key_type }}</td>
+      <td><code>{{ k.fingerprint_sha256 }}</code></td>
+      <td>{{ k.first_seen_at }}</td>
+      <td>{% if k.is_confirmed %}{{ users.get(k.confirmed_by, '?') }} on {{ k.confirmed_at }}
+          {% else %}<em>not confirmed &mdash; unusable</em>{% endif %}</td>
+      <td>
+        <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}"
+              onsubmit="return confirm('Remove this pin? A run targeting this address will be refused until it is confirmed again.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+          <button type="submit" class="btn btn-link">Remove</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p>No addresses confirmed yet.</p>{% endif %}
+{% endblock %}

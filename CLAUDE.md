@@ -10,13 +10,11 @@ before acting on "Ansible playbook notes" below or on any of the
 Ansible-specific hard rules — it records which of them dissolve, which
 survive under a different mechanism, and which are untouched. It is a plan
 with a numbered build order, not a description of finished work: steps 1–5
-are built and tested — the device layer
-(`nethub/devices/{facts,connection,transfer,install,phases}.py`) validated
-end-to-end against real hardware including two live upgrades, and step 5's
-schema, dispatcher and credential socket tested but never yet run against a
-device. Steps 6–8 are not started, and **nothing creates a job row**: there
-is no submit or approval route, so the queue the sibling works is one only a
-test fills. That is the missing half of step 5 and it is route work. Nothing under `ansible/` has been deleted — that
+are built and tested, including the routes that submit runs and approve
+gates. The device layer is validated end-to-end against real hardware
+(two live upgrades); the dispatch half — schema, sibling, credential socket,
+routes — is tested and has been driven end-to-end through the Flask app, but
+only as far as a device that does not answer. Steps 6–8 are not started. Nothing under `ansible/` has been deleted — that
 is step 6 — so both layers are in the tree at once and this file describes
 both. See "Device layer" below for what exists on the Netmiko side.
 
@@ -870,10 +868,8 @@ Four of that plan's five modules exist:
 - `phases.py` — the per-host loop, the exception→`failure_stage` mapping, and
   the rows.
 
-All five of the plan's modules now exist, and `nethub/sibling.py` dispatches
-them. What does not exist is anything that *creates* a job: no submit route,
-no approval route, and nothing that puts a credential into the store. The
-sibling works a queue only a test fills.
+All five of the plan's modules now exist, `nethub/sibling.py` dispatches
+them, and `nethub/upgrade_routes.py` creates the rows they work from.
 
 `facts.py`, `connection.py` and `transfer.py` have been exercised against a
 real Catalyst 9200CX on IOS-XE 17.12.06, the push adapter included: enable, transfer, confirmed
@@ -1162,6 +1158,74 @@ takes effect, since Ansible's connection plugins don't all read one from the
 same place. Under Netmiko the paramiko client is ours: there is no rendered
 `known_hosts` and no question — the check is a policy object in
 `connection.py`.
+
+## Upgrade routes (`nethub/upgrade_routes.py`, `nethub/upgrades.py`)
+
+Thin routes over a service module, the way `registry_routes.py` sits over
+`registry.py`. `/upgrades` submits and approves; `/hostkeys` is the separate
+confirmation flow §4.3 requires before any address may be named.
+
+**The registry is still YAML, and step 7 has not happened.** `Registry` is a
+table but it is a *pointer* — name, file path, search dir. The entries
+(`file_name`, `sha512`, `file_size`, `version`) still live under a
+`software_registry:` key in an Ansible-shaped file. Submit reads an entry
+*once* and snapshots those four fields onto `upgrade_run_hosts`, so the
+device layer never touches YAML and step 7 changes only where `submit()`
+reads from. One field has already migrated and the two stores disagree by
+design: `search_dir` is DB-authoritative, overwritten on every
+`load_registry()`.
+
+Three deployment settings §5 puts in a `settings` table are env vars in
+`config.py`, because alpha has neither that table nor its audit:
+`IMAGE_TRANSPORT`, `DEVICE_TARGET_CIDRS`, `SHARED_ACCOUNT_MODE`. **An empty
+`DEVICE_TARGET_CIDRS` refuses every submit** rather than allowing any address
+— an unset security setting is not "allow all". `SHARED_ACCOUNT_MODE` is
+hardcoded False and must not be inferred from anything (§4.4).
+
+`users.device_username` is new. It is read server-side and a request can
+never assert it, because §4.3's two-sided attribution depends on the device
+seeing a name NetHub chose. A user without one cannot submit.
+
+Things that are refusals rather than validation niceties:
+
+- **A submitted target must be an IP literal inside a configured CIDR**, and
+  a hostname is refused rather than resolved: the CIDR check and the eventual
+  connection would resolve it at different times, and the pin would end up
+  keyed on a string whose meaning can change afterwards (§4.3).
+- **An address with no *confirmed* `device_host_keys` row cannot be
+  submitted**, and a row that exists but is unconfirmed counts as absent.
+  Scanning writes nothing; only the confirm step does.
+- **Re-confirming a *changed* key is refused** on the confirm route — it is
+  indistinguishable from the attack the pin exists to catch, so an admin has
+  to delete the pin first. That friction is the point.
+- **A second approval of the same gate is refused** before it reaches
+  `UNIQUE(run_id, phase, attempt)`, so two admins clicking "approve: reload"
+  get a message rather than an `IntegrityError` — and never two reloads.
+
+**Pre-check is the phase with no approver, and that broke the credential
+interlock once.** §9.1 has Flask cross-check the phase job's `approved_by`
+against the identity that supplied the credential — but §8.1 gives pre-check
+no gate, so its `approved_by` is null by design. A `verify_running` that
+refused a null failed *every* pre-check, and each half looked correct alone.
+The rule is "the identity that supplied it": the approver for a gated phase,
+the submitter for pre-check. Don't tighten that back to a non-null check.
+
+**A credential release that fails its checks destroys the credential**
+(`CredentialStore.release` pops before validating). That makes replay
+worthless at the cost that a stray request forces a re-approval — acceptable
+only because the mount is what decides who can reach the socket at all.
+
+**Known gap, not yet decided:** `upgrade_runs.device_username_used` snapshots
+the *submitter's* device username, but each gate collects the credential of
+whoever is standing at it. If a different person approves a phase, the device
+sees the approver's username while the run row records the submitter's, which
+breaks the attribution §4.3 is built for. Closing it means either restricting
+approval to the submitter or recording the device username per phase; both
+are design decisions rather than fixes.
+
+**Operational note:** an `AF_UNIX` path is capped near 108 bytes. The socket
+path the Quadlet mount produces has to stay under it, and the failure is an
+`OSError` at bind time rather than anything about length.
 
 ## Ansible playbook notes (`ansible/playbooks/stage_cisco_upgrade.yml`, `ansible/playbooks/install_cisco_upgrade.yml`)
 
