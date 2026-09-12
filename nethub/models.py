@@ -18,11 +18,47 @@ class User(db.Model, UserMixin):
     device_username = db.Column(db.String(80))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # Online-guessing budget. Deliberately per-*user* rather than per-submitted
+    # -username: design doc §4.2 argues at length that a counter keyed on
+    # attacker-chosen input is an unbounded-growth attack on the SQLite file
+    # everything else shares, and a username is attacker-chosen. Keying on the
+    # row bounds the key space to the users table. Attempts against usernames
+    # that do not exist are therefore NOT counted -- which is safe only because
+    # the timing oracle that made them enumerable is closed in auth.py, so an
+    # attacker cannot learn which usernames are worth spending a budget on.
+    failed_logins = db.Column(db.Integer, nullable=False, default=0)
+    locked_until = db.Column(db.DateTime)
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
+
+    def is_locked(self, now=None):
+        if self.locked_until is None:
+            return False
+        now = now or datetime.now(timezone.utc)
+        # SQLite hands back naive datetimes for values written aware, so a
+        # round-tripped `locked_until` would raise TypeError against an aware
+        # `now` -- the same trap phases._aware()/sibling._aware() exist for.
+        locked_until = self.locked_until
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        return locked_until > now
+
+    def register_failed_login(self, *, limit, lockout, now=None):
+        """Count one failure and lock the account once it reaches `limit`."""
+        now = now or datetime.now(timezone.utc)
+        self.failed_logins = (self.failed_logins or 0) + 1
+        if self.failed_logins >= limit:
+            self.locked_until = now + lockout
+            self.failed_logins = 0
+        return self.is_locked(now)
+
+    def clear_failed_logins(self):
+        self.failed_logins = 0
+        self.locked_until = None
 
 
 def _enum(values, name):
