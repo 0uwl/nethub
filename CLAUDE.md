@@ -157,6 +157,17 @@ Drawbridge), a `test` job (`pytest -v`), and a `publish` job that builds and
 pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on push to `main` once both
 prior jobs pass.
 
+**The lint tools are pinned (`ruff==0.16.7`, `yamllint==1.38.0`) and the
+reason is not tidiness.** They were installed unpinned, and ruff 0.16 widened
+its *default* rule set to include isort and part of pylint/flake8-simplify —
+so `ruff check .` passed locally against 0.15 and failed in CI on byte-identical
+files, on three branches at once. A linter that changes what it enforces with
+no commit blocks merges at random. **`ruff check .` locally therefore only
+matches CI if your ruff is that version** — check `ruff --version` before
+trusting a green local run, and when you do bump the pin, expect new findings
+and fix them rather than unpinning. `publish` fires only on push to `main`, so
+a PR gets `lint` and `test` as a free dry run before any image is built.
+
 ## Container
 
 `Containerfile` builds `localhost/nethub:latest` — single stage,

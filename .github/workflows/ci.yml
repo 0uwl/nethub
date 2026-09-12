@@ -16,7 +16,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff yamllint
+      # Pinned. Unpinned, this job can fail on an unchanged codebase: ruff
+      # 0.16 widened its DEFAULT rule set to include isort and part of
+      # pylint/flake8-simplify, which broke lint on three branches that had
+      # passed locally against 0.15. A linter that changes what it enforces
+      # without a commit is a linter that blocks merges at random, so bumping
+      # these is a deliberate change with its own diff -- the same reason
+      # requirements.txt is pinned.
+      - run: pip install ruff==0.16.7 yamllint==1.38.0
       - name: Ruff (Python)
         run: ruff check .
       - name: yamllint

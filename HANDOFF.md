@@ -317,10 +317,12 @@ submitted to worker A is invisible to worker B and it fails closed but intermitt
 
 > Landed: all eight pinned to the resolved versions; `PyYAML` dropped (nothing
 > imports it — `yamllint` is a CI tool). A hash-pinned lockfile is the stronger
-> fix and was **not** done. Note the same problem still exists one level up:
-> `.github/workflows/ci.yml` installs `ruff`/`yamllint` unpinned, and ruff 0.16
-> widening its default rule set broke the lint job on three branches with no code
-> change. Pinning those is unclaimed work.
+> fix and was **not** done. The same problem one level up **is** now fixed:
+> `.github/workflows/ci.yml` pins `ruff==0.16.7` and `yamllint==1.38.0`, after
+> ruff 0.16 widened its default rule set and broke the lint job on three
+> branches with no code change. Bumping either is now a deliberate change with
+> its own diff — expect new findings when you do, and fix them rather than
+> unpinning.
 
 **Where:** `requirements.txt`
 
