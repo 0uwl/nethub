@@ -209,7 +209,7 @@ OTHER = b"a-different-image-entirely" * 100
 OTHER_DIGEST = hashlib.sha512(OTHER).hexdigest()
 
 
-def _win_the_race_during(store, app, content=OTHER):
+def _win_the_race_during(store, content=OTHER):
     """Return a stream that plants `content` at the final path mid-upload.
 
     Simulates the other uploader finishing while this one is still streaming:
@@ -229,9 +229,8 @@ def _win_the_race_during(store, app, content=OTHER):
 
 
 def test_a_lost_race_does_not_overwrite_the_winners_bytes(store, app):
-    with app.app_context():
-        with pytest.raises(artifacts.ArtifactError, match="already in the store"):
-            ingest(store, file_storage=_win_the_race_during(store, app))
+    with app.app_context(), pytest.raises(artifacts.ArtifactError, match="already in the store"):
+        ingest(store, file_storage=_win_the_race_during(store))
 
     # The winner's bytes are untouched -- this is the whole point. Before the
     # fix, os.replace clobbered them and left the winner's row pointing at the
@@ -241,9 +240,8 @@ def test_a_lost_race_does_not_overwrite_the_winners_bytes(store, app):
 
 
 def test_a_lost_race_leaves_no_temp_file_behind(store, app):
-    with app.app_context():
-        with pytest.raises(artifacts.ArtifactError):
-            ingest(store, file_storage=_win_the_race_during(store, app))
+    with app.app_context(), pytest.raises(artifacts.ArtifactError):
+        ingest(store, file_storage=_win_the_race_during(store))
     leftovers = [n for n in os.listdir(store) if n.startswith(".incoming-")]
     assert leftovers == []
 
@@ -251,7 +249,7 @@ def test_a_lost_race_leaves_no_temp_file_behind(store, app):
 def test_a_lost_race_writes_no_row(store, app):
     with app.app_context():
         with pytest.raises(artifacts.ArtifactError):
-            ingest(store, file_storage=_win_the_race_during(store, app))
+            ingest(store, file_storage=_win_the_race_during(store))
         assert Artifact.query.filter_by(filename=IMAGE).count() == 0
 
 
