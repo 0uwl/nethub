@@ -161,7 +161,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. |
+| `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. **`config.py` also refuses a known placeholder or anything under 32 characters**, not just an absent value: alpha has no server-side `sessions` row (§4.5), so the cookie signature is the only thing authenticating a user and a published key is a forged admin session. The reference unit ships the line commented out rather than filled in, for the same reason. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
 | `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |

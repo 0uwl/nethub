@@ -20,6 +20,33 @@ SECRET_KEY = read_credential('secret_key') or os.getenv('SECRET_KEY')
 if SECRET_KEY is None:
     raise ValueError("SECRET_KEY cannot be empty, please generate a random string and supply it through an env variable")
 
+# Refusing an *absent* key is not enough: the reference Quadlet unit used to
+# ship a working placeholder, so a deployment copied from it started normally
+# with a signing key published in a public repository. There is no server-side
+# `sessions` row in this alpha (§4.5, see alpha.md), so the cookie signature is
+# the only thing authenticating anyone -- a known key is a forged admin session
+# with no password and no login event. A placeholder is an unset setting wearing
+# a value, and it fails closed for the same reason DEVICE_TARGET_CIDRS does.
+SECRET_KEY_MIN_LENGTH = 32
+_REJECTED_SECRET_KEYS = frozenset({
+    'CHANGE_ME_use_openssl_rand_hex_32',
+    'CHANGE_ME',
+    'changeme',
+    'secret',
+    'dev',
+    'development',
+})
+if SECRET_KEY in _REJECTED_SECRET_KEYS:
+    raise ValueError(
+        "SECRET_KEY is a known placeholder value and would be trivially "
+        "guessable. Generate a real one with `openssl rand -hex 32`."
+    )
+if len(SECRET_KEY) < SECRET_KEY_MIN_LENGTH:
+    raise ValueError(
+        f"SECRET_KEY must be at least {SECRET_KEY_MIN_LENGTH} characters; got "
+        f"{len(SECRET_KEY)}. Generate one with `openssl rand -hex 32`."
+    )
+
 # Bare SQLite file path -- not a full SQLAlchemy URL. Overridable so a
 # container can point it at a mounted volume (e.g. /app/data/database.db).
 DATABASE_PATH = os.getenv('DATABASE_PATH', os.path.join(basedir, 'database.db'))

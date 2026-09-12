@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 export NETHUB_PORT="${NETHUB_PORT:-8080}"
-export SECRET_KEY="${SECRET_KEY:-dev-only-insecure-secret-key}"
+export SECRET_KEY="${SECRET_KEY:-dev-only-insecure-secret-key-do-not-deploy}"
 export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-dev-admin}"
 

@@ -56,16 +56,25 @@ Environment=REGISTRIES_ROOT=/app/registries
 #Volume=/path/to/host/image/store:/app/registries-images/os_iosxe:Z
 
 # --- Required ---
-# Flask/Flask-Login session-signing key. No default -- the app refuses to
-# start without it (nethub/config.py). Generate once and keep it stable
-# across restarts: rotating it invalidates every live session.
+# Flask/Flask-Login session-signing key. No default, and deliberately NOT
+# filled in here: this file is public, so any value committed to it is a
+# published signing key. There is no server-side session row in this alpha,
+# which makes the cookie signature the only thing authenticating a user --
+# a known key is a forged admin session with no password and no login event.
+# nethub/config.py refuses an absent key, a placeholder, and anything under
+# 32 characters, so the unit will not start until you supply a real one.
+#
+# Generate once and keep it stable across restarts: rotating it invalidates
+# every live session.
 #   openssl rand -hex 32
-Environment=SECRET_KEY=CHANGE_ME_use_openssl_rand_hex_32
+#
+# Then either uncomment the line below with your own value...
+#Environment=SECRET_KEY=
 
-# Preferred alternative to the plaintext line above: load it as a systemd
-# credential instead -- see "Systemd credential injection" at the bottom of
-# this file. Uncomment the matching LoadCredential= line in [Service] and
-# delete/comment out the Environment=SECRET_KEY= line above.
+# ...or, preferably, load it as a systemd credential instead -- see "Systemd
+# credential injection" at the bottom of this file. Uncomment the matching
+# LoadCredential= line in [Service] and leave the Environment= line above
+# commented out. The credential takes priority over the env var either way.
 
 # --- Optional ---
 # Port Gunicorn binds to inside the container. Update the left side of

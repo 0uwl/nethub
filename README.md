@@ -45,7 +45,8 @@ design target, not a description of current code.
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
                                    # Flask-WTF, PyYAML, gunicorn, pytest
 
-export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
+export SECRET_KEY=$(openssl rand -hex 32)   # required; nethub/config.py rejects an absent
+                                   # key, a known placeholder, or anything under 32 chars
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
 flask --app nethub create-admin <username>   # bootstrap the first login user --
@@ -99,7 +100,7 @@ Once you're logged in as an admin:
 ```bash
 podman build -t localhost/nethub:latest .
 podman run --rm -p 8080:8080 \
-  -e SECRET_KEY=<any-string> \
+  -e SECRET_KEY="$(openssl rand -hex 32)" \
   -e ADMIN_PASSWORD=<initial-admin-password> \
   localhost/nethub:latest
 ```

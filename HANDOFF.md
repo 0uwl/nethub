@@ -1,6 +1,6 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** not started. Nothing in this file has been implemented yet.
+**Status:** WS-1.1 done. Everything else in this file is not started.
 **Branch:** `claude/repo-branch-init-5n0qhr`
 **Source:** a four-lane review (device layer, web tier, frontend, security) of
 `origin/main..HEAD` — the whole Ansible→Netmiko migration, 103 files, +10,405/−1,684.
@@ -63,7 +63,7 @@ python -m pytest -q
 ### Baseline you must not regress
 
 ```
-python -m pytest -q     →  267 passed
+python -m pytest -q     →  277 passed
 ruff check .            →  All checks passed!
 python -m yamllint .    →  clean
 ```
@@ -147,7 +147,12 @@ make other findings exploitable.
 The reference deployment cannot currently run the day-2 path. These are mostly
 config-file edits with no application logic, which is why they are first.
 
-### WS-1.1 — Remove the working default `SECRET_KEY` · HIGH
+### WS-1.1 — Remove the working default `SECRET_KEY` · HIGH — **DONE**
+
+> Landed: the unit ships `Environment=SECRET_KEY=` commented out, and `config.py`
+> now refuses a placeholder or a key under 32 characters as well as an absent one.
+> `tests/test_config.py` covers it. `conftest.py`, `dev.sh` and `README.md` needed
+> longer keys to satisfy the new rule — check that first if a fresh clone fails to start.
 
 **Where:** `quadlet/nethub.container:63`, `nethub/config.py`
 
