@@ -62,13 +62,11 @@ SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_INSECURE', '') != '1'
 
 # An absolute bound on a signed cookie that otherwise carries no expiry of its
-# own. NOTE: Flask applies this only to a session marked `permanent`, and
-# nethub/auth.py does not set that yet -- so this value is declared here (it is
-# configuration and belongs with the other cookie settings) but is INERT until
-# the login path sets `session.permanent = True`. That one line belongs to the
-# login-hardening work, which owns auth.py; deliberately not done here so the
-# two changes stay on separate branches. Until then the cookie still has no
-# expiry of its own.
+# own. Flask applies this only to a session marked `permanent`, which
+# nethub/auth.py does at login -- the two halves are what make it effective, so
+# removing `session.permanent = True` there silently turns this back into dead
+# configuration with no error anywhere. Verified live: a real login emits
+# `Expires=` roughly 12 hours out.
 PERMANENT_SESSION_LIFETIME = timedelta(hours=12)
 
 # Bare SQLite file path -- not a full SQLAlchemy URL. Overridable so a

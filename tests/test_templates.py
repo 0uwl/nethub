@@ -239,3 +239,18 @@ def test_every_table_can_scroll_on_its_own(logged_in_client):
         tables = body.count('<table')
         wrappers = body.count('table-responsive')
         assert wrappers >= tables, f'{path}: {tables} tables, {wrappers} wrappers'
+
+
+def test_user_created_is_styled_as_a_success(logged_in_client):
+    """This one rendered as alert-error until both halves of the review work
+    were merged: auth.py belonged to the login branch, the flash categories to
+    the UI branch, so neither could categorise it without crossing over.
+    """
+    resp = logged_in_client.post(
+        '/users/new',
+        data={'username': 'olive', 'password': 'olive-long-enough-pw'},
+        follow_redirects=True,
+    )
+    body = resp.get_data(as_text=True)
+    assert 'User created' in body
+    assert 'alert-success' in body

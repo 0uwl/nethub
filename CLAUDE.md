@@ -82,14 +82,15 @@ pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
                                    # YAML registry (build step 7); yamllint is
                                    # a CI tool, not a runtime dep.
 
-export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
+export SECRET_KEY=$(openssl rand -hex 32)   # required; config.py rejects an absent
+                                   # key, a known placeholder, or anything under 32 chars
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
 flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
 
 pytest                             # runs tests/ -- see tests/conftest.py for the
-                                    # app/client fixtures (temp DB + registry root per test)
+                                    # app/client fixtures (temp DB + artifact store per test)
 
 python scripts/check_device_facts.py <host> --user <name>   # capture from a real
                                     # device and report what parsed; the password comes
@@ -132,16 +133,19 @@ the default category is deliberately an error, because the remaining
 uncategorised calls are refusals and downgrading them to a neutral notice
 would mis-style real failures.
 
-Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
-(`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
-end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
-fixture, registry-row creation/adoption, entry upload/checksum validation), plus
+Tests cover `nethub/{config,credentials,models,bootstrap,auth,artifacts,artifact_routes,upgrade_routes}.py`
+end-to-end through Flask's test client (login flow and lockout, CSRF disabled in
+the `app` fixture — see the template-test note above for why that matters —
+artifact ingest and its two uniqueness constraints, host-key confirm, submit and
+approve refusals), plus
 `nethub/devices/{facts,connection,transfer,install,phases}.py`, `nethub/sibling.py` and
 `nethub/credential_socket.py` — most of which need neither those fixtures nor a
 device, parsing the real output under `tests/captures/` and exercising the
-host-key policy against the same device's public host key. The
-`make_registry` fixture in `tests/conftest.py` (mirrors `make_user`) writes a
-file under a temp `REGISTRIES_ROOT` and creates its `Registry` row. `pyproject.toml`'s
+host-key policy against the same device's public host key. `tests/conftest.py`
+carries `make_user`, `make_artifact` (real bytes on disk, mirroring
+`make_user`) and a fresh `ARTIFACT_STORE` per test; `make_run` lives in
+`tests/test_templates.py` instead, because `conftest.py` is the file
+concurrent branches collide in. `pyproject.toml`'s
 `[tool.pytest.ini_options] pythonpath = ["."]` is why bare `pytest` can
 `import nethub` — without it only `python -m pytest` (which puts the cwd on
 `sys.path` itself) could.
@@ -220,7 +224,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
 | `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
-| `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally. `PERMANENT_SESSION_LIFETIME` is declared beside them but **inert** until the login path sets `session.permanent` — see the note in `config.py`. |
+| `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
 | `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
@@ -1222,8 +1226,8 @@ it is a button rather than a page load because it hashes every image.
 
 ## Upgrade routes (`nethub/upgrade_routes.py`, `nethub/upgrades.py`)
 
-Thin routes over a service module, the way `registry_routes.py` sits over
-`registry.py`. `/upgrades` submits and approves; `/hostkeys` is the separate
+Thin routes over a service module — the same shape `artifact_routes.py` has
+over `artifacts.py`. `/upgrades` submits and approves; `/hostkeys` is the separate
 confirmation flow §4.3 requires before any address may be named.
 
 **The store is the `artifacts` table (build step 7).** Submit resolves a

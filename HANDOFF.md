@@ -1,7 +1,11 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1.1 done. Everything else in this file is not started.
-**Branch:** `claude/repo-branch-init-5n0qhr`
+**Status:** WS-1 complete (1.1–1.5). WS-5.1, 5.3, 5.5 complete; WS-5.7 complete
+bar its audit-row item. **Not started: WS-2, WS-3, WS-4, WS-5.2, WS-5.4, WS-5.6.**
+WS-6 still needs a maintainer decision; WS-7 still needs hardware. Each done
+section carries a `DONE` note saying what landed and anything it changed about
+the task next to it — read those before starting a neighbour.
+**Merged to:** `main` (PRs #3–#7)
 **Source:** a four-lane review (device layer, web tier, frontend, security) of
 `origin/main..HEAD` — the whole Ansible→Netmiko migration, 103 files, +10,405/−1,684.
 Every finding below was traced in code, and the ones marked *reproduced* were
@@ -42,7 +46,7 @@ deliberately deviates.
 | `nethub/artifacts.py`, `artifact_routes.py` | The image store. Upload → SHA-512 verify → record. |
 | `nethub/auth.py`, `bootstrap.py` | Local username/password login; first-boot admin. |
 | `nethub/models.py` | Schema, plus §7.3's vocabularies as module constants. |
-| `quadlet/nethub.container` | Reference Podman Quadlet unit. **Currently stale — see WS-1.** |
+| `quadlet/nethub.container` | Reference Podman Quadlet unit. Fixed in WS-1.2, but **not re-verified against a real `podman run`** since. |
 | `tests/captures/` | **Evidence, not fixtures.** Verbatim real-hardware output. Never edit a capture to make a test pass. |
 
 ### Environment setup — three traps that will cost you time
@@ -219,7 +223,14 @@ short key, and still raises for `None`. Existing config tests show the pattern.
 
 ---
 
-### WS-1.2 — Fix the stale Quadlet unit · HIGH
+### WS-1.2 — Fix the stale Quadlet unit · HIGH — **DONE**
+
+> Landed: `ARTIFACT_STORE=/app/artifacts` with a volume behind it, the dead
+> `REGISTRIES_ROOT` block removed, commented `DEVICE_TARGET_CIDRS`/`IMAGE_TRANSPORT`,
+> and `LimitCORE=0` + `NoNewPrivileges=`/`ProtectProc=`/`RestrictSUIDSGID=` in
+> `[Service]`. **Still not verified against a real `podman build`/`podman run`** —
+> CLAUDE.md's end-to-end claim was narrowed rather than restated. `dev.sh` carried
+> the same stale `REGISTRIES_ROOT` and was fixed separately.
 
 **Where:** `quadlet/nethub.container`
 
@@ -260,7 +271,13 @@ namespaces are what prevent same-uid `ptrace` between Flask and the sibling.
 
 ---
 
-### WS-1.3 — Set `threads` in the gunicorn config · HIGH
+### WS-1.3 — Set `threads` in the gunicorn config · HIGH — **DONE**
+
+> Landed: `worker_class = 'gthread'`, `threads = 4`. `timeout = 120` was left as
+> it was, with a comment: under `gthread` it bounds an unresponsive worker rather
+> than a single request, which is what makes a multi-minute upload safe at that
+> value. Verified the config loads with those values under the pinned gunicorn
+> 26.2.0 and that `gthread` imports.
 
 **Where:** `nethub/gunicorn.conf.py`
 
@@ -296,7 +313,14 @@ submitted to worker A is invisible to worker B and it fails closed but intermitt
 
 ---
 
-### WS-1.4 — Pin dependencies · MEDIUM
+### WS-1.4 — Pin dependencies · MEDIUM — **DONE**
+
+> Landed: all eight pinned to the resolved versions; `PyYAML` dropped (nothing
+> imports it — `yamllint` is a CI tool). A hash-pinned lockfile is the stronger
+> fix and was **not** done. Note the same problem still exists one level up:
+> `.github/workflows/ci.yml` installs `ruff`/`yamllint` unpinned, and ruff 0.16
+> widening its default rule set broke the lint job on three branches with no code
+> change. Pinning those is unclaimed work.
 
 **Where:** `requirements.txt`
 
@@ -325,7 +349,15 @@ env, then the full baseline. Watch for anything that was silently relying on PyY
 
 ---
 
-### WS-1.5 — Session cookie flags · LOW
+### WS-1.5 — Session cookie flags · LOW — **DONE**
+
+> Landed: `SameSite=Strict`, explicit `HttpOnly`, and `SESSION_COOKIE_SECURE`
+> defaulting **on** with `SESSION_COOKIE_INSECURE=1` as the local-HTTP escape
+> hatch. `PERMANENT_SESSION_LIFETIME` (12h) only works together with
+> `session.permanent = True` in `auth.py` (WS-5.5) — they landed on separate
+> branches and neither is effective alone. `dev.sh` sets the escape hatch, since
+> reaching a plain-HTTP dev container over a LAN address otherwise makes login
+> bounce back to the form with nothing in the logs.
 
 **Where:** `nethub/config.py` (these keys are currently absent)
 
@@ -736,7 +768,11 @@ revisit which algorithm, or to add a second. See §2.
 
 ## WS-5 — Web tier & frontend
 
-### WS-5.1 — No UI to set `device_username`, so nobody can submit · HIGH (functional)
+### WS-5.1 — No UI to set `device_username`, so nobody can submit · HIGH (functional) — **DONE**
+
+> Landed: `GET /profile` renders the form, the nav links to it, and the POST
+> route it already had now redirects there instead of to `request.referrer` —
+> which incidentally removed the only unvalidated redirect in the app.
 
 **Where:** `nethub/upgrade_routes.py:252` (`set_device_username`), `nethub/templates/`
 
@@ -785,7 +821,13 @@ couple of lower-severity spots — fix them as the same shape, not ad hoc.
 
 ---
 
-### WS-5.3 — Concurrent uploads corrupt a published artifact's bytes · HIGH
+### WS-5.3 — Concurrent uploads corrupt a published artifact's bytes · HIGH — **DONE**
+
+> Landed: `os.link` instead of `os.replace`, so the final move fails rather than
+> overwriting, plus a wrapped commit that removes its own bytes when the schema
+> fires after the file is already in place. Five tests drive the race
+> deterministically (a stream that plants a rival file as the last chunk is read)
+> rather than trying to time two real uploads.
 
 **Where:** `nethub/artifacts.py:106-137`
 
@@ -841,7 +883,15 @@ only control channel).
 
 ---
 
-### WS-5.5 — Login has no rate limit, no lockout, and a timing oracle · HIGH
+### WS-5.5 — Login has no rate limit, no lockout, and a timing oracle · HIGH — **DONE**
+
+> Landed: both branches now pay one scrypt verify (absent user against
+> `_ABSENT_USER_HASH`), a per-row lockout after 10 failures for 15 minutes,
+> failed attempts logged without the password, and a 12-character minimum on
+> `new_user`/`create-admin`. **Two new columns on `users`, and `db.create_all()`
+> does not ALTER an existing table** — there is no Alembic here, so they arrive
+> on a fresh database only. Also sets `session.permanent`, which is what makes
+> WS-1.5's lifetime effective.
 
 **Where:** `nethub/auth.py:19-20`, `:51`
 
@@ -888,7 +938,13 @@ Progress feedback is a bigger piece of work — note it and leave it unless aske
 
 ---
 
-### WS-5.7 — Frontend affordances · MEDIUM / LOW
+### WS-5.7 — Frontend affordances · MEDIUM / LOW — **DONE**
+
+> Landed: the activate approval confirms (naming the phase and real host count),
+> flash categories with the default deliberately left as an error, all seven
+> tables wrapped for narrow screens, and nine form labels associated with their
+> controls. **Item 3 — the `delete_hostkey` audit row — was NOT done**: where such
+> a row lives is a design decision, so it stays in WS-6.
 
 **Where:** `nethub/templates/`
 
