@@ -1087,11 +1087,59 @@ else contributes its type and nothing more. There is a test that raises a
 
 **Cancel and the deadline are checked between hosts, never mid-host** — there
 is no safe place to stop inside an activation, and polling more finely would
-not create one.
+not create one. **Be precise about what that means the deadline bounds**: not
+a single wedged device, which still burns `TRANSFER_READ_TIMEOUT` (7200s) with
+only that timeout above it, but the **wave** — a 40-host stage that would
+otherwise occupy the sibling's single FIFO queue with no limit of any kind.
+`deadline_at` is written by `upgrades.phase_deadline()` at both creation
+points (`submit` and `approve`); it was previously declared, read in two
+places, and **written by nothing**, so `timed_out` and `expired` were
+unreachable states and both existing deadline tests set the column by hand —
+green over inert machinery. The budgets are derived from the hardware timings
+in "Device layer" times a safety factor of 2, and they are a first cut from
+*single-device* measurements: re-derive them from a real multi-host wave when
+there is one rather than trusting the arithmetic.
 
 **`phase_activate` owns the reconnect**, not `phase_verify`: a device that
 never returns is a `reload` failure, a different `failure_stage` and a
 different conversation than a wrong version.
+
+**An abandoned phase is parked at its gate, not failed — and only if someone
+can approve it.** §7.3 grants an abandoned device-touching phase a fresh
+approval (a new row with an incremented `attempt`), and that was unreachable:
+`sweep()` called `_fail_run`, so the run went terminal and `approve()`'s first
+guard refused forever, while `models.py` documented `attempt` as existing to
+permit the retry and `approve()` computed `1 + count(abandoned)` — an
+expression that had never returned anything but 1. `sweep()` now calls
+`_abandon_run`, which returns the run to `awaiting_approval` at that phase.
+**The `APPROVABLE` test is load-bearing**: `precheck` has no gate by design
+and `verify` follows `activate` without one, so parking either would leave
+the run at `awaiting_approval` with a phase `approve()` refuses as "not a
+phase anyone approves" — stuck rather than failed, which is worse because it
+looks recoverable. Those stay terminal. `APPROVABLE` moved to `models.py`
+with the other vocabularies so the sibling can read it without importing
+`upgrades` (and the artifact store behind it); `upgrades.APPROVABLE` still
+resolves, by import.
+
+**`run_once` catches `OSError` as well as `CredentialError`.**
+`fetch_credential` does not wrap `connect_socket()`, and `connect_to()._open()`
+calls a bare `socket.connect(path)` — so a Flask unit restarting as the
+sibling picks a job up raises `ConnectionRefusedError`/`FileNotFoundError`,
+which escaped to `main()`'s `except Exception` *after* `claim()` had committed
+`running` under this instance's own `runner_instance_id`. `sweep()` only
+matches rows whose id differs from its own, so the instance that stranded the
+row was structurally incapable of recovering it and the run sat `running`
+forever. The rarer failure was handled cleanly and the common one was not. The
+`error_summary` for that branch names the exception *class* rather than
+copying `str(exc)`: the message is chosen by the OS and the path, and that
+column is retained for a year.
+
+**`sweep()`'s predicate is `or_(runner_instance_id.is_(None), != self)`.**
+`!=` alone evaluates to NULL — not true — for a NULL column, so a `running`
+row with no runner id was invisible to every sweep forever. Latent rather than
+live, since `claim()` sets both in one atomic UPDATE, but the sweep is the
+only mechanism that un-sticks a crashed execution and the explicit predicate
+does not depend on that invariant holding for every future writer.
 
 **SQLite returns naive datetimes for values written aware.** Comparing
 `now()` against a stored `deadline_at` raises `TypeError` for any row read

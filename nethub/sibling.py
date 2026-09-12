@@ -20,10 +20,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import or_
+
 from nethub.credential_socket import CredentialError, fetch_credential
 from nethub.devices import install, phases, transfer
 from nethub.extensions import db
-from nethub.models import UpgradePhaseJob, UpgradeRun
+from nethub.models import APPROVABLE, UpgradePhaseJob, UpgradeRun
 
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
 #: `awaiting_approval` until a human approves the next phase. `verify` follows
@@ -84,16 +86,56 @@ class Sibling:
         """
         stale = UpgradePhaseJob.query.filter(
             UpgradePhaseJob.status == 'running',
-            UpgradePhaseJob.runner_instance_id != self.runner_instance_id,
+            # `!=` alone evaluates to NULL -- not true -- for a NULL column, so
+            # a `running` row with no runner id was invisible to every sweep,
+            # forever. Latent rather than live: `claim()` sets status and
+            # runner_instance_id in one atomic UPDATE, so no current path
+            # produces such a row. It matters because this sweep is the only
+            # mechanism that un-sticks a crashed execution, and the explicit
+            # predicate is strictly safer than relying on that invariant
+            # holding for every future writer.
+            or_(
+                UpgradePhaseJob.runner_instance_id.is_(None),
+                UpgradePhaseJob.runner_instance_id != self.runner_instance_id,
+            ),
         ).all()
         for job in stale:
             job.status = 'abandoned'
             job.failure_stage = 'connect'
             job.error_summary = 'runner exited while this phase was running'
             job.finished_at = self.now()
-            self._fail_run(job.run)
+            self._abandon_run(job)
         db.session.commit()
         return len(stale)
+
+    def _abandon_run(self, job: UpgradePhaseJob) -> None:
+        """Park the run back at this phase's gate, rather than failing it.
+
+        §7.3: "An `abandoned` device-touching phase needs a fresh approval,
+        not an auto-retry -- the approval is what supplies the credential and
+        names the human. The retry is a new row with an incremented
+        `attempt`." That retry was unreachable: this used to call
+        `_fail_run`, so the run went terminal and `approve()`'s first guard
+        (`run.state != 'awaiting_approval'`) refused forever. The whole
+        mechanism was built for -- `models.py` says `attempt` exists to permit
+        it, and `approve()` computes `1 + count(abandoned)` -- and that
+        expression had never returned anything but 1.
+
+        Only a phase someone *can* approve is parked. `precheck` has no gate
+        by design (§8.1) and `verify` follows `activate` without one, so
+        parking either would leave the run at `awaiting_approval` with an
+        `awaiting_phase` that `approve()` refuses as "not a phase anyone
+        approves" -- stuck rather than failed, which is worse. Those stay
+        terminal, and a fresh submit is the honest answer for them.
+        """
+        if job.phase not in APPROVABLE:
+            self._fail_run(job.run)
+            return
+        run = job.run
+        run.state = 'awaiting_approval'
+        run.awaiting_phase = job.phase
+        run.gate_expires_at = self.now() + self.gate_ttl
+        run.finished_at = None
 
     # -- the queue --------------------------------------------------------
     def claim(self, job_id: int) -> bool:
@@ -144,10 +186,32 @@ class Sibling:
 
         try:
             username, password = fetch_credential(self.connect_socket, job.id)
-        except CredentialError as exc:
+        except (CredentialError, OSError) as exc:
+            # OSError as well as CredentialError. `fetch_credential` does not
+            # wrap `connect_socket()`, and `connect_to(path)._open()` calls a
+            # bare `socket.connect(path)` -- so a Flask unit restarting at the
+            # moment we pick a job up raises ConnectionRefusedError or
+            # FileNotFoundError, neither of which is a CredentialError.
+            #
+            # That escaped to main()'s `except Exception`, which logs and
+            # continues -- but `claim()` had already committed status='running'
+            # under *our* runner_instance_id, and `sweep()` only matches rows
+            # whose id differs from its own. The instance that stranded the row
+            # was structurally incapable of recovering it, so the run sat
+            # `running` forever. The rare failure was handled; the common one
+            # was not.
             job.status = 'failed'
             job.failure_stage = 'credential'
-            job.error_summary = str(exc)[:500]
+            job.error_summary = (
+                str(exc)[:500] if isinstance(exc, CredentialError)
+                # Not str(exc) for an OSError: the message is chosen by the OS
+                # and the path, and error_summary is retained for a year
+                # (§7.4). The distinction still matters operationally -- a
+                # socket that is not there is a different problem from a
+                # credential that was refused -- so name the class, not the
+                # text.
+                else f'could not reach the credential socket ({type(exc).__name__})'
+            )
             job.finished_at = self.now()
             self._fail_run(job.run)
             db.session.commit()

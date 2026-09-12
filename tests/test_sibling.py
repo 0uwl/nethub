@@ -359,3 +359,104 @@ class TestEndToEndOverTheSocket:
                 stop.set()
                 thread.join(timeout=3)
                 listening.close()
+
+
+class TestAbandonedPhaseCanBeReApproved:
+    """WS-3.1: the §7.3 retry was unreachable.
+
+    `sweep()` used to call `_fail_run`, so the run went terminal and
+    `approve()`'s first guard refused forever -- while `models.py` said
+    `attempt` existed to permit the retry and `approve()` computed
+    `1 + count(abandoned)`, an expression that had never returned anything
+    but 1. The test above (`test_a_foreign_running_row_is_abandoned`) still
+    asserts `failed`, and correctly: it queues a `precheck`, which nobody
+    approves.
+    """
+
+    def abandon(self, app, run_id, phase):
+        job = queue(run_id, phase=phase)
+        job.status, job.runner_instance_id = "running", "a-dead-instance"
+        db.session.commit()
+        assert make_sibling().sweep() == 1
+        return job
+
+    def test_an_abandoned_stage_parks_at_its_gate(self, app, run):
+        with app.app_context():
+            job = self.abandon(app, run, "stage")
+            assert db.session.get(UpgradePhaseJob, job.id).status == "abandoned"
+            row = db.session.get(UpgradeRun, run)
+            assert row.state == "awaiting_approval"
+            assert row.awaiting_phase == "stage"
+            assert row.finished_at is None, "a parked run has not finished"
+            assert row.gate_expires_at is not None
+
+    def test_approve_then_creates_attempt_two(self, app, run, make_user):
+        """The walk-through the suite never did: sweep() -> approve()."""
+        from nethub import upgrades
+        from nethub.models import User
+
+        username, _ = make_user(username="zoe", password="zoe-long-enough-pw")
+        with app.app_context():
+            user = User.query.filter_by(username=username).first()
+            user.device_username = "zoe"
+            db.session.commit()
+
+            self.abandon(app, run, "activate")
+            row = db.session.get(UpgradeRun, run)
+            job = upgrades.approve(run=row, phase="activate", user=user)
+            assert job.attempt == 2, "1 + count(abandoned)"
+            assert job.status == "queued"
+            assert job.approved_by == user.id
+            assert db.session.get(UpgradeRun, run).state == "running"
+
+    def test_a_second_abandon_gives_attempt_three(self, app, run, make_user):
+        from nethub import upgrades
+        from nethub.models import User
+
+        username, _ = make_user(username="yan", password="yan-long-enough-pw")
+        with app.app_context():
+            user = User.query.filter_by(username=username).first()
+            user.device_username = "yan"
+            db.session.commit()
+
+            self.abandon(app, run, "activate")
+            second = upgrades.approve(
+                run=db.session.get(UpgradeRun, run), phase="activate", user=user)
+            second.status, second.runner_instance_id = "running", "another-dead-one"
+            db.session.commit()
+            assert make_sibling().sweep() == 1
+
+            third = upgrades.approve(
+                run=db.session.get(UpgradeRun, run), phase="activate", user=user)
+            assert third.attempt == 3
+
+    def test_an_abandoned_precheck_still_fails_the_run(self, app, run):
+        """Parking a phase nobody can approve would be stuck, not failed.
+
+        `precheck` has no gate (§8.1) and `verify` follows `activate` without
+        one, so `approve()` refuses both as "not a phase anyone approves".
+        Parking either would leave the run at `awaiting_approval` forever --
+        worse than terminal, because it looks recoverable.
+        """
+        with app.app_context():
+            self.abandon(app, run, "precheck")
+            assert db.session.get(UpgradeRun, run).state == "failed"
+
+    def test_an_abandoned_verify_still_fails_the_run(self, app, run):
+        with app.app_context():
+            self.abandon(app, run, "verify")
+            assert db.session.get(UpgradeRun, run).state == "failed"
+
+
+class TestSweepPredicate:
+    def test_a_null_runner_id_is_swept(self, app, run):
+        """`!=` is NULL, not true, for a NULL column -- so such a row was
+        invisible to every sweep forever. Latent: `claim()` sets status and
+        runner id in one UPDATE, so nothing produces this today.
+        """
+        with app.app_context():
+            job = queue(run, phase="stage")
+            job.status, job.runner_instance_id = "running", None
+            db.session.commit()
+            assert make_sibling().sweep() == 1
+            assert db.session.get(UpgradePhaseJob, job.id).status == "abandoned"

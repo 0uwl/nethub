@@ -40,20 +40,93 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.exc import IntegrityError
 
 from . import artifacts as artifact_store
 from .extensions import db
 from .models import (
+    APPROVABLE,
     DeviceHostKey,
     UpgradePhaseJob,
     UpgradeRun,
     UpgradeRunHost,
 )
 
-#: Which phases a human approves. `precheck` runs on submit with no gate, and
-#: `verify` follows `activate` automatically -- both are read-only (§8.1).
-APPROVABLE = ('stage', 'activate', 'cleanup')
+#: Wall-clock budget per phase, as (fixed seconds, seconds per host).
+#:
+#: `deadline_at` was declared on the model and read in two places
+#: (`sibling.run_once`, `phases.execute_phase`) and **written by nothing** --
+#: so §7.3's `timed_out` and `expired` were unreachable states and a phase
+#: execution had no wall-clock bound at all.
+#:
+#: Be precise about what this does and does not bound. The deadline is checked
+#: **between hosts**, never mid-host (§7.3 -- there is no safe place to stop
+#: inside an activation), so it does *not* rescue a single wedged device: one
+#: host that answers SSH and never finishes its SCP put still burns
+#: `TRANSFER_READ_TIMEOUT`, which is 7200s, and that timeout is the only thing
+#: bounding it. What the deadline bounds is the **wave** -- a 40-host stage
+#: that would otherwise keep the sibling's single FIFO queue busy with no
+#: limit of any kind.
+#:
+#: Derived from the timings CLAUDE.md records against real hardware, then
+#: multiplied by SAFETY. A deadline that fires on a healthy run is worse than
+#: no deadline, so these are deliberately loose: the point is to bound a
+#: wedged phase, not to police a slow one.
+#:
+#:   stage     ~370s for 471 MB over SCP (~1.3 MB/s), plus two
+#:             `verify /sha512` passes at ~34s per 408 MB
+#:   activate  `install add ... activate commit` 605-622s, then a reload of
+#:             228-238s before the CLI serves again
+#:   cleanup   `install remove inactive` ~5s
+#:   precheck  three reads
+#:   verify    one read after the reload
+PHASE_BUDGET_SECONDS = {
+    'precheck': (300, 120),
+    'stage': (600, 300),
+    'activate': (600, 1200),
+    'verify': (300, 180),
+    'cleanup': (300, 120),
+}
+
+#: Multiplier on the sum above. Also covers a stack or a slower chassis, both
+#: of which CLAUDE.md lists as untested.
+#:
+#: 2, not more: at 3 a 20-host stage budget came out at ~15 hours, which is
+#: longer than the 2-hour per-host read timeout it sits above and therefore
+#: not a bound anyone would notice. These are a first cut from single-device
+#: measurements -- re-derive them from a real multi-host wave when there is
+#: one, rather than trusting the arithmetic here.
+DEADLINE_SAFETY = 2
+
+#: Seconds per megabyte of image, added to the stage budget only. Covers the
+#: transfer at a pessimistic ~1 MB/s plus the two digest passes.
+STAGE_SECONDS_PER_MB = 1.3
+
+
+def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
+    """When a phase execution stops being allowed to run.
+
+    Scales with host count because a phase walks hosts one at a time, and --
+    for `stage` only -- with image size, which is the term that actually
+    dominates. Returns an aware datetime; `phases._aware()` and
+    `sibling._aware()` exist because SQLite hands these back naive.
+    """
+    fixed, per_host = PHASE_BUDGET_SECONDS[phase]
+    seconds = fixed + per_host * max(hosts, 1)
+    if phase == 'stage':
+        megabytes = image_bytes / (1024 * 1024)
+        seconds += STAGE_SECONDS_PER_MB * megabytes * max(hosts, 1)
+    return (now or _utcnow()) + timedelta(seconds=seconds * DEADLINE_SAFETY)
+
+
+#: Which phases a human approves -- `precheck` runs on submit with no gate and
+#: `verify` follows `activate` automatically, both read-only (§8.1). Imported
+#: rather than defined here so `upgrades.APPROVABLE` keeps working for
+#: `upgrade_routes`, while the sibling can reach it without importing this
+#: module (and the artifact store behind it).
+__all__ = ['APPROVABLE']
 
 
 class RequestError(Exception):
@@ -213,6 +286,7 @@ def submit(*, user, bundle, hosts_raw, transport, cidrs,
     job = UpgradePhaseJob(
         run_id=run.id, phase='precheck', attempt=1, status='queued',
         created_at=_utcnow(),
+        deadline_at=phase_deadline('precheck', hosts=len(run.hosts)),
     )
     db.session.add(job)
     db.session.commit()
@@ -225,8 +299,13 @@ def approve(*, run, phase, user):
     Two admins both clicking "approve: reload" is the case this has to refuse:
     §8.1's serialization is scoped to *execution*, so it would otherwise queue
     two reloads that then run one after the other. `UNIQUE(run_id, phase,
-    attempt)` is where that collision is caught, and the check below turns it
-    into a message rather than an IntegrityError.
+    attempt)` is where that collision is caught.
+
+    The check below is a check-then-insert, so it turns the *sequential* case
+    into a message and loses the concurrent one -- which matters now that
+    `gunicorn.conf.py` runs more than one thread. The commit is wrapped for
+    that. The constraint holds either way, so two reloads were never possible;
+    without the wrapper the losing admin just got a 500.
     """
     if run.state != 'awaiting_approval':
         raise RequestError(f'This run is {run.state}, not waiting at a gate.')
@@ -246,15 +325,32 @@ def approve(*, run, phase, user):
     ).first():
         raise RequestError('That phase has already been approved.')
 
+    # The run's own rows carry the image size -- read from there rather than
+    # from `artifacts`, which is what keeps a run self-contained and stops a
+    # mid-run supersede re-targeting it (§5).
     job = UpgradePhaseJob(
         run_id=run.id, phase=phase, attempt=attempt, status='queued',
         approved_by=user.id, approved_at=_utcnow(), created_at=_utcnow(),
+        deadline_at=phase_deadline(
+            phase, hosts=len(run.hosts),
+            image_bytes=max((h.file_size or 0) for h in run.hosts) if run.hosts else 0,
+        ),
     )
     db.session.add(job)
     run.state = 'running'
     run.awaiting_phase = None
     run.gate_expires_at = None
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # The check above is a check-then-insert, and this function's own
+        # docstring used to claim it "turns that into a message rather than an
+        # IntegrityError" -- true single-threaded, false under the threads
+        # `gunicorn.conf.py` now runs. UNIQUE(run_id, phase, attempt) holds
+        # either way, so there was never a risk of two reloads; the losing
+        # admin just got a 500 that looked like a crash.
+        db.session.rollback()
+        raise RequestError('That phase has already been approved.') from None
     return job
 
 

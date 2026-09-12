@@ -160,6 +160,14 @@ def load_user(user_id):
 #: §8.1's phases, in order. `cleanup` is optional; declining it closes the run.
 PHASES = ('precheck', 'stage', 'activate', 'verify', 'cleanup')
 
+#: The phases §8.1 puts an approval gate in front of. Lives here with the other
+#: vocabularies rather than in `upgrades.py`, because the sibling needs it too:
+#: `sweep()` parks an abandoned phase at its gate only if a human can actually
+#: approve it, and importing `upgrades` into the sibling would drag the artifact
+#: store along with it. `precheck` is absent by design (it runs on submit, with
+#: no gate) and so is `verify` (it follows `activate` without one).
+APPROVABLE = ('stage', 'activate', 'cleanup')
+
 #: §7.3 job status, shared by every job kind so one sweep serves them all.
 JOB_STATUSES = (
     'queued', 'running',

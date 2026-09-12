@@ -302,3 +302,122 @@ class TestCredentialInterlock:
             store.hold(job.id, 'jsmith', PASSWORD,
                        approved_by=job.approved_by or user)
             assert store.release(job.id, self.verify(app)(job.id)) == ('jsmith', PASSWORD)
+
+
+class TestPhaseDeadlines:
+    """WS-3.3: `deadline_at` was declared, read in two places, and written by
+    nothing -- so §7.3's `timed_out` and `expired` were unreachable and a
+    phase execution had no wall-clock bound. Both existing deadline tests set
+    the column by hand, so the suite was green over inert machinery.
+    """
+
+    def test_submit_writes_a_deadline(self, app, user, confirmed):
+        with app.app_context():
+            _, job = submit(user)
+            assert job.deadline_at is not None
+
+    def test_approve_writes_a_deadline(self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
+            db.session.commit()
+            job = upgrades.approve(
+                run=run, phase='stage', user=db.session.get(User, user))
+            assert job.deadline_at is not None
+
+    def test_the_deadline_survives_the_sqlite_round_trip(self, app, user, confirmed):
+        """SQLite hands datetimes back naive, which is why `_aware()` exists.
+
+        A comparison against an aware `now()` raises TypeError for any row read
+        back from the database -- always in production, never in a test that
+        skips the round trip.
+        """
+        from nethub.devices.phases import _aware
+
+        with app.app_context():
+            _, job = submit(user)
+            job_id = job.id
+            db.session.expunge_all()
+            fresh = db.session.get(UpgradePhaseJob, job_id)
+            assert _aware(fresh.deadline_at) > upgrades._utcnow()
+
+    def test_a_bigger_image_gets_a_longer_stage_budget(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        small = upgrades.phase_deadline('stage', hosts=1, image_bytes=100 << 20, now=now)
+        large = upgrades.phase_deadline('stage', hosts=1, image_bytes=1200 << 20, now=now)
+        assert large > small, "stage is dominated by the transfer"
+
+    def test_more_hosts_gets_a_longer_budget(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        one = upgrades.phase_deadline('activate', hosts=1, now=now)
+        many = upgrades.phase_deadline('activate', hosts=20, now=now)
+        assert many > one, "a phase walks hosts one at a time"
+
+    def test_every_phase_has_a_budget(self):
+        """A phase with no entry would KeyError at submit or approve."""
+        from nethub.models import PHASES
+        for phase in PHASES:
+            assert phase in upgrades.PHASE_BUDGET_SECONDS, phase
+
+    def test_the_stage_budget_clears_what_real_hardware_measured(self):
+        """471 MB took ~370s on the lab switch (CLAUDE.md). A deadline that
+        fires on a healthy run is worse than no deadline.
+        """
+        from datetime import datetime, timezone
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        budget = (upgrades.phase_deadline(
+            'stage', hosts=1, image_bytes=471 << 20, now=now) - now).total_seconds()
+        assert budget > 370 * 4, f"only {budget / 370:.1f}x the measured time"
+
+
+class TestApproveRace:
+    """WS-5.2: check-then-insert, and the check is not the thing that holds."""
+
+    def test_a_concurrent_duplicate_approval_is_a_message_not_a_500(
+        self, app, user, confirmed, monkeypatch
+    ):
+        """Forces the commit to raise the way a real race would.
+
+        The sequential path is already covered (the check catches it); this is
+        the case the check cannot see, which only became reachable when the
+        app started running more than one thread.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        with app.app_context():
+            run, _ = submit(user)
+            run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
+            db.session.commit()
+
+            real = db.session.commit
+            calls = []
+
+            def once_failing():
+                calls.append(1)
+                if len(calls) == 1:
+                    raise IntegrityError('forced', None, Exception('forced'))
+                return real()
+
+            monkeypatch.setattr(db.session, 'commit', once_failing)
+            with pytest.raises(upgrades.RequestError, match='already been approved'):
+                upgrades.approve(run=run, phase='activate',
+                                 user=db.session.get(User, user))
+
+    def test_the_constraint_still_forbids_two_rows(self, app, user, confirmed):
+        """Whatever the route does, the database is what stops two reloads."""
+        from sqlalchemy.exc import IntegrityError
+
+        with app.app_context():
+            run, _ = submit(user)
+            run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
+            db.session.commit()
+            upgrades.approve(run=run, phase='activate',
+                             user=db.session.get(User, user))
+            db.session.add(UpgradePhaseJob(
+                run_id=run.id, phase='activate', attempt=1, status='queued',
+                created_at=upgrades._utcnow()))
+            with pytest.raises(IntegrityError):
+                db.session.commit()
+            db.session.rollback()
