@@ -48,32 +48,48 @@ deliberately deviates.
 | `nethub/models.py` | Schema, plus §7.3's vocabularies as module constants. |
 | `quadlet/nethub.container` | Reference Podman Quadlet unit. Fixed in WS-1.2, but **not re-verified against a real `podman run`** since. |
 | `tests/captures/` | **Evidence, not fixtures.** Verbatim real-hardware output. Never edit a capture to make a test pass. |
+| `tests/test_templates.py` | The only thing guarding the Jinja templates, and the only CSRF-enabled app in the suite. Add a new page to its `PAGES` list or the suite never renders it. |
+| `tests/conftest.py` | `make_user`, `make_artifact`, a fresh `ARTIFACT_STORE` per test — and **CSRF disabled**, which is why the file above exists. The one file concurrent branches collide in; add fixtures locally to your test file instead where you can. |
+| `HANDOFF.md` | This file. Edit it **after** your branch merges, not on it — see §3. |
 
-### Environment setup — three traps that will cost you time
+### Environment setup
 
 ```bash
-# 1. Distro PyYAML has no RECORD file and breaks a plain install.
-pip install --ignore-installed PyYAML -r requirements.txt
-
-# 2. The `pytest` on PATH is a uv-isolated tool that CANNOT see project deps.
-#    It fails with a misleading `ModuleNotFoundError: No module named 'flask'`
-#    raised from conftest. That is an environment artifact, not a bug. Always:
-python -m pytest -q
-
-# 3. Local Python here is 3.11; CI and the Containerfile pin 3.12.
-#    Re-check anything version-sensitive against 3.12.
+pip install -r requirements.txt
 ```
+
+Three things that may bite depending on the machine you are on. None is a bug
+in this repo; all three have cost time before.
+
+- **A `pytest` on `PATH` may not be able to see the project's dependencies** —
+  a `uv`- or `pipx`-installed one has its own isolated interpreter, and it fails
+  with a misleading `ModuleNotFoundError: No module named 'flask'` raised from
+  `conftest.py`. `python -m pytest` always uses the interpreter you installed
+  into, so prefer it.
+- **`pip install -r requirements.txt` can collide with a distro-managed
+  package.** This bit on PyYAML (no `RECORD` file, so pip refuses to uninstall
+  it) before PyYAML was dropped from the file entirely. If you hit it on
+  something else, `--ignore-installed <name>` is the escape.
+- **CI and the `Containerfile` pin Python 3.12.** If your local interpreter is
+  older, re-check anything version-sensitive against 3.12 before trusting a
+  green run.
 
 ### Baseline you must not regress
 
 ```
-python -m pytest -q     →  all green (277 at the time of writing -- treat the
-                           direction as the rule, not the number: concurrent
-                           branches each add tests, so no single total is
-                           correct for long. It must never go DOWN.)
-ruff check .            →  All checks passed!
+python -m pytest -q     →  all green. Treat the DIRECTION as the rule, not the
+                           number: it was 325 at the time of writing and every
+                           task here adds tests, so no total stays correct. It
+                           must never go DOWN.
+ruff check .            →  All checks passed!  -- but see below
 python -m yamllint .    →  clean
 ```
+
+**`ruff check .` locally only agrees with CI if your ruff matches the pin.**
+`.github/workflows/ci.yml` pins `ruff==0.16.7` and `yamllint==1.38.0`, because
+ruff 0.16 widened its *default* rule set and three branches passed locally
+against 0.15 then failed in CI on byte-identical files. Run `ruff --version`
+before trusting a green local lint; install the pinned version if it differs.
 
 Run all three before and after every change.
 
@@ -114,6 +130,10 @@ here because every one of them looks like a reasonable improvement on a first pa
 - **Do not make an empty `DEVICE_TARGET_CIDRS` mean "allow all."**
 - **Do not add a role dropdown for OIDC-backed users**, or a `must_reset_password`
   column without the reset flow that reads it.
+- **Do not unpin `ruff`/`yamllint` in `.github/workflows/ci.yml`** to get past a
+  lint failure after a bump. Fix the findings, or bump the pin deliberately and
+  fix them in that commit. Unpinned, the lint job fails on unchanged code
+  whenever a linter ships new defaults — which is exactly what happened.
 
 If you believe one of these is genuinely wrong for a task you are doing, **stop and
 raise it with the maintainer**. Do not work around it.
@@ -346,8 +366,10 @@ Also: `PyYAML` is still listed but imported nowhere in `nethub/`, `tests/`, or
 3. Mention in the commit message that a hash-pinned lockfile is the stronger fix and
    was not done here.
 
-**Verify:** `pip install --ignore-installed PyYAML -r requirements.txt` in a clean
-env, then the full baseline. Watch for anything that was silently relying on PyYAML.
+**Verified (historical — this task is done):** the pins resolved via
+`pip install --dry-run`, and the full baseline passed. PyYAML's removal needed the
+`--ignore-installed PyYAML` escape *while it was still listed*; it no longer is, so a
+plain `pip install -r requirements.txt` is correct now. Don't copy the old command.
 
 ---
 
@@ -1081,12 +1103,15 @@ the test that would have caught the corresponding finding.
    (WS-4.4). Each is currently tested against a lowercase digest only.
 6. **`wait_for_device` distinguishes a non-transient failure** (WS-4.1).
 7. **Our exception messages carry no library text** (WS-4.2) — the *wrapped* case.
-8. **Template rendering.** There are no template tests at all; only two route tests
-   check status codes and none inspect bodies. **CSRF is disabled in the `app`
-   fixture**, so nothing currently guards against a token silently disappearing from a
-   form. A test with CSRF enabled that asserts every POST form renders a token would be
-   high value.
-9. **Concurrency tests** for the three TOCTOU sites (WS-5.2, WS-5.3).
+8. ~~**Template rendering.**~~ **DONE** — `tests/test_templates.py` renders every
+   page, and the CSRF check builds its own `WTF_CSRF_ENABLED=True` app because the
+   shared `app` fixture disables CSRF, which is what made a missing token invisible.
+   It was verified by deleting a token from a form and watching the test fail. Add to
+   `PAGES` in that file when you add a page, or it goes unrendered by the suite.
+9. **Concurrency tests** for the TOCTOU sites. **WS-5.3's is done** — five tests drive
+   the ingest race deterministically with a stream that plants a rival file as the last
+   chunk is read, rather than timing two real uploads. **WS-5.2's `approve()` race is
+   not**, and needs the same treatment.
 10. **`serve()` on a transient accept error**, and **`_read_line` with a slow peer**
     (both `credential_socket.py` — the elapsed-time bound is missing; `settimeout` is
     per-operation, so a one-byte-per-9s peer holds the sibling's only dispatch loop for
@@ -1102,10 +1127,19 @@ the test that would have caught the corresponding finding.
 3. **Update `CLAUDE.md` in the same pass** if your change alters what a future session
    needs to know — a design decision, a command, a dependency, a rule about what must
    not be built. There is a `design-doc-sync` skill in `.claude/skills/` covering what
-   to check. Several items here will need it: WS-1.2 invalidates the claim that the
-   Quadlet unit was verified end-to-end, WS-1.3 changes a documented hard-rule detail,
-   and WS-1.4 changes the dependency story.
-4. Update the status line at the top of this file, and strike through what you did.
+   to check. Do this *on your branch*: CLAUDE.md sections rarely collide, and a claim
+   that outlives the code it described is how this file and the README both went
+   stale. Check what your change made *false*, not just what it added — the WS-1
+   round left `config.py` asserting a setting was inert after the other half of it
+   landed, and the README still describing a subsystem deleted two build steps
+   earlier.
+4. **Update this file in a separate commit, after your branch merges** — not on the
+   branch. §3's second rule says why: every task wants the status line, so `HANDOFF.md`
+   is the one place concurrent branches are guaranteed to conflict. Refresh the status
+   line, and give your section a `DONE` note saying what landed **and what it did
+   not** — the existing notes record an unverified Quadlet unit, a skipped lockfile,
+   two columns `db.create_all()` will not ALTER, and an item deferred to WS-6, and
+   those caveats are the part a later session actually needs.
 
 ## 10. Provenance
 
