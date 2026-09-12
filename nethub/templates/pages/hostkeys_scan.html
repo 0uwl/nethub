@@ -7,7 +7,8 @@ further &mdash; no device credential is sent. Compare the fingerprint against th
 device itself before confirming; NetHub cannot do that for you.</p>
 <form method="post" class="form-inline">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-  <input type="text" name="address" class="form-control" placeholder="192.0.2.10"
+  <label class="sr-only" for="address">Device address</label>
+  <input type="text" id="address" name="address" class="form-control" placeholder="192.0.2.10"
          value="{{ address or '' }}" required/>
   <button type="submit" class="btn btn-default">Scan</button>
 </form>

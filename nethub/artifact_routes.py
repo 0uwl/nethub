@@ -52,7 +52,8 @@ def new_artifact():
                 uploaded_by=current_user.id,
                 store=artifact_store.store_dir(current_app.config),
             )
-            flash(f'Published "{artifact.bundle_key}" ({artifact.file_size:,} bytes).')
+            flash(f'Published "{artifact.bundle_key}" ({artifact.file_size:,} bytes).',
+                  'success')
             return redirect(url_for('artifacts.list_artifacts'))
         except artifact_store.ArtifactError as exc:
             flash(str(exc))
@@ -66,7 +67,7 @@ def delete_artifact(artifact_id):
     if artifact is not None:
         key = artifact.bundle_key
         artifact_store.delete(artifact)
-        flash(f'Deleted "{key}" and its image file.')
+        flash(f'Deleted "{key}" and its image file.', 'success')
     return redirect(url_for('artifacts.list_artifacts'))
 
 
@@ -78,5 +79,5 @@ def check_artifacts():
     for issue in issues:
         flash(issue)
     if not issues:
-        flash('Every artifact matches its recorded SHA-512.')
+        flash('Every artifact matches its recorded SHA-512.', 'success')
     return redirect(url_for('artifacts.list_artifacts'))

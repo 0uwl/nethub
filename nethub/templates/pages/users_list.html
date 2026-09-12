@@ -8,6 +8,7 @@
 
 <p><a href="{{ url_for('auth.new_user') }}" class="btn btn-primary">New user</a></p>
 
+<div class="table-responsive">
 <table class="table table-striped">
   <thead>
     <tr>
@@ -26,5 +27,6 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 {% endblock %}

@@ -6,6 +6,7 @@
 Confirming one is a deliberate action, separate from submitting a run.</p>
 <p><a href="{{ url_for('hostkeys.scan_hostkey') }}" class="btn btn-primary">Scan an address</a></p>
 {% if keys %}
+<div class="table-responsive">
 <table class="table table-striped">
   <thead><tr><th>Address</th><th>Type</th><th>Fingerprint</th><th>First seen</th><th>Confirmed by</th><th></th></tr></thead>
   <tbody>
@@ -28,5 +29,6 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}<p>No addresses confirmed yet.</p>{% endif %}
 {% endblock %}
