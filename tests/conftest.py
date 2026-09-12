@@ -8,7 +8,7 @@ import pytest
 # Config reads these env vars at import time, so they must be set before
 # `nethub` (or anything under it) is ever imported.
 _tmp_dir = tempfile.mkdtemp()
-os.environ['SECRET_KEY'] = 'test-secret'
+os.environ['SECRET_KEY'] = 'test-secret-key-not-for-production-use'
 os.environ['DATABASE_PATH'] = os.path.join(_tmp_dir, 'test.db')
 os.environ['ARTIFACT_STORE'] = os.path.join(_tmp_dir, 'artifacts')
 
