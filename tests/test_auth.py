@@ -94,7 +94,7 @@ def test_an_absent_username_still_pays_for_a_password_hash(client, monkeypatch):
     absent-user branch reaches a verification at all. Before this, a missing
     user returned before any hashing and answered ~74x faster.
     """
-    import nethub.auth as auth
+    from nethub import auth
 
     calls = []
     real = auth.check_password_hash
@@ -108,7 +108,7 @@ def test_an_absent_username_still_pays_for_a_password_hash(client, monkeypatch):
 
 def test_the_absent_user_hash_has_the_same_kdf_as_a_real_one(app, make_user):
     """A cheaper dummy hash would leave the gap it exists to close."""
-    import nethub.auth as auth
+    from nethub import auth
     from nethub.models import User
 
     make_user(username='frank', password='frank-long-enough-pw')
@@ -119,7 +119,7 @@ def test_the_absent_user_hash_has_the_same_kdf_as_a_real_one(app, make_user):
 
 
 def test_repeated_failures_lock_the_account(client, app, make_user):
-    import nethub.auth as auth
+    from nethub import auth
     from nethub.models import User
 
     username, password = make_user(username='grace', password='grace-long-pw')
