@@ -1,0 +1,22 @@
+# Local dev only -- never used in production (see Containerfile). Runs the
+# Flask dev server (debug + reload) against the repo bind-mounted in at
+# `podman run` time, so edits on the host take effect live with no rebuild.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# No COPY . . here on purpose -- application code comes from the bind mount
+# (see dev.sh), so a change on the host is visible to the reloader without
+# rebuilding this image. Only dependencies are baked in at build time.
+
+EXPOSE 8080
+
+# CMD's --port is the default and can be overridden with extra `podman run`
+# args after the image name; ENTRYPOINT's other flags always apply.
+ENTRYPOINT ["flask", "--app", "nethub", "run", "--host", "0.0.0.0", "--debug"]
+CMD ["--port", "8080"]

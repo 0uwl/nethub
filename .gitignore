@@ -1,3 +1,6 @@
+# NetHub specific
+files/images/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -63,6 +66,7 @@ db.sqlite3-journal
 
 # Flask stuff:
 instance/
+database.db
 .webassets-cache
 
 # Scrapy stuff:

@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+# Bare `pytest` (no `python -m`) doesn't put the repo root on sys.path,
+# so `import nethub` fails without this -- see README.md's documented
+# `pytest` command.
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# gunicorn requires this exact filename (see CLAUDE.md, "Project status") --
+# not a real module-naming mistake.
+"nethub/gunicorn.conf.py" = ["N999"]
+# Config reads SECRET_KEY/DATABASE_PATH/ARTIFACT_STORE at import time, so the
+# fixture module must set them before importing `nethub` -- see the comment in
+# the file itself. Imports genuinely cannot come first here.
+"tests/conftest.py" = ["E402"]
