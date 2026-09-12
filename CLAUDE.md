@@ -33,6 +33,27 @@ creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
 `alpha.md` is that slice's plan and records its deliberate deviations from
 `design-document.md` — no `registry_jobs`/git-committed registry, and sessions
 are Flask-Login's signed cookie rather than a `sessions` row (§4.5).
+
+**The login path is hardened but the mechanism has a schema cost worth
+knowing.** `nethub/auth.py` verifies a password on *every* attempt — an
+absent username is compared against a module-level `_ABSENT_USER_HASH` —
+because the control flow was itself the oracle: a missing user returned
+before any hashing and answered in ~1.4 ms against ~104 ms for a real one, a
+74× gap, on a route whose CSRF token `GET /login` hands out
+unauthenticated. Don't add an early return for a missing user, and don't
+replace that constant with a cheaper hash: it must keep the same KDF
+parameters, which it does by going through the same
+`generate_password_hash`. A locked account gets the same single message as
+a wrong password for the same reason — saying "locked" re-opens the oracle.
+The online-guessing budget (`users.failed_logins`, `users.locked_until`) is
+keyed on the **row, not the submitted username**, because §4.2 argues a
+counter keyed on attacker-chosen input is unbounded growth in the shared
+SQLite file; attempts against usernames that don't exist are therefore not
+counted, which is only safe *because* the timing oracle is closed.
+**`db.create_all()` does not ALTER an existing table**, and there is no
+Alembic in this project, so those two columns arrive only on a fresh
+database — the same limitation `users.device_username` already had. Migrate
+by hand or recreate.
 Provisioning (day-0) is entirely unimplemented.
 The `ansible/` tree is gone (build step 6) along with `.ansible-lint` and
 the `ansible-lint` CI job. Nothing in the repo runs Ansible any more; the
