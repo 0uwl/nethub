@@ -52,6 +52,7 @@
             <li><a href="{{ url_for('upgrades.list_runs') }}">Upgrades</a></li>
             <li><a href="{{ url_for('hostkeys.list_hostkeys') }}">Host keys</a></li>
             <li><a href="{{ url_for('auth.list_users') }}">Users</a></li>
+            <li><a href="{{ url_for('upgrades.profile') }}">Profile</a></li>
           </ul>
           <form class="navbar-form navbar-right" method="post" action="{{ url_for('auth.logout') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -65,10 +66,28 @@
     <!-- Begin page content -->
     <main id="content" role="main" class="container">
 
-      {% with messages = get_flashed_messages() %}
+      {#
+        Every flash used to render as alert-error regardless of what it said,
+        because no flash() call passed a category -- so "Published ..." and
+        "Invalid username or password" looked identical.
+
+        The DEFAULT category stays an error deliberately. Flask calls it
+        'message' when none is given, and the uncategorised calls that remain
+        are failures, so treating the default as an error keeps them correct
+        rather than quietly downgrading a real refusal to a notice. Pass
+        'success' or 'info' explicitly for anything that went right.
+      #}
+      {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-          {% for message in messages %}
-            <div class="alert alert-block alert-error fade in">
+          {% for category, message in messages %}
+            {% if category == 'success' %}
+              {% set alert_class = 'alert-success' %}
+            {% elif category == 'info' %}
+              {% set alert_class = 'alert-info' %}
+            {% else %}
+              {% set alert_class = 'alert-error alert-danger' %}
+            {% endif %}
+            <div class="alert alert-block {{ alert_class }} fade in" role="alert">
               <a class="close" data-dismiss="alert">&times;</a>
               {{ message }}
             </div>

@@ -114,7 +114,7 @@ def confirm_hostkey():
     row.confirmed_by = current_user.id
     row.confirmed_at = upgrades._utcnow()
     db.session.commit()
-    flash(f'Confirmed {address} ({key_type}).')
+    flash(f'Confirmed {address} ({key_type}).', 'success')
     return redirect(url_for('hostkeys.list_hostkeys'))
 
 
@@ -125,7 +125,7 @@ def delete_hostkey(key_id):
     if row is not None:
         db.session.delete(row)
         db.session.commit()
-        flash(f'Removed the pin for {row.ansible_host}.')
+        flash(f'Removed the pin for {row.ansible_host}.', 'success')
     return redirect(url_for('hostkeys.list_hostkeys'))
 
 
@@ -169,7 +169,7 @@ def new_run():
                 db.session.delete(run)
                 db.session.commit()
                 raise upgrades.RequestError(str(exc)) from None
-            flash(f'Submitted run #{run.id}; pre-check is queued.')
+            flash(f'Submitted run #{run.id}; pre-check is queued.', 'success')
             return redirect(url_for('upgrades.show_run', run_id=run.id))
         except upgrades.RequestError as exc:
             flash(str(exc))
@@ -215,7 +215,7 @@ def approve(run_id):
             run.state, run.awaiting_phase = 'awaiting_approval', phase
             db.session.commit()
             raise upgrades.RequestError(str(exc)) from None
-        flash(f'Approved {phase}; queued as job #{job.id}.')
+        flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))
@@ -228,7 +228,7 @@ def decline_cleanup(run_id):
     if run is not None:
         try:
             upgrades.decline_cleanup(run=run)
-            flash('Cleanup declined; the run is closed.')
+            flash('Cleanup declined; the run is closed.', 'info')
         except upgrades.RequestError as exc:
             flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))
@@ -241,10 +241,25 @@ def cancel(run_id):
     if run is not None:
         try:
             upgrades.request_cancel(run=run, user=current_user)
-            flash('Cancel requested. A running phase stops between hosts.')
+            flash('Cancel requested. A running phase stops between hosts.', 'info')
         except upgrades.RequestError as exc:
             flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))
+
+
+@upgrade_bp.route('/profile')
+@login_required
+def profile():
+    """The page that sets `users.device_username`.
+
+    This existed as a POST-only route with no template referencing it, so
+    there was no way to set a device username through the web UI at all --
+    and `upgrades.submit` refuses every run without one, with a message
+    telling the submitter to "set it on your profile first". On a fresh
+    deployment nobody could submit anything until the row was edited out of
+    band.
+    """
+    return render_template('pages/profile.html')
 
 
 @upgrade_bp.route('/profile/device-username', methods=['POST'])
@@ -253,5 +268,9 @@ def set_device_username():
     name = request.form.get('device_username', '').strip()
     current_user.device_username = name or None
     db.session.commit()
-    flash('Device username updated.' if name else 'Device username cleared.')
-    return redirect(request.referrer or url_for('upgrades.list_runs'))
+    flash('Device username updated.' if name else 'Device username cleared.',
+          'success')
+    # `request.referrer` was the previous target: attacker-influenced, and the
+    # only unvalidated redirect in the app. There is a real page to go back to
+    # now, so it is no longer needed for anything.
+    return redirect(url_for('upgrades.profile'))

@@ -24,10 +24,27 @@
   {% endif %}
   <p>Each targeted address, and who confirmed its host key, is listed below &mdash;
   check that before releasing your credential against it.</p>
-  <form method="post" action="{{ url_for('upgrades.approve', run_id=run.id) }}">
+  {#
+    Artifact delete, host-key delete and cancel all confirmed; this form --
+    the only one that reboots production network hardware -- did not. The
+    copy names the phase and the host count so the dialog says what will
+    actually happen rather than "are you sure?".
+  #}
+  <form method="post" action="{{ url_for('upgrades.approve', run_id=run.id) }}"
+        onsubmit="return confirm(
+          {%- if run.awaiting_phase == 'activate' -%}
+            'Reload {{ run.hosts|length }} device(s) now? Each one drops traffic while it reboots, and this releases your device credential against every address listed.'
+          {%- elif run.awaiting_phase == 'cleanup' -%}
+            'Remove inactive packages on {{ run.hosts|length }} device(s)? This frees flash but removes what a rollback would need.'
+          {%- else -%}
+            'Approve {{ run.awaiting_phase }} on {{ run.hosts|length }} device(s)? This releases your device credential against every address listed.'
+          {%- endif -%}
+        );">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
     <input type="hidden" name="phase" value="{{ run.awaiting_phase }}"/>
-    <input type="password" name="device_password" placeholder="Your device password"
+    <label class="sr-only" for="approve_device_password">Your device password</label>
+    <input type="password" id="approve_device_password" name="device_password"
+           placeholder="Your device password"
            class="form-control" required autocomplete="off"/>
     <br/>
     <button type="submit" class="btn btn-primary">Approve {{ run.awaiting_phase }}</button>
@@ -50,6 +67,7 @@
 {% endif %}
 
 <h3>Hosts</h3>
+<div class="table-responsive">
 <table class="table table-striped">
   <thead><tr><th>Host</th><th>Address</th><th>Image</th><th>Target</th><th>State</th><th>Was</th><th>Now</th><th>Error</th></tr></thead>
   <tbody>
@@ -67,8 +85,10 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 
 <h3>Phase executions</h3>
+<div class="table-responsive">
 <table class="table table-striped">
   <thead><tr><th>Phase</th><th>Attempt</th><th>Status</th><th>Approved by</th><th>Started</th><th>Heartbeat</th><th>Failure</th></tr></thead>
   <tbody>
@@ -85,9 +105,11 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 
 {% if results %}
 <h3>Per-host results</h3>
+<div class="table-responsive">
 <table class="table table-striped">
   <thead><tr><th>Host</th><th>Phase</th><th>Attempt</th><th>Status</th><th>Failure</th><th>SCP restored</th><th>Finished</th></tr></thead>
   <tbody>
@@ -104,6 +126,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 <p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran &mdash; under
 <code>pull_sftp</code> nothing on the device is reconfigured at all. It never means
 &ldquo;a change may be outstanding&rdquo;; read it together with the run's transport.</p>

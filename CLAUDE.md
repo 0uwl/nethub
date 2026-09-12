@@ -117,6 +117,21 @@ python -m nethub.upgrade_cli --host <host> --user <name> \
                                     # See "Manual escape hatch" below before using it.
 ```
 
+**`tests/test_templates.py` renders every page and is the only thing guarding
+the templates.** There were no rendering tests at all — two route tests
+checked a status code and nothing inspected a body — so a broken `url_for`, a
+renamed context variable, or a CSRF token deleted from a form would all have
+passed. It builds its own `WTF_CSRF_ENABLED=True` app, because the shared
+`app` fixture disables CSRF and that is precisely what made a missing token
+invisible; the check was verified by deleting a token and watching it fail,
+not assumed. It also owns its `make_run` fixture rather than adding one to
+`conftest.py`, since `conftest.py` is the file concurrent branches collide in.
+Flash categories are asserted both ways: a success must not render
+`alert-error`, and an *uncategorised* flash must still read as an error —
+the default category is deliberately an error, because the remaining
+uncategorised calls are refusals and downgrading them to a neutral notice
+would mis-style real failures.
+
 Tests cover `nethub/{credentials,models,bootstrap,auth,registry,registry_routes}.py`
 (`registry_routes.py` holds both the `registries_bp`/`registry_bp` blueprints)
 end-to-end through Flask's test client (login flow, CSRF disabled in the `app`
@@ -1228,7 +1243,16 @@ hardcoded False and must not be inferred from anything (§4.4).
 
 `users.device_username` is new. It is read server-side and a request can
 never assert it, because §4.3's two-sided attribution depends on the device
-seeing a name NetHub chose. A user without one cannot submit.
+seeing a name NetHub chose. A user without one cannot submit. **`GET /profile`
+is where it is set** — that route existed as POST-only with no template
+referencing it, so there was no way to set one through the web UI at all and
+a fresh deployment could not submit anything until the row was edited out of
+band. The form posts to the same `POST /profile/device-username`; setting your
+own through an authenticated form is the intended mechanism and does not
+conflict with the never-submitted rule, which is about asserting *someone
+else's* identity. That route also no longer redirects to `request.referrer` —
+it was the only unvalidated redirect in the app, and there is a real page to
+return to now.
 
 Things that are refusals rather than validation niceties:
 

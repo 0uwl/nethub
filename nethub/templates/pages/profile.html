@@ -1,0 +1,37 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Your profile{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Your profile</h1>
+</div>
+
+<dl class="dl-horizontal">
+  <dt>NetHub username</dt><dd>{{ current_user.username }}</dd>
+</dl>
+
+<h3>Device username</h3>
+
+<p>The name NetHub logs into <em>devices</em> with on your behalf &mdash; separate
+from the NetHub login above. It is read from your account server-side and can
+never be supplied by a request, because the device&rsquo;s own AAA accounting and
+the run record have to name the same human for the audit trail to mean
+anything.</p>
+
+<p><strong>You cannot submit an upgrade run until this is set.</strong></p>
+
+<form method="post" action="{{ url_for('upgrades.set_device_username') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="form-group">
+    <label for="device_username">Device username</label>
+    <input type="text" class="form-control" id="device_username"
+           name="device_username" value="{{ current_user.device_username or '' }}"
+           placeholder="e.g. jsmith" autofocus>
+    <p class="help-block">Leave empty and save to clear it. Clearing it stops you
+    submitting new runs; it does not affect runs already in flight, which
+    snapshotted the name at submit.</p>
+  </div>
+  <button type="submit" class="btn btn-primary">Save device username</button>
+</form>
+
+{% endblock %}

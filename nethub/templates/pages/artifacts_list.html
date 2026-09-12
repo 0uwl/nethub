@@ -12,6 +12,7 @@ which NetHub owns &mdash; both transports read it by filename.</p>
   </form>
 </p>
 {% if artifacts %}
+<div class="table-responsive">
 <table class="table table-striped">
   <thead><tr><th>Bundle key</th><th>Version</th><th>File</th><th>Size</th><th>SHA-512</th><th>Uploaded by</th><th></th></tr></thead>
   <tbody>
@@ -34,5 +35,6 @@ which NetHub owns &mdash; both transports read it by filename.</p>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}<p class="lead">Nothing published yet.</p>{% endif %}
 {% endblock %}
