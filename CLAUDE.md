@@ -53,8 +53,13 @@ mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 
 ```bash
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, PyYAML, gunicorn, pytest,
-                                   # netmiko, ntc-templates
+                                   # Flask-WTF, gunicorn, pytest, netmiko,
+                                   # ntc-templates -- all pinned to exact
+                                   # versions, because CI resolves this file
+                                   # fresh on every push to main and publishes
+                                   # the result. PyYAML was dropped with the
+                                   # YAML registry (build step 7); yamllint is
+                                   # a CI tool, not a runtime dep.
 
 export SECRET_KEY=<any-string>    # required; nethub/config.py raises ValueError without it
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
@@ -125,8 +130,12 @@ with no rebuild. Never run `Containerfile.dev` as anything but a local
 dev convenience — same reasoning as the `DEBUG` hard rule below.
 
 `nethub/gunicorn.conf.py` fixes `workers = 1` (not a knob — SQLite plus
-the single-worker hard rule below both assume exactly one process) and
-sets `control_socket_disable = True`: gunicorn ≥25.1 otherwise tries to
+the single-worker hard rule below both assume exactly one process), sets
+`worker_class = 'gthread'` with `threads = 4` — the *other* half of that
+hard rule, and required rather than optional: gunicorn's defaults are
+`sync`/`threads=1`, so leaving them unset made production single-threaded
+and a 1.5 GB upload held the whole server, the exact §3.2 failure arriving
+through ingest — and sets `control_socket_disable = True`: gunicorn ≥25.1 otherwise tries to
 create `$HOME/.gunicorn/gunicorn.ctl` for a control socket nothing here
 uses, which throws under the Quadlet unit's `ReadOnly=true`. Discovered
 by actually running the built image read-only, not by inspection — if
@@ -138,7 +147,16 @@ Drawbridge's own `quadlet/drawbridge.container` for the sibling
 project's version of the same pattern). Verified end-to-end against a
 real `podman build`/`podman run` — including `UserNS=keep-id`,
 `ReadOnly=true`+`Tmpfs=`, and the systemd-credential path — not just
-written from the Drawbridge example and assumed to work. Two things
+written from the Drawbridge example and assumed to work. **But that
+verification predates build step 7 and the review fixes**: the unit still
+set the deleted `REGISTRIES_ROOT` and never set `ARTIFACT_STORE`, so the
+store defaulted onto the read-only image layer and the artifacts page
+500'd on load. It now sets `ARTIFACT_STORE=/app/artifacts` with a volume
+behind it, carries commented `DEVICE_TARGET_CIDRS`/`IMAGE_TRANSPORT`
+lines, and adds `LimitCORE=0` plus
+`NoNewPrivileges=`/`ProtectProc=`/`RestrictSUIDSGID=` to `[Service]`.
+**None of that has been re-verified against a real `podman run`** — treat
+the end-to-end claim as applying to the older shape only. Two things
 worth knowing if this file gets edited:
 
 - **`LoadCredential=`/`SetCredential=` belong in `[Service]`, not
@@ -166,6 +184,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
 | `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
+| `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally. `PERMANENT_SESSION_LIFETIME` is declared beside them but **inert** until the login path sets `session.permanent` — see the note in `config.py`. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
 | `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
@@ -654,9 +673,12 @@ seems to require one, the design is what needs revisiting, not the rule.
   processes; don't flip the default back to `True` or make it easier to
   turn on than the current env var opt-in. It remains a release blocker
   for the full approval flow's device credentials, same reasoning, wider
-  blast radius. Same class, not yet addressed: `LimitCORE=0` and
-  non-dumpable process, or a crash writes the heap to
-  `/var/lib/systemd/coredump`.
+  blast radius. Same class: `LimitCORE=0` **is** now set in the Quadlet
+  unit's `[Service]`, which covers the deployed path — otherwise a crash
+  writes the heap, live credential included, to
+  `/var/lib/systemd/coredump`. Still not addressed: a non-dumpable process
+  (`PR_SET_DUMPABLE`), and neither applies to a bare `flask run` or to
+  `upgrade_cli.py`.
 - **Everything runs on one host, in separate Quadlet units, under one
   rootless user — DHCP being the deliberate exception** (it stays
   native; it binds a privileged broadcast-facing port and is outside
