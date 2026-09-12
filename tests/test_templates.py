@@ -15,7 +15,7 @@ import pytest
 
 from nethub import create_app
 from nethub.extensions import db
-from nethub.models import User, UpgradeRun, UpgradeRunHost
+from nethub.models import UpgradeRun, UpgradeRunHost, User
 
 
 @pytest.fixture
@@ -136,7 +136,7 @@ def test_the_confirmation_names_the_host_count(logged_in_client, make_run):
 
 
 def _form_containing(body, needle):
-    for match in re.finditer(r'<form\b.*?</form>', body, re.S):
+    for match in re.finditer(r'<form\b.*?</form>', body, re.DOTALL):
         if needle in match.group(0):
             return match.group(0)
     return None
@@ -202,7 +202,7 @@ def test_every_post_form_carries_a_csrf_token(csrf_app):
     missing = []
     for path in PAGES:
         body = client.get(path).get_data(as_text=True)
-        for form in re.finditer(r'<form\b(.*?)</form>', body, re.S):
+        for form in re.finditer(r'<form\b(.*?)</form>', body, re.DOTALL):
             attrs = form.group(0)
             if 'method="post"' not in attrs.lower():
                 continue
@@ -218,7 +218,12 @@ def test_the_logout_form_in_the_layout_has_a_token(csrf_app):
     # Not logged in, so the nav is hidden -- assert on the login page's own form
     # and separately that the layout's logout form is templated with a token.
     assert 'name="csrf_token"' in page
-    layout = open('nethub/templates/layouts/main.html').read()
+    # Read through the app's own Jinja loader rather than a relative path:
+    # that made the test depend on pytest's working directory, and it would
+    # have failed for anyone running it from outside the repo root.
+    layout, _, _ = csrf_app.jinja_env.loader.get_source(
+        csrf_app.jinja_env, 'layouts/main.html'
+    )
     logout = _form_containing(layout, 'auth.logout')
     assert logout and 'csrf_token' in logout
 
