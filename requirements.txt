@@ -1,9 +1,25 @@
-Flask
-Flask-SQLAlchemy
-Flask-Login
-Flask-WTF
-PyYAML
-gunicorn
-pytest
-netmiko
-ntc-templates
+# Pinned deliberately. CI resolves this file fresh on every push to main and
+# publishes the result to ghcr.io/<repo>:latest, so an unpinned file means a
+# poisoned or merely incompatible upstream release ships with no diff for
+# anyone to review -- and CLAUDE.md makes load-bearing claims about specific
+# versions ("the pinned gunicorn version (26.x) parses its app argument as a
+# Python expression", and control_socket_disable existing at all), which were
+# not actually pinned. gunicorn has already changed relevant behaviour once at
+# 25.1.
+#
+# These are exact versions, not a lockfile: transitive dependencies are still
+# resolved freely and unhashed. A hash-pinned lockfile is the stronger fix and
+# is not done here.
+#
+# PyYAML was dropped at this pin: the YAML registry it served was deleted at
+# build step 7 and nothing under nethub/, tests/ or scripts/ imports it. The
+# `yamllint` used by CI is a separate tool installed by the workflow, not a
+# runtime dependency of this package.
+Flask==3.1.3
+Flask-SQLAlchemy==3.1.1
+Flask-Login==0.6.3
+Flask-WTF==1.3.0
+gunicorn==26.2.0
+pytest==9.1.1
+netmiko==4.7.0
+ntc-templates==9.2.0

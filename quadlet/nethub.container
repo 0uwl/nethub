@@ -8,12 +8,12 @@
 #
 # Host prep -- rootless, so this lives under the invoking user's own XDG
 # data dir, no sudo/chown needed:
-#   mkdir -p ~/.local/share/nethub/{data,registry}
+#   mkdir -p ~/.local/share/nethub/{data,artifacts}
 #
 # Full description of every variable: CLAUDE.md / alpha.md.
 
 [Unit]
-Description=NetHub software registry server
+Description=NetHub software lifecycle server
 After=network-online.target
 Wants=network-online.target
 
@@ -34,26 +34,25 @@ UserNS=keep-id:uid=1000,gid=1000
 PublishPort=8080:8080
 
 # --- Required ---
-# /app/data holds the SQLite database. /app/registries is REGISTRIES_ROOT
-# -- every file an admin wants NetHub to track/manage as a registry (see
-# the Registries settings page) must be bind-mounted somewhere under it.
-# %h expands to the invoking user's home directory. :Z relabels for
-# SELinux hosts; harmless if SELinux is disabled.
+# /app/data holds the SQLite database. /app/artifacts is ARTIFACT_STORE --
+# NetHub's own flat directory of uploaded image bytes, which both transports
+# address by filename. Unlike the REGISTRIES_ROOT it replaced at build step 7,
+# this is not somewhere an admin mounts *their* files for NetHub to point at:
+# NetHub owns it, and it is usually a much larger volume than /app/data (a
+# single IOS-XE image is ~450 MB and nothing is superseded or pruned yet).
+#
+# ARTIFACT_STORE must be set explicitly. Its default is <repo root>/instance/
+# artifacts, which inside this image is /app/instance/artifacts -- on the
+# read-only layer, with no volume behind it -- and artifacts.store_dir() does
+# an unguarded os.makedirs(), so leaving it unset makes the artifacts page 500
+# on every load.
+#
+# %h expands to the invoking user's home directory. :Z relabels for SELinux
+# hosts; harmless if SELinux is disabled.
 Volume=%h/.local/share/nethub/data:/app/data:Z
-Volume=%h/.local/share/nethub/registries:/app/registries:Z
+Volume=%h/.local/share/nethub/artifacts:/app/artifacts:Z
 Environment=DATABASE_PATH=/app/data/database.db
-Environment=REGISTRIES_ROOT=/app/registries
-
-# --- Optional ---
-# Bind-mount a real Ansible group_vars file on the host (e.g. an
-# os_iosxe.yml under ansible/inventory/rendered) into REGISTRIES_ROOT so
-# the Registries settings page can discover and adopt it -- NetHub reads
-# any existing top-level `software_registry` key it already has, or adds
-# one. Each registry also needs its own writable search_dir for images,
-# set from the settings page (not here) -- typically a much larger,
-# separately bind-mounted volume, e.g.:
-#Volume=/path/to/host/group_vars/os_iosxe.yml:/app/registries/os_iosxe.yml:Z
-#Volume=/path/to/host/image/store:/app/registries-images/os_iosxe:Z
+Environment=ARTIFACT_STORE=/app/artifacts
 
 # --- Required ---
 # Flask/Flask-Login session-signing key. No default, and deliberately NOT
@@ -75,6 +74,21 @@ Environment=REGISTRIES_ROOT=/app/registries
 # credential injection" at the bottom of this file. Uncomment the matching
 # LoadCredential= line in [Service] and leave the Environment= line above
 # commented out. The credential takes priority over the env var either way.
+
+# --- Required before any upgrade can be submitted ---
+# Comma-separated CIDRs a submitted target address must fall inside. This is
+# fail-closed and has no default: while it is unset, every submit is refused.
+# That is deliberate -- an unset security setting is not "allow all" -- but it
+# does mean a fresh deployment cannot run an upgrade until you set it.
+#Environment=DEVICE_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16
+
+# --- Optional ---
+# Which direction the image moves: push_scp (default) or pull_sftp. This is a
+# deployment-level decision and never a per-request one, because choosing the
+# transport chooses whose credential gets spent. Do not switch to pull_sftp
+# without reading CLAUDE.md's transport rule first -- pull needs an inbound
+# SFTP daemon on this host, and IOS-XE does not verify its host key.
+#Environment=IMAGE_TRANSPORT=push_scp
 
 # --- Optional ---
 # Port Gunicorn binds to inside the container. Update the left side of
@@ -109,15 +123,27 @@ Environment=REGISTRIES_ROOT=/app/registries
 # Containerfile) doesn't consult it; it exists for `flask run`/dev.sh.
 #Environment=DEBUG=1
 
-# App only ever writes under /app/data, /app/registries (plus whatever
-# per-registry search_dir volumes are mounted -- see the optional block
-# above), /tmp, /run.
+# App only ever writes under /app/data, /app/artifacts, /tmp and /run.
 ReadOnly=true
 Tmpfs=/tmp
 Tmpfs=/run
 
 [Service]
 Restart=on-failure
+
+# A core dump would write this process's heap -- which holds submitted device
+# passwords for the life of a phase execution -- to /var/lib/systemd/coredump,
+# where it outlives the credential by however long the retention allows. See
+# CLAUDE.md's note that this was a known-open item.
+LimitCORE=0
+
+# Nothing here needs to gain privileges, and /proc of other processes is not
+# this container's business. ProtectProc=invisible also narrows the
+# same-uid /proc/<pid>/environ and /proc/<pid>/mem reads that the separate
+# Flask/sibling PID namespaces exist to prevent.
+NoNewPrivileges=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
 
 # --- Systemd credential injection ---
 # LoadCredential=/SetCredential= are plain systemd service directives, not

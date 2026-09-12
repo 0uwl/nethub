@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 
 from .credentials import read_credential
 
@@ -46,6 +47,29 @@ if len(SECRET_KEY) < SECRET_KEY_MIN_LENGTH:
         f"SECRET_KEY must be at least {SECRET_KEY_MIN_LENGTH} characters; got "
         f"{len(SECRET_KEY)}. Generate one with `openssl rand -hex 32`."
     )
+
+# Session cookie hardening. design-document.md §4.5 asks specifically for
+# SameSite=Strict on approvals -- a cross-site "approve: reload" is a fleet
+# outage -- and CSRF is already complete, so these are defence in depth rather
+# than the primary control. Secure defaults ON: the Quadlet unit publishes
+# plain HTTP on 8080, so a deployment with no TLS terminator in front would
+# otherwise send the cookie in cleartext on the ops LAN, and there is no
+# server-side sessions row to revoke it against (§4.5, see alpha.md) -- it
+# stays valid until SECRET_KEY rotates. Set SESSION_COOKIE_INSECURE=1 for
+# local HTTP development only.
+SESSION_COOKIE_SAMESITE = 'Strict'
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_INSECURE', '') != '1'
+
+# An absolute bound on a signed cookie that otherwise carries no expiry of its
+# own. NOTE: Flask applies this only to a session marked `permanent`, and
+# nethub/auth.py does not set that yet -- so this value is declared here (it is
+# configuration and belongs with the other cookie settings) but is INERT until
+# the login path sets `session.permanent = True`. That one line belongs to the
+# login-hardening work, which owns auth.py; deliberately not done here so the
+# two changes stay on separate branches. Until then the cookie still has no
+# expiry of its own.
+PERMANENT_SESSION_LIFETIME = timedelta(hours=12)
 
 # Bare SQLite file path -- not a full SQLAlchemy URL. Overridable so a
 # container can point it at a mounted volume (e.g. /app/data/database.db).
