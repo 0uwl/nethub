@@ -20,7 +20,7 @@ and no per-artifact directory to name.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -101,7 +101,8 @@ class PullTarget:
 
     host: str
     username: str
-    password: str
+    #: repr=False: see the note on `credential_socket._Held`.
+    password: str = field(repr=False)
 
 
 def stage_image(

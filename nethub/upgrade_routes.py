@@ -241,6 +241,17 @@ def cancel(run_id):
     if run is not None:
         try:
             upgrades.request_cancel(run=run, user=current_user)
+            # A `queued` job's credential will never be fetched now, so it
+            # would otherwise sit in this worker until its TTL or a restart.
+            # `discard()` had no callers anywhere in nethub/ before this.
+            #
+            # Only `queued`: a `running` job already fetched its credential,
+            # and `release()` pops before it validates, so there is nothing
+            # left to discard. Queried here rather than returned from
+            # `request_cancel` -- the store belongs to Flask, and the service
+            # module should not grow a signature to serve it.
+            for job in UpgradePhaseJob.query.filter_by(run_id=run.id, status='queued'):
+                _store().discard(job.id)
             flash('Cancel requested. A running phase stops between hosts.', 'info')
         except upgrades.RequestError as exc:
             flash(str(exc))

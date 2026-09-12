@@ -1128,6 +1128,46 @@ executions it has not started, and could be flooded. Four things about
   chooses those bytes and the sibling is the privileged side, so
   `fetch_credential` caps, deadlines and allowlists what comes back before it
   reaches any variable or command string.
+- **The store is bounded by its TTL, not only by use, and that took wiring.**
+  `purge_expired()` and `discard()` existed with **no caller anywhere in
+  `nethub/`** — the TTL was enforced only inside `release()`, i.e. only if the
+  sibling eventually asked for that exact job. An approval whose job never ran
+  (sibling down, run cancelled, job abandoned) left a named human's plaintext
+  AAA password in the worker that also serves the only unauthenticated route,
+  which with one worker and a long-lived unit is weeks. `hold()` and
+  `release()` now sweep on every use, and `upgrade_routes.cancel` discards the
+  credentials of `queued` jobs. Two details are load-bearing: the sweep in
+  `release()` runs **after** the target is popped, or an expired credential
+  reports "no credential held" instead of "expired; the phase needs
+  re-approval" — the same refusal a never-approved job gets, and a worse
+  diagnosis (a test pins this). And cancel sweeps only `queued` rows: a
+  `running` job has already fetched, and keying the discard by run rather than
+  job would be exactly the mistake §9.1 forbids. Deliberately **not** a
+  background timer — this store has no supervisor, and a thread outliving a
+  request is worse to reason about than a sweep on each use.
+- **`type(job_id) is not int`, not `isinstance`.** `bool` is a subclass of
+  `int` and `hash(True) == hash(1)`, so `{"job_id": true}` released the
+  credential held under key 1 — and `db.session.get(UpgradePhaseJob, True)`
+  would have bound to 1 as well. Bounded by the mount and by the sibling never
+  sending a bool, but this function's entire purpose is validating a message
+  before it selects a secret.
+- **Every field holding the credential is `field(repr=False)`** — on `_Held`,
+  `phases.PhaseContext` and `transfer.PullTarget`. No path renders any of them
+  today (tracebacks carry no frame locals, `DEBUG` is off, neither netmiko nor
+  paramiko defines a repr that would pull one in), so this is a structural
+  guard rather than a fix. `PhaseContext` is the object this file names as the
+  credential's entire lifetime container, and one `log.debug("ctx=%r", ctx)`
+  added while debugging writes it to journald or a CI log that outlives the
+  phase. Don't drop the flag when adding a field beside them.
+
+**`upgrade_cli.py` warns when it takes the password from
+`NETHUB_DEVICE_PASSWORD`** rather than the prompt. The var is kept because a
+scripted recovery needs it, but an env var sits in `/proc/<pid>/environ` for
+the whole run — up to ~20 minutes for `--phases all` — is inherited by every
+child, and lands in shell history if set inline. `scripts/check_device_facts.py`
+reads the same var and is **not** warned, deliberately: that script is WS-6.1's
+open question (it also connects with `AutoAddPolicy`, so a warning would be the
+least of it) and changing it is a decision, not a fix.
 
 **`verify_running` runs on the serving thread and needs its own app
 context.** Flask-SQLAlchemy's session is thread-local, so without one every

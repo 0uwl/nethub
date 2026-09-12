@@ -37,7 +37,7 @@ import json
 import os
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 #: The credential sits in Flask's memory from approval until the sibling picks
@@ -65,7 +65,14 @@ class CredentialError(Exception):
 @dataclass
 class _Held:
     username: str
-    password: str
+    #: repr=False on every field holding the credential, here and on
+    #: PhaseContext and PullTarget. No path renders any of them today --
+    #: tracebacks carry no frame locals and DEBUG is off -- but PhaseContext is
+    #: the object CLAUDE.md names as the credential's entire lifetime
+    #: container, and one `log.debug("ctx=%r", ctx)` added while debugging
+    #: would write it to journald, `podman logs`, or a CI log that outlives
+    #: the phase by far. The guard costs nothing.
+    password: str = field(repr=False)
     approved_by: int
     expires_at: datetime
 
@@ -99,6 +106,19 @@ class CredentialStore:
 
     def hold(self, job_id: int, username: str, password: str, approved_by: int) -> None:
         check_credential(password)
+        # Sweep on the way in. The TTL was previously enforced *only* inside
+        # release(), i.e. only if the sibling eventually asked for that exact
+        # job -- so an approval whose job never ran (sibling down, run
+        # cancelled, job abandoned) left a named human's plaintext AAA password
+        # in this dict past its expiry, in the gunicorn worker that also serves
+        # the only unauthenticated route, until the worker restarted. With one
+        # worker and a long-lived unit that is measured in weeks, and it is
+        # what gives the LimitCORE exposure something worth dumping.
+        #
+        # Deliberately not a background timer: this store has no supervisor and
+        # a thread that outlives a request is a worse thing to reason about
+        # than a sweep on each use. `hold` and `release` are the only ways in.
+        self.purge_expired()
         with self._lock:
             self._held[job_id] = _Held(
                 username, password, approved_by, self._now() + self._ttl
@@ -118,6 +138,13 @@ class CredentialStore:
         # this socket at all (§9.2's mount argument).
         with self._lock:
             held = self._held.pop(job_id, None)
+        # Sweep the *others* only, and only after the target is already out of
+        # the dict. Sweeping first would delete an expired target before the
+        # check below could see it, so "held credential expired; the phase
+        # needs re-approval" would degrade to "no credential held for this
+        # execution" -- the same refusal a job that was never approved gets,
+        # and a worse answer for the operator reading failure_stage.
+        self.purge_expired()
         if held is None:
             raise CredentialError("no credential held for this execution")
         if self._now() >= held.expires_at:
@@ -161,7 +188,11 @@ def handle_request(raw: bytes, store: CredentialStore, verify_running) -> bytes:
         if not isinstance(message, dict) or set(message) != {"job_id"}:
             raise CredentialError("unrecognised message")
         job_id = message["job_id"]
-        if not isinstance(job_id, int):
+        # `type(...) is int`, not isinstance: bool is a subclass of int and
+        # hash(True) == hash(1), so {"job_id": true} used to release the
+        # credential held under key 1. This function's whole purpose is
+        # validating a message before it selects a secret.
+        if type(job_id) is not int:
             raise CredentialError("unrecognised message")
 
         approved_by = verify_running(job_id)
