@@ -196,3 +196,94 @@ class TestDelete:
             artifacts.delete(a)
             assert Artifact.query.count() == 0
             assert not os.path.exists(path)
+
+
+# --- The ingest race (WS-5.3) ------------------------------------------------
+#
+# The three checks at the top of `ingest` all run before the upload streams,
+# so under concurrency they prove nothing by the time the bytes are moved into
+# place. These tests drive that window directly rather than trying to time two
+# real uploads against each other.
+
+OTHER = b"a-different-image-entirely" * 100
+OTHER_DIGEST = hashlib.sha512(OTHER).hexdigest()
+
+
+def _win_the_race_during(store, app, content=OTHER):
+    """Return a stream that plants `content` at the final path mid-upload.
+
+    Simulates the other uploader finishing while this one is still streaming:
+    by the time our `os.link` runs, the name is taken.
+    """
+    final = os.path.join(store, IMAGE)
+
+    class _Racing(io.BytesIO):
+        def read(self, *a, **kw):
+            chunk = super().read(*a, **kw)
+            if not chunk and not os.path.lexists(final):
+                with open(final, "wb") as fh:
+                    fh.write(content)
+            return chunk
+
+    return FileStorage(stream=_Racing(CONTENT), filename=IMAGE)
+
+
+def test_a_lost_race_does_not_overwrite_the_winners_bytes(store, app):
+    with app.app_context():
+        with pytest.raises(artifacts.ArtifactError, match="already in the store"):
+            ingest(store, file_storage=_win_the_race_during(store, app))
+
+    # The winner's bytes are untouched -- this is the whole point. Before the
+    # fix, os.replace clobbered them and left the winner's row pointing at the
+    # loser's content, with every downstream hash check then failing.
+    with open(os.path.join(store, IMAGE), "rb") as fh:
+        assert fh.read() == OTHER
+
+
+def test_a_lost_race_leaves_no_temp_file_behind(store, app):
+    with app.app_context():
+        with pytest.raises(artifacts.ArtifactError):
+            ingest(store, file_storage=_win_the_race_during(store, app))
+    leftovers = [n for n in os.listdir(store) if n.startswith(".incoming-")]
+    assert leftovers == []
+
+
+def test_a_lost_race_writes_no_row(store, app):
+    with app.app_context():
+        with pytest.raises(artifacts.ArtifactError):
+            ingest(store, file_storage=_win_the_race_during(store, app))
+        assert Artifact.query.filter_by(filename=IMAGE).count() == 0
+
+
+def test_a_row_that_loses_at_commit_removes_its_own_bytes(store, app, monkeypatch):
+    """The schema is the backstop, and it fires after the bytes are in place.
+
+    A file no row accounts for would block that filename for every later
+    upload, so losing this race has to clean up after itself.
+    """
+    with app.app_context():
+        real_commit = db.session.commit
+        calls = []
+
+        def failing_commit():
+            calls.append(1)
+            if len(calls) == 1:
+                raise IntegrityError("forced", None, Exception("forced"))
+            return real_commit()
+
+        monkeypatch.setattr(db.session, "commit", failing_commit)
+        with pytest.raises(artifacts.ArtifactError, match="claimed the same"):
+            ingest(store)
+
+    assert not os.path.lexists(os.path.join(store, IMAGE))
+    assert [n for n in os.listdir(store) if n.startswith(".incoming-")] == []
+
+
+def test_the_happy_path_still_removes_its_temp_file(store, app):
+    with app.app_context():
+        artifact = ingest(store)
+        assert artifact.sha512 == DIGEST
+    assert os.path.isfile(os.path.join(store, IMAGE))
+    assert [n for n in os.listdir(store) if n.startswith(".incoming-")] == []
+    # One link only: the temp was unlinked, not left as a second name.
+    assert os.stat(os.path.join(store, IMAGE)).st_nlink == 1

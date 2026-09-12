@@ -15,8 +15,9 @@ Three properties this layer is responsible for:
 - **The submitted checksum is checked against what we computed**, and a
   mismatch means the bytes never enter the store. The uploader's claim is the
   thing being verified, so it is never what gets recorded.
-- **Nothing lands at its final path until it has verified.** Bytes stream to a
-  temporary file in the same directory and are moved with `os.replace` only
+- **Nothing lands at its final path until it has verified, and the move that
+  puts it there cannot overwrite.** Bytes stream to a temporary file in the
+  same directory and are linked into place with `os.link` only
   after the digest matches, so a failed or interrupted upload cannot leave a
   half-written image under a name something else would later push.
 """
@@ -29,6 +30,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 
 from .extensions import db
@@ -134,7 +136,27 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
             )
         if size == 0:
             raise ArtifactError('Uploaded file is empty.')
-        os.replace(temp_path, final_path)
+        # `os.link`, not `os.replace`: link fails with FileExistsError if the
+        # target is taken, and replace silently overwrites. The three checks
+        # above all ran minutes ago -- before the upload streamed -- so under
+        # concurrency they prove nothing by the time we get here. Two uploads
+        # sharing a filename used to both reach `os.replace`, and the loser
+        # overwrote the winner's already-committed bytes *before* hitting its
+        # own IntegrityError at commit. The row then recorded one artifact's
+        # SHA-512 against the other's bytes, which is exactly the chain of
+        # custody §3.4 is built on, broken silently. The cleanup below only
+        # ever removed the temp file, so nothing put the winner's bytes back.
+        #
+        # Both paths are in `store` by construction (tempfile.mkstemp(dir=store)),
+        # so they are on one filesystem and a hard link is available.
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError:
+            raise ArtifactError(
+                f'A file named "{filename}" is already in the store. Another '
+                f'upload of the same filename finished first.'
+            ) from None
+        os.unlink(temp_path)
     except Exception:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -147,7 +169,21 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
         uploaded_at=_utcnow(),
     )
     db.session.add(artifact)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # The schema is the backstop behind the checks at the top of this
+        # function (see the UNIQUE notes in models.py), and it fires here --
+        # after the bytes are already at their final path. Losing this race
+        # must not leave an orphan file that no row accounts for and that
+        # blocks the filename for every later upload.
+        db.session.rollback()
+        if os.path.exists(final_path):
+            os.remove(final_path)
+        raise ArtifactError(
+            f'Could not record "{filename}": another artifact claimed the same '
+            f'filename or bundle key first.'
+        ) from None
     return artifact
 
 

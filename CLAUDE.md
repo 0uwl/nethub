@@ -1126,10 +1126,28 @@ against each independently.
 file. A 1.2 GB upload plus its digest is the longest operation in the system
 after a device transfer and Flask holds the only unauthenticated route, so a
 second pass doubles a window §3.2 spends its length bounding. Bytes stream to
-a temp file in the same directory and are moved with `os.replace` only after
-the digest matches — a failed or interrupted upload cannot leave a
+a temp file in the same directory and are linked into place only after the
+digest matches — a failed or interrupted upload cannot leave a
 half-written image under a name something would later push. The submitted
 checksum is the *claim being verified* and is never what gets recorded.
+
+**The final move is `os.link`, never `os.replace`, and that is the fix for a
+real corruption.** Every check at the top of `ingest()` runs *before* the
+upload streams, so under concurrency they prove nothing minutes later when
+the bytes are moved. Two uploads sharing a filename both reached
+`os.replace`, and the loser overwrote the winner's already-committed bytes
+*before* hitting its own `IntegrityError` — leaving the winner's row
+recording one artifact's SHA-512 against the other's content, silently
+breaking the chain of custody §3.4 is built on. The cleanup path only ever
+removed the temp file, so nothing restored the winner's bytes. `os.link`
+raises `FileExistsError` instead of overwriting; both paths are in the store
+by construction, so a hard link is always available. The commit is
+wrapped too: the schema fires *after* the bytes are in place, and a file no
+row accounts for would block that filename for every later upload, so losing
+that race removes its own bytes. Don't switch either back to a silent
+overwrite, and note the impact was bounded rather than catastrophic only
+because the device-side `verify /sha512` compares against the row's digest —
+a corrupted store failed upgrades, it did not install wrong bytes.
 
 **`state`, `superseded_by_id` and `bytes_state` exist but only `published`
 and `present` are ever written.** There is no promotion step to reach
