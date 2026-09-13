@@ -1,15 +1,18 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), and WS-5.2 complete. WS-5.1,
-5.3, 5.5 complete. **Not started: WS-5.6.** WS-5.4 and WS-5.7's item 3 are
-**folded into WS-6** rather than tracked separately now — read WS-6 before
-touching either. **WS-6 was blocked on a maintainer decision; that decision
+**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), WS-5.2, and WS-5.6 (413
+handler only, see caveat) complete. WS-5.1, 5.3, 5.5 complete. WS-5.4 and
+WS-5.7's item 3 are **folded into WS-6** rather than tracked separately now —
+read WS-6 before touching either. **The only workstream left to implement is
+the WS-6 cluster.** WS-6 was blocked on a maintainer decision; that decision
 was made on 2026-09-13 and is recorded below with a concrete `Do` for every
-item, same shape as every other workstream** — not yet implemented as of
-this refresh. **WS-4 caveat:** 4.2/4.3/4.4 are fully done; 4.1 is done for
+item, same shape as every other workstream — not yet implemented as of this
+refresh. **WS-4 caveat:** 4.2/4.3/4.4 are fully done; 4.1 is done for
 `AuthenticationError` only — its `HostKeyError` half stays deliberately
 un-fixed pending WS-7.3's hardware answer, and two tests pin that as
-deliberate rather than an oversight. WS-7 still needs hardware. Each done
+deliberate rather than an oversight. **WS-5.6 caveat:** only the 413 handler
+landed; upload progress feedback was always scoped as separate, bigger work
+to leave unless asked. WS-7 still needs hardware. Each done
 section carries a `DONE` note saying what landed and anything it changed
 about the task next to it — read those before starting a neighbour.
 **Merged to:** `main` (PRs #3–#10)
@@ -155,8 +158,9 @@ Two more process rules:
 
 ## 3. How the work is grouped
 
-Seven workstreams. WS-6 needs a decision from the maintainer first; WS-7 needs
-hardware nobody in a container has.
+Seven workstreams. WS-1 through WS-5 are done; **WS-6 is the only one left to
+implement** — its maintainer decision was made on 2026-09-13, so it is ready
+rather than blocked. WS-7 needs hardware nobody in a container has.
 
 **The workstreams are independent to *read* — each is understandable on its own —
 but they are NOT all independent to *branch*.** An earlier version of this section
@@ -183,8 +187,8 @@ what's left. **WS-4 was implemented single-branch, strictly sequentially, in
 exactly the order this section recommends** (4.1 + 4.3, then 4.2, then 4.4) —
 confirming the ordering below was worth writing down.
 
-**What remains — WS-5.6 is safe to branch concurrently with everything
-else**: `nethub/__init__.py`, untouched by anything else open. (WS-5.4 is no
+**What remains: the WS-6 cluster only** — WS-5.6 is done (413 handler; see
+its `DONE` note for the progress-feedback caveat left out). (WS-5.4 is no
 longer a separate item — see WS-6.2b.)
 
 **WS-4's four items were not safe to run in parallel with each other**, more
@@ -212,11 +216,12 @@ between them didn't matter, they share no file), then WS-4.2, then WS-4.4
 last — it only shared `install.py` with WS-4.1 at a different function and
 shared nothing with WS-4.3.
 
-**The new WS-6 cluster is two separate branches, not one, and both are safe
-alongside WS-5.6.** WS-6.1 (`scripts/check_device_facts.py`) touches
-only that script. WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign)
-touches `models.py`, `sibling.py`, `upgrade_routes.py`'s hostkeys routes, and
-the two `hostkeys_*.html` templates — none of which WS-5.6 touches. **WS-6.2a
+**The new WS-6 cluster is two separate branches, not one** (both WS-4 and
+WS-5.6 are done now, so there is nothing left to run them alongside).
+WS-6.1 (`scripts/check_device_facts.py`) touches only that script.
+WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign) touches
+`models.py`, `sibling.py`, `upgrade_routes.py`'s hostkeys routes, and the two
+`hostkeys_*.html` templates. **WS-6.2a
 (the `_summarise` decision) already shipped as part of WS-4.2** — there is
 nothing left to implement for it; a fresh session only needs WS-6.1 and the
 WS-6.2b/6.3/6.4 cluster.
@@ -240,7 +245,7 @@ make other findings exploitable.
 | WS-2 | Credential lifecycle | 4 | Medium — touches the crown jewel | **Done** (4/4) |
 | WS-3 | Job state machine & liveness | 4 | Medium — concurrency | **Done** (4/4) |
 | WS-4 | Failure classification & error hygiene | 4 | Low–medium | **Done** (4/4, but see the WS-4.1 caveat above — its `HostKeyError` half is deliberately deferred to WS-7.3) |
-| WS-5 | Web tier & frontend | 7 | Low | 5/7 — 5.6 open; 5.4 and 5.7 item 3 folded into WS-6 |
+| WS-5 | Web tier & frontend | 7 | Low | **Done** (6/7 — 5.4 and 5.7 item 3 folded into WS-6, not left undone) |
 | WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | **Decided** — ready to implement (0/4) |
 | WS-7 | Needs hardware | 3 | — blocked | Blocked on hardware |
 
@@ -1155,7 +1160,16 @@ contradict it.
 
 ---
 
-### WS-5.6 — Missing 413 handler and no upload feedback · MEDIUM
+### WS-5.6 — Missing 413 handler and no upload feedback · MEDIUM — **DONE (413 handler only)**
+
+> Landed: `@app.errorhandler(413)` renders `errors/413.html`, stating the
+> configured limit via Jinja's built-in `filesizeformat` filter rather than a
+> hand-rolled byte-to-human conversion. `test_413_states_the_configured_limit`
+> lowers `MAX_CONTENT_LENGTH` to 10 bytes and posts an oversize `/login` form
+> to prove the real Flask/Jinja pipeline renders it, not just that the
+> template file parses. **Progress feedback was not done** — the section
+> below already scoped it as a bigger piece of work to leave unless asked,
+> and nothing since has asked for it.
 
 **Where:** `nethub/__init__.py:50,54` (only 500 and 404 are registered)
 
