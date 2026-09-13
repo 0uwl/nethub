@@ -1,18 +1,19 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), WS-5.2, and WS-5.6 (413
-handler only, see caveat) complete. WS-5.1, 5.3, 5.5 complete. WS-5.4 and
+**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), WS-5.2, WS-5.6 (413 handler
+only, see caveat), and WS-6.1 complete. WS-5.1, 5.3, 5.5 complete. WS-5.4 and
 WS-5.7's item 3 are **folded into WS-6** rather than tracked separately now —
-read WS-6 before touching either. **The only workstream left to implement is
-the WS-6 cluster.** WS-6 was blocked on a maintainer decision; that decision
-was made on 2026-09-13 and is recorded below with a concrete `Do` for every
-item, same shape as every other workstream — not yet implemented as of this
-refresh. **WS-4 caveat:** 4.2/4.3/4.4 are fully done; 4.1 is done for
-`AuthenticationError` only — its `HostKeyError` half stays deliberately
-un-fixed pending WS-7.3's hardware answer, and two tests pin that as
-deliberate rather than an oversight. **WS-5.6 caveat:** only the 413 handler
-landed; upload progress feedback was always scoped as separate, bigger work
-to leave unless asked. WS-7 still needs hardware. Each done
+read WS-6 before touching either. **The only work left in this file is
+WS-6.2b/6.3/6.4 — one combined branch** (new schema, one route rewrite; see
+WS-6.2's own section for why they aren't split). That decision was made on
+2026-09-13 and is recorded below with a concrete `Do`, same shape as every
+other workstream — not yet implemented as of this refresh. **WS-4 caveat:**
+4.2/4.3/4.4 are fully done; 4.1 is done for `AuthenticationError` only — its
+`HostKeyError` half stays deliberately un-fixed pending WS-7.3's hardware
+answer, and two tests pin that as deliberate rather than an oversight.
+**WS-5.6 caveat:** only the 413 handler landed; upload progress feedback was
+always scoped as separate, bigger work to leave unless asked. WS-7 still
+needs hardware. Each done
 section carries a `DONE` note saying what landed and anything it changed
 about the task next to it — read those before starting a neighbour.
 **Merged to:** `main` (PRs #3–#10)
@@ -158,9 +159,10 @@ Two more process rules:
 
 ## 3. How the work is grouped
 
-Seven workstreams. WS-1 through WS-5 are done; **WS-6 is the only one left to
-implement** — its maintainer decision was made on 2026-09-13, so it is ready
-rather than blocked. WS-7 needs hardware nobody in a container has.
+Seven workstreams. WS-1 through WS-5 are done, and WS-6.1/6.2a within WS-6 are
+too — **WS-6.2b/6.3/6.4 (one combined branch) is the only work left in this
+file**, decided on 2026-09-13 so it is ready rather than blocked. WS-7 needs
+hardware nobody in a container has.
 
 **The workstreams are independent to *read* — each is understandable on its own —
 but they are NOT all independent to *branch*.** An earlier version of this section
@@ -187,9 +189,10 @@ what's left. **WS-4 was implemented single-branch, strictly sequentially, in
 exactly the order this section recommends** (4.1 + 4.3, then 4.2, then 4.4) —
 confirming the ordering below was worth writing down.
 
-**What remains: the WS-6 cluster only** — WS-5.6 is done (413 handler; see
-its `DONE` note for the progress-feedback caveat left out). (WS-5.4 is no
-longer a separate item — see WS-6.2b.)
+**What remains: the WS-6.2b/6.3/6.4 branch only** — WS-5.6 is done (413
+handler; see its `DONE` note for the progress-feedback caveat left out) and
+WS-6.1 is done (see its `DONE` note). (WS-5.4 is no longer a separate item —
+see WS-6.2b.)
 
 **WS-4's four items were not safe to run in parallel with each other**, more
 than the original table suggested — checked against each section's own
@@ -216,15 +219,13 @@ between them didn't matter, they share no file), then WS-4.2, then WS-4.4
 last — it only shared `install.py` with WS-4.1 at a different function and
 shared nothing with WS-4.3.
 
-**The new WS-6 cluster is two separate branches, not one** (both WS-4 and
-WS-5.6 are done now, so there is nothing left to run them alongside).
-WS-6.1 (`scripts/check_device_facts.py`) touches only that script.
-WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign) touches
-`models.py`, `sibling.py`, `upgrade_routes.py`'s hostkeys routes, and the two
-`hostkeys_*.html` templates. **WS-6.2a
-(the `_summarise` decision) already shipped as part of WS-4.2** — there is
-nothing left to implement for it; a fresh session only needs WS-6.1 and the
-WS-6.2b/6.3/6.4 cluster.
+**WS-6.1 and WS-6.2a are both done now** (see their own `DONE` notes) — the
+"two separate branches" framing this section used to need no longer applies.
+**WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign) is the only
+branch left to open.** It touches `models.py`, `sibling.py`,
+`upgrade_routes.py`'s hostkeys routes, and the two `hostkeys_*.html`
+templates — a fresh session needs nothing else from this file before starting
+it.
 
 ### Two rules that keep parallel branches from fighting
 
@@ -246,7 +247,7 @@ make other findings exploitable.
 | WS-3 | Job state machine & liveness | 4 | Medium — concurrency | **Done** (4/4) |
 | WS-4 | Failure classification & error hygiene | 4 | Low–medium | **Done** (4/4, but see the WS-4.1 caveat above — its `HostKeyError` half is deliberately deferred to WS-7.3) |
 | WS-5 | Web tier & frontend | 7 | Low | **Done** (6/7 — 5.4 and 5.7 item 3 folded into WS-6, not left undone) |
-| WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | **Decided** — ready to implement (0/4) |
+| WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | 2/4 — 6.1 and 6.2a done; 6.2b/6.3/6.4 ready to implement as one branch |
 | WS-7 | Needs hardware | 3 | — blocked | Blocked on hardware |
 
 ---
@@ -1224,11 +1225,32 @@ All four items below were blocked on a maintainer decision. **The decisions were
 on 2026-09-13** and are recorded here with the same Where/Background/Do/Verify/Don't
 shape as every other workstream — there is nothing left to ask before implementing
 them. **WS-6.2b, WS-6.3 and WS-6.4 share one new schema and one route rewrite;
-implement them as a single branch.** WS-6.1 is independent and still open.
-**WS-6.2a is already done** — it shipped as part of WS-4.2 (see that section
-for what landed).
+implement them as a single branch — this is now the only work left in the
+whole file.** **WS-6.1 is done** and **WS-6.2a is already done** — it
+shipped as part of WS-4.2 (see that section for what landed).
 
-### WS-6.1 — Rewrite `check_device_facts.py` onto the real connection path · HIGH
+### WS-6.1 — Rewrite `check_device_facts.py` onto the real connection path · HIGH — **DONE**
+
+> Landed exactly as specified: `capture()` now calls
+> `nethub.devices.connection.connect()` through a pinned `HostKey`, with
+> `_interactive_ios_class()`, `ConnectHandler`, and the stray `secret=password`
+> all deleted. `resolve_pin` and `_pin_from_database` are **imported straight
+> from `upgrade_cli.py`** rather than reimplemented — one pin-resolution
+> mechanism for both tools, not two that could drift apart. The one thing
+> not reused verbatim: `resolve_pin`'s refusal message says "run with --scan
+> first", which is right for `upgrade_cli.py` (which has that flag) and wrong
+> here, so `capture()` catches that `SystemExit` and re-raises one naming
+> `python -m nethub.upgrade_cli --scan <host>` explicitly. `host` is now
+> validated as an IP literal before `capture()` is ever called, the same
+> `ipaddress.ip_address()` check used elsewhere. `NETHUB_DEVICE_PASSWORD`
+> gets the same exposure warning `upgrade_cli.py` prints, closing the other
+> half of **WS-2.3**. Smoke-tested (no hardware available, per the `Verify`
+> note below): `--help` and `--replay` both work with no env vars set,
+> a hostname argument is refused before any connection is attempted, and an
+> IP with no confirmed pin and no `--fingerprint` refuses with the corrected
+> message rather than a silent first-contact accept. `CLAUDE.md`'s Commands
+> section and the two stale paragraphs (Device layer, Dispatch) were updated
+> in the same commit.
 
 **Where:** `scripts/check_device_facts.py`
 

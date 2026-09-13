@@ -92,9 +92,14 @@ flask --app nethub create-admin <username>   # bootstrap the first login user --
 pytest                             # runs tests/ -- see tests/conftest.py for the
                                     # app/client fixtures (temp DB + artifact store per test)
 
-python scripts/check_device_facts.py <host> --user <name>   # capture from a real
-                                    # device and report what parsed; the password comes
-                                    # from NETHUB_DEVICE_PASSWORD or an interactive prompt
+python scripts/check_device_facts.py <ip> --user <name> \
+    [--fingerprint "<type> SHA256:..."]                      # capture from a real device
+                                    # (a pinned, confirmed connection -- an IP literal only,
+                                    # no TOFU) and report what parsed; the password comes
+                                    # from NETHUB_DEVICE_PASSWORD or an interactive prompt.
+                                    # Reads a confirmed pin from the database if reachable,
+                                    # otherwise needs --fingerprint (get one via
+                                    # `upgrade_cli.py --scan`) -- same resolution upgrade_cli.py uses.
 python scripts/check_device_facts.py --replay <dir>         # re-parse a capture, no device
 
 ruff check .                       # Python lint (pyproject.toml: 100-char lines,
@@ -930,11 +935,20 @@ Three things the real runs settled that the ported code had guessed at:
   `wrong_version`; `facts.same_version` is why it did not.
 
 **Parsing is split from connecting so device output can be re-parsed with no
-device.** `check_device_facts.py <host>` captures `show version` / `dir` /
+device.** `check_device_facts.py <ip>` captures `show version` / `dir` /
 `show privilege` to a directory and reports what parsed; `--replay <dir>`
 re-parses one offline. That split is what makes `tests/captures/` possible,
 and validating a new IOS-XE release means capturing it and replaying it, not
-reading the template.
+reading the template. **`check_device_facts.py` connects through the same
+fail-closed path as everything else now** (WS-6.1): it takes an IP literal,
+not a hostname, and calls `connection.connect()` with a pinned `HostKey` --
+read from a confirmed `device_host_keys` row when the database is reachable,
+or from an explicit `--fingerprint` when it is not, with no TOFU fallback
+either way. It used to connect with stock `ConnectHandler`, whose default
+`ssh_strict=False` installs `paramiko.AutoAddPolicy()` and auto-accepts any
+host key -- the one place in the tree still doing that. `resolve_pin` is
+imported straight from `upgrade_cli.py` rather than reimplemented, so the
+two tools' pin resolution can't drift apart.
 
 **`tests/captures/` is evidence, not fixtures.** Each directory is verbatim
 output from real hardware (`c9200cx-12p-2x2g-17.12.06`: a Catalyst 9200CX on
@@ -1268,9 +1282,9 @@ executions it has not started, and could be flooded. Four things about
 scripted recovery needs it, but an env var sits in `/proc/<pid>/environ` for
 the whole run — up to ~20 minutes for `--phases all` — is inherited by every
 child, and lands in shell history if set inline. `scripts/check_device_facts.py`
-reads the same var and is **not** warned, deliberately: that script is WS-6.1's
-open question (it also connects with `AutoAddPolicy`, so a warning would be the
-least of it) and changing it is a decision, not a fix.
+reads the same var and now carries the same warning (WS-6.1/WS-2.3) — it no
+longer connects with `AutoAddPolicy` either, so both of that script's
+`upgrade_cli.py`-mirroring gaps closed in the same change.
 
 **`verify_running` runs on the serving thread and needs its own app
 context.** Flask-SQLAlchemy's session is thread-local, so without one every
