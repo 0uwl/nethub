@@ -1,11 +1,12 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1 complete (1.1–1.5). WS-5.1, 5.3, 5.5 complete; WS-5.7 complete
-bar its audit-row item. **Not started: WS-2, WS-3, WS-4, WS-5.2, WS-5.4, WS-5.6.**
-WS-6 still needs a maintainer decision; WS-7 still needs hardware. Each done
-section carries a `DONE` note saying what landed and anything it changed about
-the task next to it — read those before starting a neighbour.
-**Merged to:** `main` (PRs #3–#7)
+**Status:** WS-1, WS-2, WS-3 and WS-5.2 complete. WS-5.1, 5.3, 5.5 complete;
+WS-5.7 complete bar its audit-row item. **Not started: WS-4 (all four items),
+WS-5.4, WS-5.6.** WS-6 still needs a maintainer decision; WS-7 still needs
+hardware. Each done section carries a `DONE` note saying what landed and
+anything it changed about the task next to it — read those before starting a
+neighbour.
+**Merged to:** `main` (PRs #3–#10)
 **Source:** a four-lane review (device layer, web tier, frontend, security) of
 `origin/main..HEAD` — the whole Ansible→Netmiko migration, 103 files, +10,405/−1,684.
 Every finding below was traced in code, and the ones marked *reproduced* were
@@ -169,15 +170,37 @@ likely to cost you a painful merge. Three tasks edit the same function.
 
 ### Safe to run in parallel
 
-These touch disjoint files and can be four (or more) concurrent branches:
+WS-1, WS-2, WS-3, and WS-5.1/5.3/5.5/5.7 are all done and merged — the grouping
+below is kept for history and because the same shape applies to what's left.
 
-- **WS-1** — `quadlet/nethub.container`, `gunicorn.conf.py`, `requirements.txt`, `config.py`
-- **WS-5.5** — `auth.py`
-- **WS-5.1 + WS-5.7** — `templates/`
-- **WS-5.3** — `artifacts.py`
+**What remains — WS-5.4 and WS-5.6 are safe to branch concurrently with
+everything else**: `WS-5.4` is `upgrade_routes.py:66` alone now that WS-2.1 and
+WS-5.2 (its old table-mates on that file) are done, and `WS-5.6` is
+`nethub/__init__.py`, untouched by anything else open.
 
-Then, once those land: WS-2, WS-4.1/4.3/4.4, WS-5.4, WS-5.6. Then the `approve()`
-chain and the `phases.py` pair, in sequence.
+**WS-4's four items are not safe to run in parallel with each other**, more
+than the original table suggested — checked against each section's own
+`Where:` line rather than assumed:
+
+- `nethub/devices/transfer.py:274-277` is claimed by **both WS-4.2** (one of
+  its wrapper sites, the `except Exception as exc: raise TransferError(...)`
+  in `_push_scp`) **and WS-4.3** (which re-raises `DeviceConnectionError`
+  before that same `except Exception`) — the same few lines, not just the
+  same file. Do WS-4.3 first: it adds a re-raise clause before the generic
+  handler, and WS-4.2's change to what that generic handler forwards is a
+  smaller edit to make once WS-4.3's clause already exists than the other way
+  around.
+- `nethub/devices/install.py` has three claims close together: WS-4.1 at
+  line 233, one of WS-4.2's wrappers at 241-245 (`ReloadTimeout`, a handful of
+  lines below WS-4.1's edit), and WS-4.4 at line 97 (a different function,
+  `assert_ready_to_activate`, so lower collision risk than the first two).
+  Sequence WS-4.1 before WS-4.2's `install.py` wrapper for the same reason as
+  above — WS-4.1 changes what `install.py:233`'s except clause does, and
+  WS-4.2 changes what the exception it produces says.
+
+Net: do WS-4.1 and WS-4.3 first (in either order, they don't share a file),
+then WS-4.2, then WS-4.4 last — it only shares `install.py` with WS-4.1 at a
+different function and shares nothing with WS-4.3.
 
 ### Two rules that keep parallel branches from fighting
 
@@ -192,15 +215,15 @@ Recommended order if you are working alone: **WS-1 first.** It is the highest
 leverage per line changed, it is self-contained, and several of its items are what
 make other findings exploitable.
 
-| WS | Theme | Items | Risk |
-|---|---|---|---|
-| WS-1 | Deployment & configuration | 5 | Low — config only, no logic |
-| WS-2 | Credential lifecycle | 4 | Medium — touches the crown jewel |
-| WS-3 | Job state machine & liveness | 4 | Medium — concurrency |
-| WS-4 | Failure classification & error hygiene | 4 | Low–medium |
-| WS-5 | Web tier & frontend | 7 | Low |
-| WS-6 | Needs a maintainer decision | 3 | — blocked |
-| WS-7 | Needs hardware | 3 | — blocked |
+| WS | Theme | Items | Risk | Status |
+|---|---|---|---|---|
+| WS-1 | Deployment & configuration | 5 | Low — config only, no logic | **Done** (5/5) |
+| WS-2 | Credential lifecycle | 4 | Medium — touches the crown jewel | **Done** (4/4) |
+| WS-3 | Job state machine & liveness | 4 | Medium — concurrency | **Done** (4/4) |
+| WS-4 | Failure classification & error hygiene | 4 | Low–medium | Not started (0/4) |
+| WS-5 | Web tier & frontend | 7 | Low | 5/7 — 5.4, 5.6 open, 5.7 partial |
+| WS-6 | Needs a maintainer decision | 3 | — blocked | Blocked on you |
+| WS-7 | Needs hardware | 3 | — blocked | Blocked on hardware |
 
 ---
 
@@ -408,7 +431,17 @@ feature with its own design, and `alpha.md` records its absence as deliberate.
 
 The crown jewel. Be careful and add a test for everything.
 
-### WS-2.1 — Nothing ever purges held credentials · HIGH
+### WS-2.1 — Nothing ever purges held credentials · HIGH — **DONE**
+
+> Landed: `purge_expired()` now runs at the top of both `hold()` and
+> `release()`, and `upgrade_routes.cancel()` calls `discard(job.id)` for the
+> job the run was waiting on. No background timer, per the `Don't` below —
+> the sweep happens on the two paths that already touch the store. `release()`
+> pops before validating already covered the destroy-on-failure half; wiping
+> the password string in place was **not** done — Python strings are
+> immutable, so there is nothing to zero without replacing the object, and
+> that would still leave copies from `str.format`/f-string interpolation
+> upstream. Noted rather than attempted.
 
 **Where:** `nethub/credential_socket.py:129` (`discard`), `:133` (`purge_expired`),
 `nethub/upgrade_routes.py:47-50` (`_hold`)
@@ -449,7 +482,12 @@ sibling. §9.1 keeps that channel to one purpose.
 
 ---
 
-### WS-2.2 — Device password in three dataclass reprs · LOW (but cheap)
+### WS-2.2 — Device password in three dataclass reprs · LOW (but cheap) — **DONE**
+
+> Landed: `field(repr=False)` on all three (`PhaseContext.device_password`,
+> `_Held.password`, `PullTarget.password`), each with a comment pointing back
+> to `_Held`'s so a future field addition sees the pattern once rather than
+> three separate justifications. No custom `__repr__`, per the `Don't` below.
 
 **Where:** `nethub/devices/phases.py:78` (`PhaseContext`),
 `nethub/credential_socket.py:65` (`_Held`), `nethub/devices/transfer.py:97` (`PullTarget`)
@@ -473,7 +511,16 @@ or a CI log retained far longer than the phase.
 
 ---
 
-### WS-2.3 — Device password via environment variable · LOW
+### WS-2.3 — Device password via environment variable · LOW — **DONE (half)**
+
+> Landed: `upgrade_cli.py` now warns to stderr when `NETHUB_DEVICE_PASSWORD`
+> is used instead of the interactive prompt, naming the exposure
+> (`/proc/<pid>/environ`, child-process inheritance, shell history) rather
+> than silently accepting it. **Deliberately not done:**
+> `scripts/check_device_facts.py` still reads the same variable with no
+> warning — the note below said to coordinate with WS-6.1, and that decision
+> (delete vs. rewrite the script) still has not been made, so touching it here
+> would be the wrong branch making the call.
 
 **Where:** `nethub/upgrade_cli.py:166`, `scripts/check_device_facts.py:59`
 
@@ -493,7 +540,11 @@ or rewritten, so coordinate.
 
 ---
 
-### WS-2.4 — `{"job_id": true}` releases job 1's credential · LOW
+### WS-2.4 — `{"job_id": true}` releases job 1's credential · LOW — **DONE**
+
+> Landed: `type(job_id) is not int` — the exact-type form from the `Do`
+> below, not the `isinstance` variant, so a `bool` is refused outright rather
+> than needing a second clause to exclude it.
 
 **Where:** `nethub/credential_socket.py:164`
 
@@ -510,7 +561,27 @@ is validating a message before it selects a secret.
 
 ## WS-3 — Job state machine & liveness
 
-### WS-3.1 — An abandoned phase can never be re-approved · HIGH
+### WS-3.1 — An abandoned phase can never be re-approved · HIGH — **DONE**
+
+> Landed: `sweep()` now calls a new `_abandon_run(job)` instead of
+> `_fail_run(job.run)` for a stale row whose phase is in `APPROVABLE` —
+> `precheck`/`verify` still go through `_fail_run` unchanged, since neither
+> has a gate to return to. `_abandon_run` sets `run.state = 'awaiting_approval'`
+> and `run.awaiting_phase` to the abandoned phase, so `approve()`'s existing
+> `1 + count(abandoned)` arithmetic produces `attempt == 2` on the next call —
+> no change was needed in `upgrades.py` itself, only in what `sibling.py`
+> leaves behind for it to find.
+> `test_a_foreign_running_row_is_abandoned` was **not** touched — it queues a
+> job via `queue(run)`, whose default `phase="precheck"` is non-approvable, so
+> it still asserts `failed` correctly by coincidence of that default rather
+> than by a deliberate edit. Worth rereading if `queue()`'s default phase ever
+> changes. The walk this section's Verify step asked for is a new test,
+> `test_approve_then_creates_attempt_two`, plus
+> `test_an_abandoned_stage_parks_at_its_gate`,
+> `test_a_second_abandon_gives_attempt_three`, and two tests confirming
+> `precheck`/`verify` still fail outright
+> (`test_an_abandoned_precheck_still_fails_the_run`,
+> `test_an_abandoned_verify_still_fails_the_run`).
 
 **Where:** `nethub/sibling.py:76-96` (`sweep`), `:182` (`_fail_run`),
 `nethub/upgrades.py:222-258` (`approve`)
@@ -557,7 +628,16 @@ the human — that is the entire reason this is a gate and not a retry loop.
 
 ---
 
-### WS-3.2 — A socket `OSError` strands the claimed job forever · HIGH
+### WS-3.2 — A socket `OSError` strands the claimed job forever · HIGH — **DONE**
+
+> Landed: `run_once` catches `(CredentialError, OSError)` in one clause and
+> takes the same `failure_stage='credential'` path for both. `error_summary`
+> stays distinguishable but deliberately does **not** copy `str(exc)` for the
+> `OSError` case — the message is `f'could not reach the credential socket
+> ({type(exc).__name__})'`, naming the exception class rather than the OS's
+> own text, because that column is retained for a year and an OS-chosen
+> message is exactly the kind of thing `phases._summarise` exists to keep out
+> elsewhere in the codebase.
 
 **Where:** `nethub/sibling.py:146-154`, `nethub/credential_socket.py:227` / `:280`
 
@@ -588,7 +668,17 @@ ends `failed`, not `running`. This is TEST GAP 3 below.
 
 ---
 
-### WS-3.3 — `deadline_at` is never written · MEDIUM
+### WS-3.3 — `deadline_at` is never written · MEDIUM — **DONE**
+
+> Landed: `phase_deadline(phase, *, hosts, image_bytes=0, now=None)` in
+> `upgrades.py`, called from both `submit()` and `approve()` when the `queued`
+> row is created — so this landed as one branch alongside WS-3.1 rather than
+> the separate one §3's table originally scheduled, because both touch
+> `approve()`'s row-creation call and doing them apart would have meant
+> rebasing one onto the other anyway. Per-phase base budgets scaled by `hosts`,
+> with `stage` additionally scaled by `image_bytes`. All comparisons already
+> routed through `phases._aware()`/`sibling._aware()`, so the naive-datetime
+> trap this section warns about was avoided rather than newly discovered.
 
 **Where:** `nethub/models.py:309` (declared), `sibling.py:139` and
 `devices/phases.py:355` (read), **written nowhere**
@@ -627,7 +717,10 @@ one of them.
 
 ---
 
-### WS-3.4 — `sweep()` misses a NULL `runner_instance_id` · LOW
+### WS-3.4 — `sweep()` misses a NULL `runner_instance_id` · LOW — **DONE**
+
+> Landed exactly as specified: `or_(runner_instance_id.is_(None),
+> runner_instance_id != self.runner_instance_id)`.
 
 **Where:** `nethub/sibling.py:87`
 
@@ -823,7 +916,16 @@ rule — but do not add any path that lets one user set another's.
 
 ---
 
-### WS-5.2 — `approve()` check-then-insert races to a 500 · MEDIUM
+### WS-5.2 — `approve()` check-then-insert races to a 500 · MEDIUM — **DONE**
+
+> Landed as the third and final change to `approve()`, after WS-3.1 and
+> WS-3.3 as §3's table required — a `try`/`except IntegrityError` around the
+> insert, rolling back and re-raising as the same `RequestError` the
+> check already produces. **The "careful" note below was not acted on**: the
+> matching TOCTOU in `artifacts.ingest()` was fixed separately under WS-5.3,
+> already merged by the time this branch was written, and no other
+> lower-severity spot was hunted down or fixed here — if one exists, it is
+> still open.
 
 **Where:** `nethub/upgrades.py:244-250`, `nethub/upgrade_routes.py:208-220`
 
@@ -1091,27 +1193,29 @@ deadline, and a push across a constrained WAN link.
 These are worth adding independently of the fixes, in roughly this order. Several are
 the test that would have caught the corresponding finding.
 
-1. **A phase job is created with a non-null `deadline_at`** (WS-3.3). Fails today.
-2. **The abandoned → re-approve path** (WS-3.1), walking `sweep()` → `approve()`.
-   `test_sibling.py::test_a_foreign_running_row_is_abandoned` currently pins the broken
-   behaviour.
-3. **`run_once` when the socket cannot be connected to at all** (WS-3.2). The
-   `CredentialError` branch is covered; the `OSError` branch is not.
-4. **A held credential is dropped on cancel/expiry, and something calls
-   `purge_expired`** (WS-2.1).
+1. ~~**A phase job is created with a non-null `deadline_at`**~~ **DONE** (WS-3.3) —
+   `test_submit_writes_a_deadline`, `test_approve_writes_a_deadline`, plus
+   `test_the_deadline_survives_the_sqlite_round_trip` (the naive-datetime trap).
+2. ~~**The abandoned → re-approve path**~~ **DONE** (WS-3.1) — see that section's
+   `DONE` note for the specific tests.
+3. ~~**`run_once` when the socket cannot be connected to at all**~~ **DONE** (WS-3.2).
+4. ~~**A held credential is dropped on cancel/expiry, and something calls
+   `purge_expired`**~~ **DONE** (WS-2.1) —
+   `TestCancelDropsTheCredential` in `tests/test_upgrade_routes.py`.
 5. **`stage_image` and `assert_ready_to_activate` agree on digest normalisation**
-   (WS-4.4). Each is currently tested against a lowercase digest only.
-6. **`wait_for_device` distinguishes a non-transient failure** (WS-4.1).
+   (WS-4.4). Each is currently tested against a lowercase digest only. **Still open.**
+6. **`wait_for_device` distinguishes a non-transient failure** (WS-4.1). **Still open.**
 7. **Our exception messages carry no library text** (WS-4.2) — the *wrapped* case.
+   **Still open.**
 8. ~~**Template rendering.**~~ **DONE** — `tests/test_templates.py` renders every
    page, and the CSRF check builds its own `WTF_CSRF_ENABLED=True` app because the
    shared `app` fixture disables CSRF, which is what made a missing token invisible.
    It was verified by deleting a token from a form and watching the test fail. Add to
    `PAGES` in that file when you add a page, or it goes unrendered by the suite.
-9. **Concurrency tests** for the TOCTOU sites. **WS-5.3's is done** — five tests drive
-   the ingest race deterministically with a stream that plants a rival file as the last
-   chunk is read, rather than timing two real uploads. **WS-5.2's `approve()` race is
-   not**, and needs the same treatment.
+9. **Concurrency tests** for the TOCTOU sites. **Both done now** — WS-5.3's five tests
+   drive the ingest race deterministically with a stream that plants a rival file as
+   the last chunk is read; WS-5.2's `TestApproveRace` forces the commit itself to raise
+   `IntegrityError` on the first call rather than trying to race two real requests.
 10. **`serve()` on a transient accept error**, and **`_read_line` with a slow peer**
     (both `credential_socket.py` — the elapsed-time bound is missing; `settimeout` is
     per-operation, so a one-byte-per-9s peer holds the sibling's only dispatch loop for
