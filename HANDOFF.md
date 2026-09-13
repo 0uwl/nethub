@@ -1,14 +1,17 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1, WS-2, WS-3 and WS-5.2 complete. WS-5.1, 5.3, 5.5 complete.
-**Not started: WS-4 (all four items) and WS-5.6.** WS-5.4 and WS-5.7's item 3
-are **folded into WS-6** rather than tracked separately now — read WS-6
-before touching either. **WS-6 was blocked on a maintainer decision; that
-decision was made on 2026-09-13 and is recorded below with a concrete `Do`
-for every item, same shape as every other workstream — there is nothing left
-to ask before implementing it.** WS-7 still needs hardware. Each done section
-carries a `DONE` note saying what landed and anything it changed about the
-task next to it — read those before starting a neighbour.
+**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), and WS-5.2 complete. WS-5.1,
+5.3, 5.5 complete. **Not started: WS-5.6.** WS-5.4 and WS-5.7's item 3 are
+**folded into WS-6** rather than tracked separately now — read WS-6 before
+touching either. **WS-6 was blocked on a maintainer decision; that decision
+was made on 2026-09-13 and is recorded below with a concrete `Do` for every
+item, same shape as every other workstream** — not yet implemented as of
+this refresh. **WS-4 caveat:** 4.2/4.3/4.4 are fully done; 4.1 is done for
+`AuthenticationError` only — its `HostKeyError` half stays deliberately
+un-fixed pending WS-7.3's hardware answer, and two tests pin that as
+deliberate rather than an oversight. WS-7 still needs hardware. Each done
+section carries a `DONE` note saying what landed and anything it changed
+about the task next to it — read those before starting a neighbour.
 **Merged to:** `main` (PRs #3–#10)
 **Source:** a four-lane review (device layer, web tier, frontend, security) of
 `origin/main..HEAD` — the whole Ansible→Netmiko migration, 103 files, +10,405/−1,684.
@@ -174,15 +177,17 @@ likely to cost you a painful merge. Three tasks edit the same function.
 
 ### Safe to run in parallel
 
-WS-1, WS-2, WS-3, and WS-5.1/5.3/5.5/5.7 are all done and merged — the grouping
-below is kept for history and because the same shape applies to what's left.
+WS-1, WS-2, WS-3, WS-4, and WS-5.1/5.3/5.5/5.7 are all done and merged — the
+grouping below is kept for history and because the same shape applies to
+what's left. **WS-4 was implemented single-branch, strictly sequentially, in
+exactly the order this section recommends** (4.1 + 4.3, then 4.2, then 4.4) —
+confirming the ordering below was worth writing down.
 
-**What remains — WS-5.4 and WS-5.6 are safe to branch concurrently with
-everything else**: `WS-5.4` is `upgrade_routes.py:66` alone now that WS-2.1 and
-WS-5.2 (its old table-mates on that file) are done, and `WS-5.6` is
-`nethub/__init__.py`, untouched by anything else open.
+**What remains — WS-5.6 is safe to branch concurrently with everything
+else**: `nethub/__init__.py`, untouched by anything else open. (WS-5.4 is no
+longer a separate item — see WS-6.2b.)
 
-**WS-4's four items are not safe to run in parallel with each other**, more
+**WS-4's four items were not safe to run in parallel with each other**, more
 than the original table suggested — checked against each section's own
 `Where:` line rather than assumed:
 
@@ -202,18 +207,19 @@ than the original table suggested — checked against each section's own
   above — WS-4.1 changes what `install.py:233`'s except clause does, and
   WS-4.2 changes what the exception it produces says.
 
-Net: do WS-4.1 and WS-4.3 first (in either order, they don't share a file),
-then WS-4.2, then WS-4.4 last — it only shares `install.py` with WS-4.1 at a
-different function and shares nothing with WS-4.3.
+Net (and this is what actually happened): WS-4.1 and WS-4.3 first (order
+between them didn't matter, they share no file), then WS-4.2, then WS-4.4
+last — it only shared `install.py` with WS-4.1 at a different function and
+shared nothing with WS-4.3.
 
 **The new WS-6 cluster is two separate branches, not one, and both are safe
-alongside WS-4 and WS-5.6.** WS-6.1 (`scripts/check_device_facts.py`) touches
+alongside WS-5.6.** WS-6.1 (`scripts/check_device_facts.py`) touches
 only that script. WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign)
 touches `models.py`, `sibling.py`, `upgrade_routes.py`'s hostkeys routes, and
-the two `hostkeys_*.html` templates — none of which WS-4 or WS-5.6 touch.
-WS-6.2a (the `_summarise` decision) is implemented as part of **WS-4.2**
-itself, so it inherits WS-4.2's place in the sequencing above rather than
-adding a new one.
+the two `hostkeys_*.html` templates — none of which WS-5.6 touches. **WS-6.2a
+(the `_summarise` decision) already shipped as part of WS-4.2** — there is
+nothing left to implement for it; a fresh session only needs WS-6.1 and the
+WS-6.2b/6.3/6.4 cluster.
 
 ### Two rules that keep parallel branches from fighting
 
@@ -233,7 +239,7 @@ make other findings exploitable.
 | WS-1 | Deployment & configuration | 5 | Low — config only, no logic | **Done** (5/5) |
 | WS-2 | Credential lifecycle | 4 | Medium — touches the crown jewel | **Done** (4/4) |
 | WS-3 | Job state machine & liveness | 4 | Medium — concurrency | **Done** (4/4) |
-| WS-4 | Failure classification & error hygiene | 4 | Low–medium | Not started (0/4) — 4.2's design is decided, see WS-6.2a |
+| WS-4 | Failure classification & error hygiene | 4 | Low–medium | **Done** (4/4, but see the WS-4.1 caveat above — its `HostKeyError` half is deliberately deferred to WS-7.3) |
 | WS-5 | Web tier & frontend | 7 | Low | 5/7 — 5.6 open; 5.4 and 5.7 item 3 folded into WS-6 |
 | WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | **Decided** — ready to implement (0/4) |
 | WS-7 | Needs hardware | 3 | — blocked | Blocked on hardware |
@@ -751,7 +757,17 @@ Add a test with a hand-built NULL row.
 
 ## WS-4 — Failure classification & error hygiene
 
-### WS-4.1 — The reload loop swallows host-key and auth failures · HIGH
+### WS-4.1 — The reload loop swallows host-key and auth failures · HIGH — **DONE (half)**
+
+> Landed: `connection.AuthenticationError` is re-raised immediately out of
+> `wait_for_device`'s reconnect loop, with a comment explaining the ~28-login
+> lockout risk. **Deliberately not done:** `connection.HostKeyError` is still
+> caught as transient — WS-7.3 (can an IOS-XE upgrade legitimately regenerate
+> a device's host key?) is still unanswered, and the section below already
+> said to split the work this way rather than guess. Two tests pin the
+> asymmetry as deliberate: `test_an_authentication_error_is_not_treated_as_transient`
+> and `test_a_hostkey_error_is_still_treated_as_transient_for_now` — the
+> latter's docstring says explicitly not to "fix" it without WS-7.3 first.
 
 **Where:** `nethub/devices/install.py:233`
 
@@ -792,7 +808,18 @@ work, do that half now and leave `HostKeyError` behind a note.
 
 ---
 
-### WS-4.2 — `_summarise`'s guard is type-level only · MEDIUM
+### WS-4.2 — `_summarise`'s guard is type-level only · MEDIUM — **DONE**
+
+> Landed exactly as specified: every project exception (`DeviceConnectionError`
+> and subclasses, `TransferError`, `InstallError` and subclasses, `FactsError`,
+> `UnconfirmedHost`) now takes an optional `summary=` keyword defaulting to its
+> `message`, `_summarise` reads `getattr(exc, "summary", None)` instead of
+> checking a type tuple, and `_OUR_EXCEPTIONS` is deleted. All five wrapper
+> sites got an explicit `summary=` that omits the foreign text while `message`
+> keeps it for `__cause__`/traceback context. Six new tests wrap a foreign
+> exception carrying a fake secret at each of the five sites (plus the direct
+> `_summarise` cases already covered) and assert `.summary` excludes it while
+> `str(exc)` still carries it — TEST GAP 7, now closed.
 
 **Where:** `nethub/devices/phases.py:153-161`, and the wrappers listed below
 
@@ -877,7 +904,13 @@ would notice which one actually fired.
 
 ---
 
-### WS-4.3 — A caught host-key mismatch is filed as a transfer error · MEDIUM
+### WS-4.3 — A caught host-key mismatch is filed as a transfer error · MEDIUM — **DONE**
+
+> Landed exactly as specified: `_push_scp` re-raises
+> `connection.DeviceConnectionError` before the generic `except Exception`,
+> alongside the existing `TransferError` re-raise. `test_a_hostkey_mismatch_on_the_second_session_is_not_filed_as_a_transfer_error`
+> asserts a `HostKeyError` from `_scp_put` propagates as itself (and that the
+> SCP-server restore still runs) rather than becoming a `TransferError`.
 
 **Where:** `nethub/devices/transfer.py:274-277`
 
@@ -904,7 +937,15 @@ routine.
 
 ---
 
-### WS-4.4 — Digest normalisation asymmetry · MEDIUM
+### WS-4.4 — Digest normalisation asymmetry · MEDIUM — **DONE**
+
+> Landed as the "better" option the section below names: `assert_ready_to_activate`
+> now runs `sha512` through `transfer._normalise_digest` before calling
+> `verify_sha512`, the same function `stage_image` already used — one shared
+> normalisation point rather than a second copy in the CLI. Since
+> `upgrade_cli.py`'s `activate` phase calls `install.activate()`, which calls
+> `assert_ready_to_activate`, the CLI needed no separate edit.
+> `test_an_uppercase_or_padded_digest_is_normalised_before_comparing` covers it.
 
 **Where:** `nethub/devices/install.py:97` (`assert_ready_to_activate`) vs
 `nethub/devices/transfer.py:138`
@@ -1169,8 +1210,9 @@ All four items below were blocked on a maintainer decision. **The decisions were
 on 2026-09-13** and are recorded here with the same Where/Background/Do/Verify/Don't
 shape as every other workstream — there is nothing left to ask before implementing
 them. **WS-6.2b, WS-6.3 and WS-6.4 share one new schema and one route rewrite;
-implement them as a single branch.** WS-6.1 and WS-6.2a are each independent (WS-6.2a
-lives inside WS-4.2's own write-up — see there for its Do steps).
+implement them as a single branch.** WS-6.1 is independent and still open.
+**WS-6.2a is already done** — it shipped as part of WS-4.2 (see that section
+for what landed).
 
 ### WS-6.1 — Rewrite `check_device_facts.py` onto the real connection path · HIGH
 
@@ -1235,9 +1277,9 @@ Keep `--auth` a flag the operator states, passed straight through to `connect()`
 
 ### WS-6.2 — Two structural decisions
 
-**a) `_summarise` inverts its trust direction to an opt-in `summary` attribute.**
-Fully specified inside **WS-4.2** — implement it there. This entry just records that
-the decision was made, so nobody re-derives it from scratch.
+**a) `_summarise` inverts its trust direction to an opt-in `summary` attribute —
+DONE.** Shipped as part of **WS-4.2**; nothing left to implement here. This
+entry stays only to record that the decision was made and where it landed.
 
 **b) `scan_host_key` moves to the sibling.** Scanning is device I/O — a TCP connect
 and an SSH key exchange — so it belongs in the process that does all other device I/O;
@@ -1446,11 +1488,16 @@ the test that would have caught the corresponding finding.
 4. ~~**A held credential is dropped on cancel/expiry, and something calls
    `purge_expired`**~~ **DONE** (WS-2.1) —
    `TestCancelDropsTheCredential` in `tests/test_upgrade_routes.py`.
-5. **`stage_image` and `assert_ready_to_activate` agree on digest normalisation**
-   (WS-4.4). Each is currently tested against a lowercase digest only. **Still open.**
-6. **`wait_for_device` distinguishes a non-transient failure** (WS-4.1). **Still open.**
-7. **Our exception messages carry no library text** (WS-4.2) — the *wrapped* case.
-   **Still open.**
+5. ~~**`stage_image` and `assert_ready_to_activate` agree on digest normalisation**~~
+   **DONE** (WS-4.4) — `test_an_uppercase_or_padded_digest_is_normalised_before_comparing`.
+6. ~~**`wait_for_device` distinguishes a non-transient failure**~~ **DONE (half)**
+   (WS-4.1) — `test_an_authentication_error_is_not_treated_as_transient` covers the
+   `AuthenticationError` case; `test_a_hostkey_error_is_still_treated_as_transient_for_now`
+   pins the `HostKeyError` case as deliberately unfixed pending WS-7.3, not untested.
+7. ~~**Our exception messages carry no library text**~~ **DONE** (WS-4.2) — six new
+   tests across `test_connection.py`, `test_transfer.py`, `test_install.py`, and
+   `test_facts.py` wrap a foreign exception carrying a fake secret at each of the
+   five sites and assert `.summary` excludes it.
 8. ~~**Template rendering.**~~ **DONE** — `tests/test_templates.py` renders every
    page, and the CSRF check builds its own `WTF_CSRF_ENABLED=True` app because the
    shared `app` fixture disables CSRF, which is what made a missing token invisible.

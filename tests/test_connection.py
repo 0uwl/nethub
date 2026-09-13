@@ -132,6 +132,36 @@ def test_scan_host_key_reports_an_unreachable_address():
         C.scan_host_key("127.0.0.1", port=1, timeout=2)
 
 
+def test_scan_host_key_summary_omits_the_os_errors_text(monkeypatch):
+    """WS-4.2: `message` may still interpolate the OSError for local
+    debugging, but `summary` -- the year-retained column -- must not."""
+
+    def boom(*a, **kw):
+        raise OSError("secret=hunter2 in the errno text")
+
+    monkeypatch.setattr(C.socket, "create_connection", boom)
+    with pytest.raises(C.DeviceConnectionError) as excinfo:
+        C.scan_host_key("192.0.2.1")
+    assert excinfo.value.summary == "could not reach 192.0.2.1:22"
+    assert "hunter2" not in excinfo.value.summary
+    assert "hunter2" in str(excinfo.value), "message may still carry it for debugging"
+
+
+def test_connect_generic_failure_summary_omits_the_wrapped_exceptions_text(monkeypatch, pinned):
+    """WS-4.2: the generic `except Exception` in connect() must not let a
+    foreign exception's text reach `summary`."""
+
+    def boom(**kwargs):
+        raise RuntimeError("boom, password=hunter2")
+
+    monkeypatch.setattr(C, "IosXeSSH", boom)
+    with pytest.raises(C.DeviceConnectionError) as excinfo:
+        C.connect("192.0.2.10", "admin", "hunter2", pinned)
+    assert excinfo.value.summary == "could not connect to 192.0.2.10:22"
+    assert "hunter2" not in excinfo.value.summary
+    assert "hunter2" in str(excinfo.value), "message may still carry it for debugging"
+
+
 def test_no_ssh_key_material_is_ever_offered(monkeypatch, pinned):
     """NetHub authenticates with a credential, never an SSH key.
 

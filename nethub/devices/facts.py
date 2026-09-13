@@ -35,7 +35,16 @@ BootMode = Literal["INSTALL", "BUNDLE", ""]
 
 
 class FactsError(Exception):
-    """Device output could not be parsed into the facts we need."""
+    """Device output could not be parsed into the facts we need.
+
+    `summary` is what reaches the year-retained `error_summary` column
+    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+    is a separate field from `message` rather than the same text.
+    """
+
+    def __init__(self, message: str, *, summary: str | None = None) -> None:
+        super().__init__(message)
+        self.summary = summary if summary is not None else message
 
 
 @dataclass(frozen=True)
@@ -191,7 +200,10 @@ def _parse(output: str, command: str) -> list[dict]:
     try:
         rows = parse_output(platform="cisco_ios", command=command, data=output)
     except Exception as exc:  # textfsm/clitable raise a variety of these
-        raise FactsError(f"could not parse {command!r}: {exc}") from exc
+        raise FactsError(
+            f"could not parse {command!r}: {exc}",
+            summary=f"could not parse {command!r}",
+        ) from exc
     if not rows:
         raise FactsError(f"{command!r} produced no rows. Output was:\n{output[:800]}")
     return rows

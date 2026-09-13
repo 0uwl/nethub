@@ -710,9 +710,20 @@ seems to require one, the design is what needs revisiting, not the rule.
   `/proc/<pid>/cmdline`. The credential is a Python attribute on
   `phases.PhaseContext`, held for the life of one phase execution. What still
   has to be *engineered* is the other end: `error_summary` is retained for a
-  year (§7.4), so `phases._summarise` copies a message only from exceptions
-  this codebase raised itself and reduces anything else to its type. A stray
-  `str(exc)` there is a durable credential leak with no other symptom (§7.3).
+  year (§7.4), so `phases._summarise` reads an exception's `summary`
+  attribute rather than its `str()` (WS-4.2). Every exception the device
+  layer raises sets `summary` explicitly in `__init__`, defaulting to its own
+  `message` for the many call sites that never wrap a foreign exception —
+  but a wrapper that interpolates a foreign exception's text (e.g.
+  `TransferError(f"SCP push of {image} failed: {exc}", ...)`) must pass an
+  explicit `summary=` that omits it, since `message` may still carry that
+  text for `__cause__`/traceback context. This replaced an earlier
+  type-level allowlist (`_OUR_EXCEPTIONS`) that trusted *any* message from an
+  allowed exception type, including one of ours that had interpolated a
+  foreign exception's text wholesale — the allowlist is gone; an exception
+  with no `summary` attribute (anything foreign, and anything of ours that
+  forgot to set one) reduces to its type name. A stray `str(exc)` reaching
+  `summary` is a durable credential leak with no other symptom (§7.3).
 - **`DEBUG` must be off wherever a credential path exists** (and wherever
   §4.5's session model applies — the same debugger renders a session
   cookie alongside a device password). It already applies to the local
@@ -1031,6 +1042,16 @@ host-key policy and keyboard-interactive auth cover both connections. Design
 doc §10 asks whether the host-key question applies to both independently;
 under Netmiko it does, and both are answered by construction.
 
+**A `connection.DeviceConnectionError` from that second session must reach
+`phases.failure_stage_for` as itself, not as a generic transfer failure**
+(WS-4.3). `_push_scp`'s `except Exception` wraps everything into
+`TransferError` by default — correct for real SCP failures, wrong for a
+`HostKeyError` from the pin catching a changed key on the second session,
+which is exactly the signal `failure_stage='hostkey'` exists to surface
+distinctly rather than burying among ordinary flaky-SCP failures. `_push_scp`
+re-raises `connection.DeviceConnectionError` (alongside the existing
+`TransferError` re-raise) before the generic handler.
+
 `install.py` is driven by the phase model rather than written as one
 procedure, and five things in it are load-bearing:
 
@@ -1042,6 +1063,17 @@ procedure, and five things in it are load-bearing:
   connections while it is still coming up, so every reconnect attempt runs a
   real command before the connection is accepted, and one that answers but
   cannot be used is closed rather than returned.
+- **`wait_for_device()`'s reconnect loop does not treat every failure as
+  transient** (WS-4.1). It re-raises `connection.AuthenticationError`
+  immediately rather than retrying: with the default reload wait this loop
+  would otherwise present the same credential roughly 28 times in 15 minutes,
+  and a device that comes back with AAA unreachable and falls back to a local
+  database the submitter isn't in would trip a fleet-wide TACACS+/RADIUS
+  lockout. `connection.HostKeyError` is deliberately **not** carved out the
+  same way yet — see design doc §10 / `HANDOFF.md` WS-7.3: whether an IOS-XE
+  upgrade can legitimately regenerate a device's host key is an open hardware
+  question, and re-raising here on an unverified assumption could turn a
+  successful upgrade into a hard failure instead of a transient reconnect.
 - **A lost session during `install add` is the expected ending, not an
   error** — but a *clean* return that does not say `SUCCESS` is a failure.
   IOS-XE reports some install failures in-band with the session still up, and
@@ -1064,6 +1096,14 @@ procedure, and five things in it are load-bearing:
 
 Guards run before anything is written, which is what makes a refusal safe to
 re-run: `assert_ready_to_activate` issues only reads.
+
+**`assert_ready_to_activate` normalises `sha512` through the same
+`transfer._normalise_digest` `stage_image` already uses** (WS-4.4). Before
+this it passed the caller's value straight to `verify_sha512`, which
+lower-cases only the digest it parses *from the device* — so an uppercase or
+whitespace-padded digest staged successfully and was then refused at
+activate, with an error whose two halves differed only in case. Both call
+sites now share one normalisation point rather than each having its own.
 
 ## Dispatch (`nethub/sibling.py`, `nethub/credential_socket.py`)
 

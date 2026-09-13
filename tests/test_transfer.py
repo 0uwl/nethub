@@ -7,6 +7,7 @@ device's actual digest for packages.conf.
 
 import pytest
 
+from nethub.devices import connection
 from nethub.devices import transfer as T
 
 DIGEST = (
@@ -204,6 +205,64 @@ class TestPushBracket:
         assert excinfo.value.status == "not_copied"
         assert not isinstance(excinfo.value, T.ScpRestoreError)
         assert device.scp_enabled is False, "still restored on the failure path"
+
+    def test_a_hostkey_mismatch_on_the_second_session_is_not_filed_as_a_transfer_error(
+        self, image_on_disk, monkeypatch
+    ):
+        """WS-4.3: the second SCP session is pinned too, so a HostKeyError
+        there is the pin catching something -- it must reach
+        phases.failure_stage_for as 'hostkey', not get buried as a routine
+        TransferError among ordinary flaky-SCP failures."""
+        search_dir, size = image_on_disk
+        device = FakeDevice(scp_enabled=False)
+
+        def boom(conn, **kw):
+            raise connection.HostKeyError("changed")
+
+        monkeypatch.setattr(T, "_scp_put", boom)
+        with pytest.raises(connection.HostKeyError):
+            T.stage_image(
+                device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
+                transport="push_scp", file_size=size,
+            )
+        assert device.scp_enabled is False, "still restored even though the push was re-raised"
+
+    def test_push_failure_summary_omits_the_wrapped_exceptions_text(
+        self, image_on_disk, monkeypatch
+    ):
+        """WS-4.2: `message` may still interpolate the wrapped exception for
+        `__cause__` context, but `summary` -- the year-retained column -- must
+        not repeat it."""
+        search_dir, size = image_on_disk
+        device = FakeDevice(scp_enabled=False)
+
+        def boom(conn, **kw):
+            raise RuntimeError("boom, password=hunter2")
+
+        monkeypatch.setattr(T, "_scp_put", boom)
+        with pytest.raises(T.TransferError) as excinfo:
+            T.stage_image(
+                device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
+                transport="push_scp", file_size=size,
+            )
+        assert excinfo.value.summary == f"SCP push of {IMAGE} failed"
+        assert "hunter2" not in excinfo.value.summary
+        assert "hunter2" in str(excinfo.value), "message may still carry it for __cause__"
+
+
+class TestResolveSourceSummary:
+    def test_an_os_error_summary_omits_its_own_text(self, monkeypatch):
+        """WS-4.2: resolve_source's OSError wrapper must not repeat whatever
+        text the OS or filesystem put in the underlying exception."""
+
+        def boom(self):
+            raise OSError("secret=hunter2 in the errno text")
+
+        monkeypatch.setattr(T.Path, "stat", boom)
+        with pytest.raises(T.TransferError) as excinfo:
+            T.resolve_source("/images", IMAGE)
+        assert excinfo.value.summary == f"cannot read /images/{IMAGE}"
+        assert "hunter2" not in excinfo.value.summary
 
 
 class TestSkipIfStaged:

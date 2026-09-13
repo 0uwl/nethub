@@ -7,7 +7,7 @@ output handling, which is where the ported playbook had no coverage at all.
 
 import pytest
 
-from nethub.devices import install
+from nethub.devices import connection, install
 from tests.test_transfer import DIGEST, OTHER_DIGEST, dir_output
 
 IMAGE = "cat9k_lite_iosxe.17.12.06.SPA.bin"
@@ -130,6 +130,17 @@ class TestGuards:
         assert "hashes to" in str(excinfo.value)
         assert "install add" not in " ".join(device.commands)
 
+    def test_an_uppercase_or_padded_digest_is_normalised_before_comparing(self):
+        """WS-4.4: stage_image already normalises (transfer._normalise_digest);
+        without the same normalisation here, an uppercase or whitespace-padded
+        digest that staged successfully would be refused at activate with an
+        error whose two halves differ only in case."""
+        device = FakeDevice(digest=DIGEST)
+        got = install.assert_ready_to_activate(
+            device, image=IMAGE, sha512=f"  {DIGEST.upper()}  ", target_version=TARGET
+        )
+        assert got.version == "17.9.4"
+
 
 class TestActivate:
     def test_saves_configuration_before_installing(self):
@@ -240,6 +251,63 @@ class TestWaitForDevice:
         assert excinfo.value.status == "reload_timeout"
         assert "refused" in str(excinfo.value)
         assert now["t"] <= 180 + 30
+
+    def test_reload_timeout_summary_omits_the_last_attempts_text(self):
+        """WS-4.2: `message` still names the last attempt's exception for
+        local debugging, but `summary` -- the year-retained column -- must
+        not repeat it."""
+        _now, clock, sleep = self.make_clock()
+
+        def connect():
+            raise OSError("secret=hunter2 in the errno text")
+
+        with pytest.raises(install.ReloadTimeout) as excinfo:
+            install.wait_for_device(
+                connect, wait=install.ReloadWait(delay=60, interval=30, timeout=180),
+                sleep=sleep, clock=clock,
+            )
+        assert excinfo.value.summary == "device did not return within 180s of the reload"
+        assert "hunter2" not in excinfo.value.summary
+        assert "hunter2" in str(excinfo.value), "message may still carry it for debugging"
+
+    def test_an_authentication_error_is_not_treated_as_transient(self):
+        """WS-4.1: with the same credential presented on every reconnect
+        attempt, retrying a rejected credential risks tripping a fleet-wide
+        AAA lockout. It must propagate immediately rather than being retried
+        or folded into ReloadTimeout."""
+        now, clock, sleep = self.make_clock()
+        attempts = []
+
+        def connect():
+            attempts.append(now["t"])
+            raise connection.AuthenticationError("rejected")
+
+        with pytest.raises(connection.AuthenticationError):
+            install.wait_for_device(connect, sleep=sleep, clock=clock)
+        assert len(attempts) == 1, "must not retry a rejected credential"
+
+    def test_a_hostkey_error_is_still_treated_as_transient_for_now(self):
+        """WS-4.1/WS-7.3: unlike AuthenticationError above, HostKeyError is
+        deliberately left on the transient path until the open hardware
+        question in WS-7.3 (can an IOS-XE upgrade legitimately regenerate a
+        device's host key?) is answered. This test pins that as a deliberate
+        choice, not an oversight -- if it starts failing because someone
+        carved out HostKeyError too, update this test only after WS-7.3 has
+        actually been answered."""
+        _now, clock, sleep = self.make_clock()
+        results = [
+            connection.HostKeyError("changed"),
+            FakeDevice(version="17.12.6"),
+        ]
+
+        def connect():
+            item = results.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        conn = install.wait_for_device(connect, sleep=sleep, clock=clock)
+        assert conn.version == "17.12.6"
 
 
 class TestVerifyUpgrade:

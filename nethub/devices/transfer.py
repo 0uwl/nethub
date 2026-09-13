@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Literal
 
 from netmiko.cisco.cisco_ios import CiscoIosFileTransfer
 
-from nethub.devices import facts
+from nethub.devices import connection, facts
 
 if TYPE_CHECKING:
     from netmiko.base_connection import BaseConnection
@@ -63,6 +63,10 @@ class TransferError(Exception):
     unknown state, None means no bracket ran -- either the failure came before
     it or the transport was pull, which reconfigures nothing. Null there has
     to be read together with the run's transport rather than alone.
+
+    `summary` is what reaches the year-retained `error_summary` column
+    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+    is a separate field from `message` rather than the same text.
     """
 
     def __init__(
@@ -71,10 +75,12 @@ class TransferError(Exception):
         *,
         status: str,
         scp_restore_confirmed: bool | None = None,
+        summary: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.scp_restore_confirmed = scp_restore_confirmed
+        self.summary = summary if summary is not None else message
 
 
 class VerificationError(TransferError):
@@ -193,7 +199,10 @@ def resolve_source(
     try:
         measured = source.stat().st_size
     except OSError as exc:
-        raise TransferError(f"cannot read {source}: {exc}", status="not_copied") from exc
+        raise TransferError(
+            f"cannot read {source}: {exc}", status="not_copied",
+            summary=f"cannot read {source}",
+        ) from exc
     if not source.is_file():
         raise TransferError(f"{source} is not a regular file", status="not_copied")
     if declared_size is not None and declared_size != measured:
@@ -274,8 +283,19 @@ def _push_scp(
         _scp_put(conn, source=source, image=image, file_system=file_system)
     except TransferError:
         raise
+    except connection.DeviceConnectionError:
+        # A HostKeyError from the second SCP session is the pin catching
+        # something -- filing it as a routine TransferError would bury the
+        # one signal that means "the pin just fired" among ordinary flaky-SCP
+        # failures (WS-4.3). Re-raise before the generic handler so
+        # phases.failure_stage_for classifies it 'hostkey'/'credential'/
+        # 'connect', not 'transfer'.
+        raise
     except Exception as exc:
-        raise TransferError(f"SCP push of {image} failed: {exc}", status="not_copied") from exc
+        raise TransferError(
+            f"SCP push of {image} failed: {exc}", status="not_copied",
+            summary=f"SCP push of {image} failed",
+        ) from exc
     finally:
         confirmed = _restore_scp_server(conn, prior_enabled)
         if not confirmed:
