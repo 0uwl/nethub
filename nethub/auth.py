@@ -144,7 +144,7 @@ def new_user():
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
-        flash('User created.')
+        flash('User created.', 'success')
         return redirect(url_for('auth.list_users'))
 
     return render_template('pages/users_new.html')

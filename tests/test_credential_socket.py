@@ -206,3 +206,96 @@ class TestSiblingSideValidation:
                         json.dumps({"ok": True, "username": 1, "password": 2}).encode() + b"\n"):
             with pytest.raises(CS.CredentialError):
                 CS.fetch_credential(self.reply_with(payload), 1)
+
+
+# --- WS-2: the store is bounded by its TTL, not only by use ----------------
+
+class TestStoreIsBounded:
+    """`purge_expired` and `discard` existed with no caller anywhere in
+    nethub/ -- the TTL was enforced *only* inside `release`, so an approval
+    whose job never ran left a plaintext AAA password in the worker until a
+    restart.
+    """
+
+    def test_hold_sweeps_an_expired_entry_for_another_job(self, store, clock):
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        clock["t"] = NOW + timedelta(hours=2)
+        store.hold(2, "other", PASSWORD, approved_by=8)
+        # Job 1 is gone without anyone ever having fetched it.
+        assert len(store) == 1
+        with pytest.raises(CS.CredentialError, match="no credential held"):
+            store.release(1, 7)
+
+    def test_release_sweeps_other_jobs(self, store, clock):
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        clock["t"] = NOW + timedelta(hours=2)
+        store.hold(2, "other", PASSWORD, approved_by=8)
+        clock["t"] = NOW + timedelta(hours=2, minutes=1)
+        store.release(2, 8)
+        assert len(store) == 0
+
+    def test_an_expired_target_still_says_expired(self, store, clock):
+        """The sweep must not eat the target before its own check runs.
+
+        Sweeping first degrades "expired; the phase needs re-approval" to
+        "no credential held", which is the answer a never-approved job gets --
+        a worse diagnosis for whoever reads failure_stage. This is why
+        `purge_expired` is called *after* the pop in `release`.
+        """
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        clock["t"] = NOW + timedelta(hours=2)
+        with pytest.raises(CS.CredentialError, match="expired"):
+            store.release(1, 7)
+
+    def test_discard_removes_without_releasing(self, store):
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        store.discard(1)
+        assert len(store) == 0
+        with pytest.raises(CS.CredentialError, match="no credential held"):
+            store.release(1, 7)
+
+
+class TestRequestValidation:
+    def test_a_bool_job_id_is_refused(self, store):
+        """bool is a subclass of int and hash(True) == hash(1), so
+        {"job_id": true} used to release the credential held under key 1 --
+        and `db.session.get(UpgradePhaseJob, True)` would have bound to 1 too.
+        """
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        reply = json.loads(
+            CS.handle_request(b'{"job_id": true}', store, lambda job_id: 7)
+        )
+        assert reply["ok"] is False
+        # And it did not consume the real entry.
+        assert len(store) == 1
+        assert store.release(1, 7) == ("jsmith", PASSWORD)
+
+    def test_a_real_int_job_id_still_works(self, store):
+        """The guard must not have broken the only message type there is."""
+        store.hold(1, "jsmith", PASSWORD, approved_by=7)
+        reply = json.loads(
+            CS.handle_request(b'{"job_id": 1}', store, lambda job_id: 7)
+        )
+        assert reply["ok"] is True
+        assert reply["password"] == PASSWORD
+
+
+class TestReprsHideTheCredential:
+    def test_held_repr(self):
+        from datetime import datetime, timezone
+        held = CS._Held("jsmith", PASSWORD, 7, datetime.now(timezone.utc))
+        assert PASSWORD not in repr(held)
+        assert "jsmith" in repr(held)
+
+    def test_phase_context_repr(self):
+        from nethub.devices.phases import PhaseContext
+        ctx = PhaseContext(device_username="jsmith", device_password=PASSWORD,
+                           search_dir="/srv/images")
+        assert PASSWORD not in repr(ctx)
+        assert "jsmith" in repr(ctx)
+
+    def test_pull_target_repr(self):
+        from nethub.devices.transfer import PullTarget
+        target = PullTarget("dist.example.net", "jsmith", PASSWORD)
+        assert PASSWORD not in repr(target)
+        assert "dist.example.net" in repr(target)
