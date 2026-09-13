@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Validate nethub.devices.facts parsing against a real IOS-XE device.
+"""Capture real IOS-XE output for tests/captures/, or re-parse a capture offline.
 
-    scripts/check_device_facts.py sw01.example.net --user me
+    scripts/check_device_facts.py 192.0.2.10 --user me
     scripts/check_device_facts.py --replay captures/sw01-20260909-131500
 
-The first form logs in, runs `show version` and `dir <fs>`, writes both raw
-outputs to a capture directory, and reports what parsed. Send that directory
-back if anything is wrong -- the second form re-parses it with no device.
-
-Throwaway validation tool: it uses Netmiko's default host-key handling, not
-the fail-closed pinning the real connection path will use.
+The first form connects the same way every other NetHub process does -- a
+pinned, confirmed host key and no TOFU -- runs `show version` / `dir <fs>` /
+`show privilege`, writes the raw outputs to a capture directory, and reports
+what parsed. This is how a new IOS-XE release gets validated: capture it
+here, add the directory to tests/captures/, and replay it offline -- the
+second form, which needs no device. Do not edit a capture to make a test
+pass; it is evidence that ntc-templates parses what the fleet actually runs,
+not a fixture.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import sys
 from datetime import datetime, timezone
@@ -22,53 +25,46 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from nethub.devices import connection
 from nethub.devices import facts as F
-
-
-def _interactive_ios_class():
-    """Netmiko's cisco_ios driver, authenticating with keyboard-interactive.
-
-    An IOS-XE box running `aaa new-model` advertises `publickey,
-    keyboard-interactive` and not `password`, so Paramiko's password auth is
-    rejected -- and Paramiko only falls back to keyboard-interactive when no
-    password was supplied at all. Answer every prompt with the password, the
-    way OpenSSH does. One failed attempt drops the session, so this cannot be
-    a retry after a normal connect.
-    """
-    import paramiko
-    from netmiko.cisco import CiscoIosSSH
-
-    class SSHClientInteractive(paramiko.SSHClient):
-        def _auth(self, username, password, *args):
-            self.get_transport().auth_interactive(
-                username, handler=lambda title, instructions, prompts: [password for _ in prompts]
-            )
-
-    class CiscoIosInteractiveSSH(CiscoIosSSH):
-        def _get_ssh_client_instance(self) -> paramiko.SSHClient:
-            return SSHClientInteractive()
-
-    return CiscoIosInteractiveSSH
+from nethub.upgrade_cli import resolve_pin
 
 
 def capture(args) -> Path:
     from getpass import getpass
 
-    from netmiko import ConnectHandler
+    try:
+        pin = resolve_pin(args.host, args.fingerprint)
+    except SystemExit:
+        # resolve_pin's own refusal message says "run with --scan first" --
+        # correct for upgrade_cli.py, which has that flag, but this script
+        # doesn't. Same refusal, no TOFU, just the right command to run.
+        raise SystemExit(
+            f'No confirmed host key for {args.host}, and no --fingerprint given.\n'
+            f'Run `python -m nethub.upgrade_cli --scan {args.host}` first, compare '
+            f'the fingerprint against the device itself, then pass it here as '
+            f'--fingerprint "<type> SHA256:...".'
+        ) from None
 
-    password = os.environ.get("NETHUB_DEVICE_PASSWORD") or getpass("Device password: ")
+    password = os.environ.get("NETHUB_DEVICE_PASSWORD")
+    if password:
+        # Kept because a scripted capture run needs it, but not silently --
+        # same exposure upgrade_cli.py warns about: an env var sits in
+        # /proc/<pid>/environ for the whole run, is inherited by every child,
+        # and lands in shell history if set inline (WS-2.3).
+        print("WARNING: reading the device password from NETHUB_DEVICE_PASSWORD.",
+              file=sys.stderr)
+        print("         It is readable in /proc/<pid>/environ for this whole run",
+              file=sys.stderr)
+        print("         and inherited by every child process. Prefer the prompt.",
+              file=sys.stderr)
+    else:
+        password = getpass("Device password: ")
+
     out = Path(args.out or f"captures/{args.host}-{datetime.now(tz=timezone.utc):%Y%m%d-%H%M%S}")
     out.mkdir(parents=True, exist_ok=True)
 
-    connect = ConnectHandler if args.auth == "password" else _interactive_ios_class()
-
-    with connect(
-        device_type="cisco_ios",
-        host=args.host,
-        username=args.user,
-        secret=password,
-        password=password,
-    ) as conn:
+    with connection.connect(args.host, args.user, password, pin, auth=args.auth) as conn:
         (out / "show_version.txt").write_text(conn.send_command("show version"))
         (out / "show_privilege.txt").write_text(conn.send_command("show privilege"))
         (out / "dir.txt").write_text(
@@ -131,8 +127,12 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("host", nargs="?", help="device to connect to")
+    p.add_argument("host", nargs="?", help="device to connect to -- an IP literal, not a hostname")
     p.add_argument("--user", default=os.environ.get("USER"), help="device username")
+    p.add_argument("--fingerprint",
+                    help='"<key-type> SHA256:..." -- get one via '
+                         '`python -m nethub.upgrade_cli --scan <host>`, or read it off a '
+                         "confirmed row in NetHub's own Host keys page")
     p.add_argument("--file-system", default="flash:", help="default flash:")
     p.add_argument(
         "--auth",
@@ -150,6 +150,11 @@ def main() -> int:
         return report(Path(args.replay), args.expect_version, args.expect_image)
     if not args.host:
         p.error("give a host, or --replay a capture directory")
+    try:
+        ipaddress.ip_address(args.host)
+    except ValueError:
+        p.error(f"{args.host!r} is not an IP literal -- hostnames are refused so DNS "
+                f"cannot decide where the device credential goes")
     return report(capture(args), args.expect_version, args.expect_image)
 
 
