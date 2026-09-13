@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from nethub.devices import facts, transfer
+from nethub.devices import connection, facts, transfer
 
 if TYPE_CHECKING:
     from netmiko.base_connection import BaseConnection
@@ -56,11 +56,17 @@ _CLEANUP_DELETED_RE = re.compile(
 
 
 class InstallError(Exception):
-    """An upgrade step failed. `status` is the operator-facing word."""
+    """An upgrade step failed. `status` is the operator-facing word.
 
-    def __init__(self, message: str, *, status: str) -> None:
+    `summary` is what reaches the year-retained `error_summary` column
+    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+    is a separate field from `message` rather than the same text.
+    """
+
+    def __init__(self, message: str, *, status: str, summary: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.summary = summary if summary is not None else message
 
 
 class ReloadTimeout(InstallError):
@@ -134,7 +140,14 @@ def assert_ready_to_activate(
     # Not a presence check: §8.1 requires the later phase to re-hash. A host
     # whose staged image failed verification is still sitting in flash under
     # the target filename, and would otherwise be installed anyway.
-    transfer.verify_sha512(conn, file_system=file_system, image=image, expected=sha512)
+    #
+    # Normalised the same way stage_image normalises it (WS-4.4): without
+    # this, an uppercase or whitespace-padded sha512 stages successfully --
+    # transfer.verify_sha512 lower-cases only the value it parses from the
+    # device -- and is then refused here, with an error whose two halves
+    # differ only in case.
+    expected = transfer._normalise_digest(sha512)
+    transfer.verify_sha512(conn, file_system=file_system, image=image, expected=expected)
     return device
 
 
@@ -230,7 +243,23 @@ def wait_for_device(
             conn = connect()
             facts.get_facts(conn)  # proves the CLI is actually serving
             return conn
-        except Exception as exc:  # noqa: BLE001 -- every failure is just 'not back yet'
+        except connection.AuthenticationError:
+            # Not transient, and not safe to retry blindly: with
+            # DEFAULT_RELOAD_WAIT this loop would otherwise present the same
+            # credential roughly 28 times in 15 minutes. If the device comes
+            # back with AAA unreachable and falls back to a local database the
+            # submitter isn't in, that is 28 real login attempts against a
+            # fleet whose TACACS+/RADIUS deployment may lock an account out
+            # fleet-wide after 3-5 failures. Raise immediately so this reports
+            # failure_stage='credential' rather than 'reload' (WS-4.1).
+            raise
+        # HostKeyError is deliberately NOT carved out here yet, unlike
+        # AuthenticationError above -- see WS-7.3 in HANDOFF.md. Whether an
+        # IOS-XE upgrade can legitimately regenerate a device's host key is an
+        # open hardware question; until it is answered, re-raising here could
+        # turn a successful upgrade into a hard failure instead of a
+        # transient "not back yet" reconnect attempt.
+        except Exception as exc:  # noqa: BLE001 -- every other failure is 'not back yet'
             last = exc
             if conn is not None:
                 try:
@@ -242,6 +271,7 @@ def wait_for_device(
                 f"device did not return within {wait.timeout:.0f}s of the reload; "
                 f"last attempt: {last}",
                 status="reload_timeout",
+                summary=f"device did not return within {wait.timeout:.0f}s of the reload",
             )
         sleep(wait.interval)
 

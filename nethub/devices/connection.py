@@ -56,7 +56,19 @@ class DeviceConnectionError(Exception):
     Deliberately not a subclass of `paramiko.SSHException`: Netmiko catches
     that around its own connect and re-raises it as a *timeout*, which would
     turn a host-key mismatch into a misleading "increase conn_timeout".
+
+    `summary` is what `phases._summarise` copies into the year-retained
+    `error_summary` column (WS-4.2) -- `message` may still interpolate a
+    foreign exception's text for `__cause__`/traceback context, but `summary`
+    must not, or that foreign text durably reaches the column it exists to
+    keep clean. Defaulting `summary` to `message` is only safe for the many
+    call sites that never wrap a foreign exception; the ones that do must
+    pass `summary=` explicitly.
     """
+
+    def __init__(self, message: str, *, summary: str | None = None) -> None:
+        super().__init__(message)
+        self.summary = summary if summary is not None else message
 
 
 class HostKeyError(DeviceConnectionError):
@@ -114,16 +126,25 @@ def scan_host_key(
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
     except OSError as exc:
-        raise DeviceConnectionError(f"could not reach {host}:{port}: {exc}") from exc
+        raise DeviceConnectionError(
+            f"could not reach {host}:{port}: {exc}",
+            summary=f"could not reach {host}:{port}",
+        ) from exc
 
     transport = paramiko.Transport(sock)
     try:
         transport.start_client(timeout=timeout)
         key = transport.get_remote_server_key()
     except paramiko.SSHException as exc:
-        raise DeviceConnectionError(f"no host key from {host}:{port}: {exc}") from exc
+        raise DeviceConnectionError(
+            f"no host key from {host}:{port}: {exc}",
+            summary=f"no host key from {host}:{port}",
+        ) from exc
     except OSError as exc:
-        raise DeviceConnectionError(f"could not reach {host}:{port}: {exc}") from exc
+        raise DeviceConnectionError(
+            f"could not reach {host}:{port}: {exc}",
+            summary=f"could not reach {host}:{port}",
+        ) from exc
     finally:
         transport.close()
     return HostKey.of(key)
@@ -171,7 +192,10 @@ def connect(
         # state the fault here rather than forwarding a library string into it.
         raise AuthenticationError(f"{host}:{port} rejected the credential") from exc
     except Exception as exc:  # netmiko raises several unrelated types here
-        raise DeviceConnectionError(f"could not connect to {host}:{port}: {exc}") from exc
+        raise DeviceConnectionError(
+            f"could not connect to {host}:{port}: {exc}",
+            summary=f"could not connect to {host}:{port}",
+        ) from exc
 
 
 class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):

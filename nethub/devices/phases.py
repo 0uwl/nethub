@@ -13,8 +13,13 @@ unauthenticated route.
 
 The credential arrives as an argument and is never written anywhere: not to a
 row, not to `error_summary`, not to a log. `_summarise` is what enforces the
-last of those, and it is deliberately conservative about exceptions this
-codebase did not raise itself.
+last of those: it reads an exception's `summary` attribute rather than its
+`str()`, and every exception this codebase raises sets that attribute
+explicitly (WS-4.2). An exception with no `summary` -- anything foreign, and
+anything of ours that forgot to set one -- reduces to its type name. That is
+the trust direction: opt in per exception, rather than an allowlist of
+trusted *types* that a wrapper interpolating a foreign exception's text could
+slip past.
 """
 
 from __future__ import annotations
@@ -43,20 +48,18 @@ _STATE_AFTER = {
     'cleanup': 'verified',
 }
 
-#: `error_summary` is retained for a year (§7.4), so only exceptions this
-#: codebase raised itself get their message copied into it. Anything else
-#: contributes its type and nothing more -- a stray `str(exc)` from a library
-#: is a durable credential leak with no other symptom (§7.3).
-_OUR_EXCEPTIONS = (
-    connection.DeviceConnectionError,
-    transfer.TransferError,
-    install.InstallError,
-    facts.FactsError,
-)
-
-
 class UnconfirmedHost(Exception):
-    """No confirmed `device_host_keys` row for this address (§4.3)."""
+    """No confirmed `device_host_keys` row for this address (§4.3).
+
+    `summary` is what reaches the year-retained `error_summary` column
+    (WS-4.2). This exception never interpolates foreign text, so the default
+    of `summary == message` is already correct -- the attribute exists purely
+    so `_summarise` can read it the same way it reads every other exception's.
+    """
+
+    def __init__(self, message: str, *, summary: str | None = None) -> None:
+        super().__init__(message)
+        self.summary = summary if summary is not None else message
 
 
 @dataclass(frozen=True)
@@ -154,9 +157,16 @@ def failure_stage_for(exc: BaseException) -> str:
 
 
 def _summarise(exc: BaseException) -> str:
-    if isinstance(exc, _OUR_EXCEPTIONS + (UnconfirmedHost,)):
-        text = str(exc)
-    else:
+    """Read the fault an exception opted to disclose, never its raw `str()`.
+
+    `error_summary` is retained for a year (§7.4). Reading `summary` rather
+    than checking a type allowlist is the WS-4.2 fix: a type-level check
+    trusted *any* message from an allowed type, including one of ours that
+    interpolated a foreign exception's text wholesale. An explicit `summary`
+    attribute can only ever say what its own `__init__` chose to put there.
+    """
+    text = getattr(exc, "summary", None)
+    if text is None:
         text = f"unexpected {type(exc).__name__}"
     return " ".join(text.split())[:500]
 

@@ -128,6 +128,22 @@ def test_dir_command_rejects_injection():
         facts.dir_command("flash: | do something")
 
 
+def test_parse_error_summary_omits_the_textfsm_exceptions_text(monkeypatch):
+    """WS-4.2: textfsm/clitable can raise with the raw device output embedded
+    in their message, so `message` may still carry it for local debugging, but
+    `summary` -- the year-retained column -- must not."""
+
+    def boom(**kwargs):
+        raise ValueError("could not tokenize line: secret=hunter2")
+
+    monkeypatch.setattr(facts, "parse_output", boom)
+    with pytest.raises(facts.FactsError) as excinfo:
+        facts.parse_version("Cisco IOS XE Software, Version 17.12.06\n")
+    assert excinfo.value.summary == "could not parse 'show version'"
+    assert "hunter2" not in excinfo.value.summary
+    assert "hunter2" in str(excinfo.value), "message may still carry it for debugging"
+
+
 class FakeConn:
     """Netmiko's send_command, enough of it to check what we send and read."""
 
