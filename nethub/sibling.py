@@ -23,9 +23,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_
 
 from nethub.credential_socket import CredentialError, fetch_credential
-from nethub.devices import install, phases, transfer
+from nethub.devices import connection, install, phases, transfer
 from nethub.extensions import db
-from nethub.models import APPROVABLE, UpgradePhaseJob, UpgradeRun
+from nethub.models import APPROVABLE, HostKeyScan, UpgradePhaseJob, UpgradeRun
 
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
 #: `awaiting_approval` until a human approves the next phase. `verify` follows
@@ -105,8 +105,29 @@ class Sibling:
             job.error_summary = 'runner exited while this phase was running'
             job.finished_at = self.now()
             self._abandon_run(job)
+        self._sweep_stale_scans()
         db.session.commit()
         return len(stale)
+
+    def _sweep_stale_scans(self) -> None:
+        """Mark a `HostKeyScan` left `running` by a dead instance `abandoned`
+        (WS-6.2b). Folded into `sweep()` rather than a separate call so
+        nothing has to remember to invoke both; same NULL-safe predicate as
+        the phase-job sweep above, same reasoning. Not counted in `sweep()`'s
+        return value -- that return is a count of phase rows, asserted
+        exactly by existing tests.
+        """
+        stale = HostKeyScan.query.filter(
+            HostKeyScan.status == 'running',
+            or_(
+                HostKeyScan.runner_instance_id.is_(None),
+                HostKeyScan.runner_instance_id != self.runner_instance_id,
+            ),
+        ).all()
+        for scan in stale:
+            scan.status = 'abandoned'
+            scan.error_summary = 'runner exited while this scan was running'
+            scan.finished_at = self.now()
 
     def _abandon_run(self, job: UpgradePhaseJob) -> None:
         """Park the run back at this phase's gate, rather than failing it.
@@ -169,6 +190,72 @@ class Sibling:
             .order_by(UpgradePhaseJob.created_at, UpgradePhaseJob.id)
             .first()
         )
+
+    # -- host-key scans (WS-6.2b) -------------------------------------------
+    #
+    # A scan is dispatched exactly like a phase job -- same conditional-claim
+    # shape, same queue shape -- but simpler: no credential, no PhaseContext,
+    # no gate, no state machine beyond queued/running/succeeded/failed/
+    # abandoned. It gets its own small queue rather than a shared one because
+    # `run_once()`'s loop checks for a queued scan first every iteration (see
+    # `main()` below): an admin watching a confirm screen should not queue
+    # behind a phase job that may be a 15-minute stage already in flight.
+
+    def next_queued_scan(self) -> HostKeyScan | None:
+        return (
+            HostKeyScan.query.filter_by(status='queued')
+            .order_by(HostKeyScan.created_at, HostKeyScan.id)
+            .first()
+        )
+
+    def claim_scan(self, scan_id: int) -> bool:
+        """Same conditional-update claim as `claim()`, for `HostKeyScan` rows."""
+        changed = (
+            db.session.query(HostKeyScan)
+            .filter(HostKeyScan.id == scan_id, HostKeyScan.status == 'queued')
+            .update(
+                {
+                    'status': 'running',
+                    'started_at': self.now(),
+                    'runner_instance_id': self.runner_instance_id,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+        return changed == 1
+
+    def run_scan_once(self) -> str | None:
+        """Take at most one queued scan and execute it.
+
+        No credential fetch and no `PhaseContext`: the host key is exchanged
+        before authentication, so this never touches §9.1's socket.
+        """
+        scan = self.next_queued_scan()
+        if scan is None:
+            return None
+        if not self.claim_scan(scan.id):
+            return None  # another instance took it; nothing to do
+
+        try:
+            key = connection.scan_host_key(scan.ansible_host)
+        except connection.DeviceConnectionError as exc:
+            scan.status = 'failed'
+            # phases._summarise reads exc.summary rather than str(exc)
+            # (WS-4.2) -- the same "state the fault, don't quote the OS or
+            # the peer" discipline as everywhere else a device exception is
+            # recorded, folding in WS-5.4's fix for this specific finding.
+            scan.error_summary = phases._summarise(exc)
+            scan.finished_at = self.now()
+            db.session.commit()
+            return 'failed'
+
+        scan.status = 'succeeded'
+        scan.key_type = key.key_type
+        scan.fingerprint_sha256 = key.fingerprint_sha256
+        scan.finished_at = self.now()
+        db.session.commit()
+        return 'succeeded'
 
     def run_once(self) -> str | None:
         """Take at most one job off the queue and see it through."""
@@ -332,7 +419,13 @@ def main(poll_interval: float = 5.0) -> None:
                  worker.runner_instance_id, swept)
         while True:
             try:
-                status = worker.run_once()
+                # A scan is checked first every iteration (WS-6.2b): it is
+                # bounded by connection.CONNECT_TIMEOUT and an admin is very
+                # likely watching the result page, where a phase job may be a
+                # 15-minute stage already in flight.
+                status = worker.run_scan_once()
+                if status is None:
+                    status = worker.run_once()
             except Exception:
                 log.exception('phase execution raised; continuing')
                 db.session.rollback()

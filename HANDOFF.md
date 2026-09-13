@@ -1,22 +1,20 @@
 # HANDOFF — remediation plan for the branch review
 
-**Status:** WS-1, WS-2, WS-3, WS-4 (see caveat), WS-5.2, WS-5.6 (413 handler
-only, see caveat), and WS-6.1 complete. WS-5.1, 5.3, 5.5 complete. WS-5.4 and
-WS-5.7's item 3 are **folded into WS-6** rather than tracked separately now —
-read WS-6 before touching either. **The only work left in this file is
-WS-6.2b/6.3/6.4 — one combined branch** (new schema, one route rewrite; see
-WS-6.2's own section for why they aren't split). That decision was made on
-2026-09-13 and is recorded below with a concrete `Do`, same shape as every
-other workstream — not yet implemented as of this refresh. **WS-4 caveat:**
-4.2/4.3/4.4 are fully done; 4.1 is done for `AuthenticationError` only — its
-`HostKeyError` half stays deliberately un-fixed pending WS-7.3's hardware
-answer, and two tests pin that as deliberate rather than an oversight.
-**WS-5.6 caveat:** only the 413 handler landed; upload progress feedback was
-always scoped as separate, bigger work to leave unless asked. WS-7 still
-needs hardware. Each done
-section carries a `DONE` note saying what landed and anything it changed
-about the task next to it — read those before starting a neighbour.
-**Merged to:** `main` (PRs #3–#10)
+**Status:** WS-1 through WS-6 are all complete (see the WS-4 and WS-5.6
+caveats below — each is a deliberate partial, not an oversight). **The only
+work left in this entire file is WS-7, and it needs hardware nobody in a
+container has.** WS-5.4 and WS-5.7's item 3 were folded into WS-6 rather than
+tracked separately — see WS-6.2b and WS-6.4 for where they landed. **WS-4
+caveat:** 4.2/4.3/4.4 are fully done; 4.1 is done for `AuthenticationError`
+only — its `HostKeyError` half stays deliberately un-fixed pending WS-7.3's
+hardware answer, and two tests pin that as deliberate rather than an
+oversight. **WS-5.6 caveat:** only the 413 handler landed; upload progress
+feedback was always scoped as separate, bigger work to leave unless asked.
+Each done section carries a `DONE` note saying what landed and anything it
+changed about the task next to it — read those before starting a neighbour,
+and before assuming this file has anything actionable left for a session
+without hardware access.
+**Merged to:** `main` (PRs #3–#15, plus `feat/hostkey-scan-dispatch` once its PR merges)
 **Source:** a four-lane review (device layer, web tier, frontend, security) of
 `origin/main..HEAD` — the whole Ansible→Netmiko migration, 103 files, +10,405/−1,684.
 Every finding below was traced in code, and the ones marked *reproduced* were
@@ -159,10 +157,11 @@ Two more process rules:
 
 ## 3. How the work is grouped
 
-Seven workstreams. WS-1 through WS-5 are done, and WS-6.1/6.2a within WS-6 are
-too — **WS-6.2b/6.3/6.4 (one combined branch) is the only work left in this
-file**, decided on 2026-09-13 so it is ready rather than blocked. WS-7 needs
-hardware nobody in a container has.
+Seven workstreams. **WS-1 through WS-6 are all done.** WS-7 is the only one
+left, and it needs hardware nobody in a container has. The grouping and
+sequencing notes below are kept for history — they record what was actually
+done, and the same shape of reasoning applies if this file's structure gets
+reused for a future round of findings.
 
 **The workstreams are independent to *read* — each is understandable on its own —
 but they are NOT all independent to *branch*.** An earlier version of this section
@@ -183,16 +182,16 @@ likely to cost you a painful merge. Three tasks edit the same function.
 
 ### Safe to run in parallel
 
-WS-1, WS-2, WS-3, WS-4, and WS-5.1/5.3/5.5/5.7 are all done and merged — the
-grouping below is kept for history and because the same shape applies to
-what's left. **WS-4 was implemented single-branch, strictly sequentially, in
-exactly the order this section recommends** (4.1 + 4.3, then 4.2, then 4.4) —
-confirming the ordering below was worth writing down.
-
-**What remains: the WS-6.2b/6.3/6.4 branch only** — WS-5.6 is done (413
-handler; see its `DONE` note for the progress-feedback caveat left out) and
-WS-6.1 is done (see its `DONE` note). (WS-5.4 is no longer a separate item —
-see WS-6.2b.)
+**Everything in this section is now history — WS-1 through WS-6 are all done
+and merged.** Kept because the sequencing calls it records were each checked
+against real file-level conflicts rather than assumed, and the same
+diagnostic approach (read each section's own `Where:` line before assuming
+two tasks are independent) is worth reusing if this file's shape gets reused
+for a later round of findings. **WS-4 was implemented single-branch, strictly
+sequentially, in exactly the order this section recommends** (4.1 + 4.3, then
+4.2, then 4.4) — confirming the ordering below was worth writing down.
+**WS-6.2b/6.3/6.4 landed together as one branch** (`feat/hostkey-scan-dispatch`),
+also exactly as this section anticipated.
 
 **WS-4's four items were not safe to run in parallel with each other**, more
 than the original table suggested — checked against each section's own
@@ -219,13 +218,9 @@ between them didn't matter, they share no file), then WS-4.2, then WS-4.4
 last — it only shared `install.py` with WS-4.1 at a different function and
 shared nothing with WS-4.3.
 
-**WS-6.1 and WS-6.2a are both done now** (see their own `DONE` notes) — the
-"two separate branches" framing this section used to need no longer applies.
-**WS-6.2b/6.3/6.4 (the host-key scan/confirm/audit redesign) is the only
-branch left to open.** It touches `models.py`, `sibling.py`,
-`upgrade_routes.py`'s hostkeys routes, and the two `hostkeys_*.html`
-templates — a fresh session needs nothing else from this file before starting
-it.
+All of WS-6.1, WS-6.2a and WS-6.2b/6.3/6.4 are done now (see their own `DONE`
+notes) — the "two separate branches" framing this section used to need no
+longer applies to anything.
 
 ### Two rules that keep parallel branches from fighting
 
@@ -246,8 +241,8 @@ make other findings exploitable.
 | WS-2 | Credential lifecycle | 4 | Medium — touches the crown jewel | **Done** (4/4) |
 | WS-3 | Job state machine & liveness | 4 | Medium — concurrency | **Done** (4/4) |
 | WS-4 | Failure classification & error hygiene | 4 | Low–medium | **Done** (4/4, but see the WS-4.1 caveat above — its `HostKeyError` half is deliberately deferred to WS-7.3) |
-| WS-5 | Web tier & frontend | 7 | Low | **Done** (6/7 — 5.4 and 5.7 item 3 folded into WS-6, not left undone) |
-| WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | 2/4 — 6.1 and 6.2a done; 6.2b/6.3/6.4 ready to implement as one branch |
+| WS-5 | Web tier & frontend | 7 | Low | **Done** (7/7 — 5.4 landed under WS-6.2b, 5.7 item 3 under WS-6.4) |
+| WS-6 | Host-key scan/confirm redesign, `_summarise`, `check_device_facts.py` | 4 | Medium — new schema | **Done** (4/4) |
 | WS-7 | Needs hardware | 3 | — blocked | Blocked on hardware |
 
 ---
@@ -541,11 +536,11 @@ or a CI log retained far longer than the phase.
 > Landed: `upgrade_cli.py` now warns to stderr when `NETHUB_DEVICE_PASSWORD`
 > is used instead of the interactive prompt, naming the exposure
 > (`/proc/<pid>/environ`, child-process inheritance, shell history) rather
-> than silently accepting it. **Deliberately not done:**
-> `scripts/check_device_facts.py` still reads the same variable with no
-> warning — the note below said to coordinate with WS-6.1, and that decision
-> (delete vs. rewrite the script) still has not been made, so touching it here
-> would be the wrong branch making the call.
+> than silently accepting it. **The other half landed later, under WS-6.1**:
+> `scripts/check_device_facts.py` was rebuilt onto the real connection path
+> rather than deleted, and got the same warning in that same commit — see
+> WS-6.1's `DONE` note. This section's note below (written when that decision
+> was still pending) is now historical.
 
 **Where:** `nethub/upgrade_cli.py:166`, `scripts/check_device_facts.py:59`
 
@@ -560,8 +555,9 @@ history.
 `upgrade_cli.py` (the tool is interactive by design — it prompts at every mutating
 phase anyway), or print a clear warning when it is used. Document the choice.
 
-**Note:** this interacts with WS-6.1 — `check_device_facts.py` may be getting deleted
-or rewritten, so coordinate.
+**Note (historical):** this interacted with WS-6.1 — at the time this section was
+written, whether `check_device_facts.py` would be deleted or rewritten was still
+undecided. WS-6.1 settled it (rewrite) and landed the warning; see its `DONE` note.
 
 ---
 
@@ -1002,7 +998,9 @@ and no template references it**. There is no profile page, no form, and no nav l
 `users` row out of band.
 
 This is one of three independent reasons the app-driven run `CLAUDE.md` lists as the
-last open item would not have worked. The other two are WS-1.2 and WS-6.3.
+last open item would not have worked. The other two are WS-1.2 and WS-6.3. **All
+three are done now** — this no longer blocks a full app-driven run past pre-check;
+whatever is left there is tracked in `CLAUDE.md`'s "Project status" note, not here.
 
 **Do:** add a minimal profile page with a form posting to the existing route, and a
 nav entry. Follow the existing template conventions exactly — every form in this app
@@ -1183,14 +1181,14 @@ Progress feedback is a bigger piece of work — note it and leave it unless aske
 
 ---
 
-### WS-5.7 — Frontend affordances · MEDIUM / LOW — **DONE (2 of 3 items)**
+### WS-5.7 — Frontend affordances · MEDIUM / LOW — **DONE (all 3 items)**
 
 > Landed: the activate approval confirms (naming the phase and real host count),
 > flash categories with the default deliberately left as an error, all seven
 > tables wrapped for narrow screens, and nine form labels associated with their
-> controls. **Item 3 — the `delete_hostkey` audit row — was NOT done**: the
-> decision it was waiting on has now been made (a small dedicated table) — see
-> **WS-6.4** for the schema. It ships with the WS-6.2b/6.3/6.4 branch, not here.
+> controls. **Item 3 — the `delete_hostkey` audit row — landed separately**,
+> under WS-6.4's `DeviceHostKeyAudit` table, once that decision was made — see
+> WS-6.4's `DONE` note for the schema and what it covers.
 
 **Where:** `nethub/templates/`
 
@@ -1221,13 +1219,10 @@ say so.
 
 ## WS-6 — Decided: host-key scan/confirm redesign, `_summarise`, `check_device_facts.py`
 
-All four items below were blocked on a maintainer decision. **The decisions were made
-on 2026-09-13** and are recorded here with the same Where/Background/Do/Verify/Don't
-shape as every other workstream — there is nothing left to ask before implementing
-them. **WS-6.2b, WS-6.3 and WS-6.4 share one new schema and one route rewrite;
-implement them as a single branch — this is now the only work left in the
-whole file.** **WS-6.1 is done** and **WS-6.2a is already done** — it
-shipped as part of WS-4.2 (see that section for what landed).
+**All four items are done.** They were blocked on a maintainer decision, made on
+2026-09-13; WS-6.2b/6.3/6.4 landed together as one branch (`feat/hostkey-scan-dispatch`)
+per that decision's own note that they share one schema and one route rewrite. **This
+was the last open item in this file** — see §1's status line for the full picture.
 
 ### WS-6.1 — Rewrite `check_device_facts.py` onto the real connection path · HIGH — **DONE**
 
@@ -1311,19 +1306,32 @@ Keep `--auth` a flag the operator states, passed straight through to `connect()`
 
 ---
 
-### WS-6.2 — Two structural decisions
+### WS-6.2 — Two structural decisions — **DONE**
 
 **a) `_summarise` inverts its trust direction to an opt-in `summary` attribute —
 DONE.** Shipped as part of **WS-4.2**; nothing left to implement here. This
 entry stays only to record that the decision was made and where it landed.
 
-**b) `scan_host_key` moves to the sibling.** Scanning is device I/O — a TCP connect
-and an SSH key exchange — so it belongs in the process that does all other device I/O;
-§3.2's reasoning against blocking the phone-home route applies to any blocking device
-call in Flask, not only phase executions. It needs **no device credential** (the key
-is exchanged before authentication — `connection.py`'s own docstring says so), so it
-does **not** go through §9.1's credential socket at all. It is dispatched like a phase
-job, just simpler: no multi-phase state machine, no approval gate, no per-host loop.
+**b) `scan_host_key` moves to the sibling — DONE.**
+
+> Landed exactly as specified, with one deliberate structural change: rather
+> than one template rendering four states, `hostkeys_scan.html` stayed the
+> plain scan form and a **new** `hostkeys_scan_result.html` handles
+> queued/running/succeeded/failed for `GET /hostkeys/scan/<id>` — matching
+> how `scan_hostkey` (POST, creates the row) and `scan_result` (GET, polls
+> it) are already two different routes with two different jobs. `HostKeyScan`
+> has all the listed columns plus one not named in the original list:
+> `consumed_at`, needed by WS-6.3's one-shot confirm and mentioned there
+> instead. `next_queued_scan()`/`claim_scan()`/`run_scan_once()` mirror the
+> phase-job queue methods exactly; `run_scan_once()` uses `phases._summarise`
+> for a failed scan's `error_summary` (reusing WS-4.2's mechanism rather than
+> inventing a second one) and doesn't touch the credential socket at all.
+> `sweep()` was extended in place (a new `_sweep_stale_scans()` it calls
+> internally) rather than given a sibling method callers have to remember to
+> invoke separately — its **return value is unchanged** (a count of phase
+> rows only), since existing tests assert on that exact count; the scan sweep
+> is a side effect verified by its own tests instead. `main()`'s loop checks
+> `run_scan_once()` before `run_once()` every iteration, as specified.
 
 **Where:** `nethub/models.py` (new table), `nethub/sibling.py` (new poll),
 `nethub/upgrade_routes.py:64-118` (`scan_hostkey`, `confirm_hostkey`),
@@ -1374,7 +1382,23 @@ back; a `sweep()` test with a stale `running` scan row, mirroring WS-3.4's test 
 
 ---
 
-### WS-6.3 — Bind `confirm_hostkey` to a scan NetHub itself performed · HIGH
+### WS-6.3 — Bind `confirm_hostkey` to a scan NetHub itself performed · HIGH — **DONE**
+
+> Landed exactly as specified. `confirm_hostkey` takes `scan_id` only;
+> `key_type`/`fingerprint_sha256`/`address` all come from the loaded
+> `HostKeyScan` row. The four guards are separate checks with distinct flash
+> messages (existence/status/ownership as one "no matching scan" refusal,
+> then `consumed_at` as "already used", then the 15-minute
+> `SCAN_CONFIRM_WINDOW` as "too old") rather than one combined condition, so
+> each has its own test. Item 5 (`ip_address()`-validate `address` in
+> `confirm_hostkey` too) needed no separate code: since the route no longer
+> reads `address` from the form at all, there is no longer an unvalidated
+> address for anything to reach — it comes from `scan.ansible_host`, already
+> validated at scan-creation time through `upgrades.check_target`. The
+> honesty note landed in both places asked: this commit's message and a new
+> bullet in `alpha.md`'s "Deviations" section, spelling out that the same
+> person can still scan and confirm and that the real fix is role-based
+> access control.
 
 **Where:** `nethub/upgrade_routes.py:89-118` (`confirm_hostkey`)
 
@@ -1434,7 +1458,18 @@ workaround bolted onto this route.
 
 ---
 
-### WS-6.4 — A dedicated audit table for host-key confirm/delete · MEDIUM
+### WS-6.4 — A dedicated audit table for host-key confirm/delete · MEDIUM — **DONE**
+
+> Landed exactly as specified: `DeviceHostKeyAudit` with a plain
+> `ansible_host` string column, no FK to `device_host_keys.id`. No separate
+> "changed" action was needed, matching the section's own reasoning — the
+> only way to change a pinned key is delete-then-reconfirm, which already
+> produces a `deleted` row followed by a fresh `confirmed` one. Went with
+> option (a) for reachability: a dedicated `GET /hostkeys/history/<address>`
+> page, linked from `hostkeys_list.html`. One limitation worth naming: the
+> list page only shows *currently pinned* addresses, so a fully-deleted
+> address's history has no link pointing at it in the UI today — the row is
+> still there and reachable by URL, just not discoverable from the list.
 
 **Where:** `nethub/models.py` (new table), `nethub/upgrade_routes.py:89-129`
 (`confirm_hostkey`, `delete_hostkey`)
@@ -1569,8 +1604,9 @@ the test that would have caught the corresponding finding.
    is the one place concurrent branches are guaranteed to conflict. Refresh the status
    line, and give your section a `DONE` note saying what landed **and what it did
    not** — the existing notes record an unverified Quadlet unit, a skipped lockfile,
-   two columns `db.create_all()` will not ALTER, and an item deferred to WS-6, and
-   those caveats are the part a later session actually needs.
+   two columns `db.create_all()` will not ALTER, and (at the time) an item deferred to
+   WS-6 that later landed there — those caveats are the part a later session actually
+   needs.
 
 ## 10. Provenance
 

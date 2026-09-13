@@ -10,12 +10,13 @@ WTF_CSRF_ENABLED=False -- which is what made a missing token invisible.
 import os
 import re
 import shutil
+from datetime import datetime, timezone
 
 import pytest
 
 from nethub import create_app
 from nethub.extensions import db
-from nethub.models import UpgradeRun, UpgradeRunHost, User
+from nethub.models import DeviceHostKeyAudit, HostKeyScan, UpgradeRun, UpgradeRunHost, User
 
 
 @pytest.fixture
@@ -51,6 +52,36 @@ def make_run(app, make_user):
             ))
             db.session.commit()
             return run.id
+    return _make
+
+
+@pytest.fixture
+def make_scan(app):
+    """A `HostKeyScan` row, so the scan-result page's non-empty states render.
+
+    Looks up 'alice' the same way `make_run` does rather than depending on
+    `make_user`, so the two fixtures don't race to create the same row when a
+    test asks for both `logged_in_client` and this one.
+    """
+    def _make(status='succeeded', key_type='ssh-rsa', fingerprint='SHA256:x',
+              error_summary=None, consumed_at=None, ansible_host='192.0.2.10'):
+        with app.app_context():
+            user = User.query.filter_by(username='alice').first()
+            if user is None:
+                user = User(username='alice', device_username='jsmith')
+                user.set_password('alice-long-enough-pw')
+                db.session.add(user)
+                db.session.commit()
+            scan = HostKeyScan(
+                ansible_host=ansible_host, requested_by=user.id, status=status,
+                key_type=key_type if status == 'succeeded' else None,
+                fingerprint_sha256=fingerprint if status == 'succeeded' else None,
+                error_summary=error_summary,
+                finished_at=datetime.now(timezone.utc), consumed_at=consumed_at,
+            )
+            db.session.add(scan)
+            db.session.commit()
+            return scan.id
     return _make
 
 #: Every authenticated GET page, with the kwargs its route needs.
@@ -254,3 +285,65 @@ def test_user_created_is_styled_as_a_success(logged_in_client):
     body = resp.get_data(as_text=True)
     assert 'User created' in body
     assert 'alert-success' in body
+
+
+# --- Host-key scan result and history pages (WS-6.2b/6.4) --------------------
+
+def test_a_succeeded_scan_shows_the_fingerprint_and_a_confirm_button(
+    logged_in_client, make_scan
+):
+    scan_id = make_scan(status='succeeded')
+    body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
+    assert 'SHA256:x' in body
+    assert 'confirm it' in body.lower()
+    assert 'name="csrf_token"' in body
+    assert '{{' not in body and '{%' not in body
+
+
+def test_a_queued_scan_offers_a_reload_link_not_a_confirm_button(
+    logged_in_client, make_scan
+):
+    scan_id = make_scan(status='queued')
+    body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
+    assert 'reload' in body.lower()
+    assert 'confirm it' not in body.lower()
+
+
+def test_a_failed_scan_shows_the_error_summary(logged_in_client, make_scan):
+    scan_id = make_scan(status='failed', error_summary='could not reach 192.0.2.10:22')
+    body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
+    assert 'could not reach 192.0.2.10:22' in body
+    assert 'confirm it' not in body.lower()
+
+
+def test_a_consumed_scan_offers_no_confirm_button(logged_in_client, make_scan):
+    scan_id = make_scan(status='succeeded', consumed_at=datetime.now(timezone.utc))
+    body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
+    assert 'confirm it' not in body.lower()
+    assert 'already been used' in body.lower()
+
+
+def test_the_history_page_renders_with_no_entries(logged_in_client):
+    body = logged_in_client.get('/hostkeys/history/192.0.2.10').get_data(as_text=True)
+    assert 'No history' in body
+    assert '{{' not in body and '{%' not in body
+
+
+def test_the_history_page_lists_a_confirm_and_a_delete(logged_in_client, app):
+    with app.app_context():
+        # logged_in_client already created 'alice' -- look it up rather than
+        # creating a second user and colliding with the unique username.
+        actor = User.query.filter_by(username='alice').first()
+        db.session.add(DeviceHostKeyAudit(
+            ansible_host='192.0.2.10', action='confirmed', key_type='ssh-rsa',
+            fingerprint_sha256='SHA256:x', actor_id=actor.id,
+        ))
+        db.session.add(DeviceHostKeyAudit(
+            ansible_host='192.0.2.10', action='deleted', key_type='ssh-rsa',
+            fingerprint_sha256='SHA256:x', actor_id=actor.id,
+        ))
+        db.session.commit()
+    body = logged_in_client.get('/hostkeys/history/192.0.2.10').get_data(as_text=True)
+    assert 'confirmed' in body
+    assert 'deleted' in body
+    assert 'SHA256:x' in body

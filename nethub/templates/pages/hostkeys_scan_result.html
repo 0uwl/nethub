@@ -1,0 +1,31 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Scan result{% endblock %}
+{% block content %}
+<div class="page-header"><h1>Scanning <code>{{ scan.ansible_host }}</code></h1></div>
+
+{% if scan.status in ('queued', 'running') %}
+<p>Still working &mdash; this usually finishes in well under 30 seconds.</p>
+<p><a href="{{ url_for('hostkeys.scan_result', scan_id=scan.id) }}" class="btn btn-default">
+  Reload to check</a></p>
+
+{% elif scan.status == 'succeeded' %}
+<p>On <code>{{ scan.ansible_host }}</code>, run <code>show crypto key mypubkey rsa</code> or check
+<code>ssh-keygen -lf</code> from a host you trust:</p>
+<pre>{{ scan.key_type }}  {{ scan.fingerprint_sha256 }}</pre>
+{% if scan.consumed_at %}
+<p><em>This scan has already been used to confirm a pin.</em></p>
+{% elif scan.requested_by != current_user.id %}
+<p><em>Scanned by someone else &mdash; they need to confirm it.</em></p>
+{% else %}
+<form method="post" action="{{ url_for('hostkeys.confirm_hostkey') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+  <input type="hidden" name="scan_id" value="{{ scan.id }}"/>
+  <button type="submit" class="btn btn-primary">This matches the device &mdash; confirm it</button>
+</form>
+{% endif %}
+
+{% else %}
+<p>{{ scan.error_summary or 'The scan failed.' }}</p>
+<p><a href="{{ url_for('hostkeys.scan_hostkey') }}" class="btn btn-default">Try again</a></p>
+{% endif %}
+{% endblock %}

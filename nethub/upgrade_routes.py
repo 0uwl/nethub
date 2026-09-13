@@ -11,7 +11,7 @@ Thin over `nethub/upgrades.py`, the way `registry_routes.py` is over
   keyed by the phase job, and from there over §9.1's socket to the sibling.
   Not into a row, not into the session, not into a log.
 """
-import ipaddress
+from datetime import timedelta
 
 from flask import (
     Blueprint,
@@ -27,10 +27,12 @@ from flask_login import current_user, login_required
 from . import artifacts as artifact_store
 from . import upgrades
 from .credential_socket import CredentialError
-from .devices import connection
+from .devices.phases import _aware
 from .extensions import db
 from .models import (
     DeviceHostKey,
+    DeviceHostKeyAudit,
+    HostKeyScan,
     UpgradeHostPhaseResult,
     UpgradePhaseJob,
     UpgradeRun,
@@ -39,6 +41,13 @@ from .models import (
 
 upgrade_bp = Blueprint('upgrades', __name__)
 hostkeys_bp = Blueprint('hostkeys', __name__)
+
+#: How long a succeeded scan stays confirmable (WS-6.3). Not strictly
+#: required by the design, but cheap: without it a HostKeyScan row would stay
+#: "confirmable" forever, and a scan from days ago backing a confirmation of a
+#: device that has since changed hands on that address is exactly the kind of
+#: staleness a fresh scan is supposed to rule out.
+SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
 
 
 def _store():
@@ -64,38 +73,74 @@ def list_hostkeys():
 @hostkeys_bp.route('/hostkeys/scan', methods=['GET', 'POST'])
 @login_required
 def scan_hostkey():
-    """Fetch a fingerprint for a human to compare, out of band.
+    """Queue a scan for the sibling to run, and hand back a result page.
 
-    This spends no device credential -- the host key is exchanged before
-    authentication -- which is exactly what lets confirming an address be its
-    own action, decoupled from any run's submit or approval flow (§4.3).
-    Scanning stores nothing; only the confirm step below writes a row.
+    Scanning is device I/O, so it is dispatched to the sibling like a phase
+    job rather than run inline in this request (WS-6.2b) -- the same reason
+    Flask never opens a device session anywhere else. `check_target` folds in
+    WS-5.4's fix (the CIDR check `scan_hostkey` never had): a rejected address
+    never becomes a row, and never reaches the sibling at all.
     """
     address = request.form.get('address', '').strip()
-    scanned = None
     if request.method == 'POST':
         try:
-            ipaddress.ip_address(address)
-        except ValueError:
-            flash('Enter an IP literal -- a pin keyed on a name means nothing.')
-            return render_template('pages/hostkeys_scan.html', address=address)
-        try:
-            scanned = connection.scan_host_key(address)
-        except connection.DeviceConnectionError as exc:
+            address = upgrades.check_target(
+                address, current_app.config['DEVICE_TARGET_CIDRS']
+            )
+        except upgrades.RequestError as exc:
             flash(str(exc))
-    return render_template('pages/hostkeys_scan.html', address=address, scanned=scanned)
+            return render_template('pages/hostkeys_scan.html', address=address)
+        scan = HostKeyScan(ansible_host=address, requested_by=current_user.id)
+        db.session.add(scan)
+        db.session.commit()
+        return redirect(url_for('hostkeys.scan_result', scan_id=scan.id))
+    return render_template('pages/hostkeys_scan.html', address=address)
+
+
+@hostkeys_bp.route('/hostkeys/scan/<int:scan_id>')
+@login_required
+def scan_result(scan_id):
+    """Poll a queued scan's outcome. No client-side polling in this app
+    (WS-6.2b) -- reload to check, the same as everything else here."""
+    scan = db.session.get(HostKeyScan, scan_id)
+    if scan is None:
+        flash('No such scan.')
+        return redirect(url_for('hostkeys.scan_hostkey'))
+    return render_template('pages/hostkeys_scan_result.html', scan=scan)
 
 
 @hostkeys_bp.route('/hostkeys/confirm', methods=['POST'])
 @login_required
 def confirm_hostkey():
-    address = request.form.get('address', '').strip()
-    key_type = request.form.get('key_type', '').strip()
-    fingerprint = request.form.get('fingerprint', '').strip()
-    if not (address and key_type and fingerprint):
-        flash('Nothing to confirm.')
+    """Confirm a pin from a scan NetHub itself performed (WS-6.3).
+
+    `key_type`/`fingerprint_sha256`/`address` all come from the referenced
+    `HostKeyScan` row, never from the request body -- a POST here carries
+    only `scan_id`. Binding to `requested_by == current_user.id` is the
+    closest primitive alpha has to "the same session": there is no
+    server-side `sessions` row yet (§4.5, a known alpha deviation), so this
+    is "the same authenticated user" rather than literally the same session,
+    and it does not fully close the separation-of-duty gap -- the same
+    person can still scan and then confirm. The real fix is role-based
+    access control, out of scope for this alpha (see `alpha.md`).
+    """
+    raw_scan_id = request.form.get('scan_id', '')
+    scan = db.session.get(HostKeyScan, int(raw_scan_id)) if raw_scan_id.isdigit() else None
+    if scan is None or scan.status != 'succeeded' or scan.requested_by != current_user.id:
+        flash('No matching scan to confirm. Scan the address again.')
+        return redirect(url_for('hostkeys.scan_hostkey'))
+    if scan.consumed_at is not None:
+        # A succeeded scan confirms at most once -- the same one-shot pattern
+        # §4.1 uses for the provisioning allowlist. Without this, one scan
+        # could back two different confirmations later, reopening the gap
+        # this whole route exists to close.
+        flash('That scan has already been used to confirm a pin. Scan the address again.')
+        return redirect(url_for('hostkeys.scan_hostkey'))
+    if upgrades._utcnow() - _aware(scan.finished_at) > SCAN_CONFIRM_WINDOW:
+        flash('That scan is too old to confirm. Scan the address again.')
         return redirect(url_for('hostkeys.scan_hostkey'))
 
+    address, key_type, fingerprint = scan.ansible_host, scan.key_type, scan.fingerprint_sha256
     row = DeviceHostKey.query.filter_by(ansible_host=address).first()
     if row is None:
         row = DeviceHostKey(ansible_host=address, key_type=key_type,
@@ -113,6 +158,11 @@ def confirm_hostkey():
 
     row.confirmed_by = current_user.id
     row.confirmed_at = upgrades._utcnow()
+    scan.consumed_at = upgrades._utcnow()
+    db.session.add(DeviceHostKeyAudit(
+        ansible_host=address, action='confirmed', key_type=key_type,
+        fingerprint_sha256=fingerprint, actor_id=current_user.id,
+    ))
     db.session.commit()
     flash(f'Confirmed {address} ({key_type}).', 'success')
     return redirect(url_for('hostkeys.list_hostkeys'))
@@ -123,10 +173,35 @@ def confirm_hostkey():
 def delete_hostkey(key_id):
     row = db.session.get(DeviceHostKey, key_id)
     if row is not None:
+        # Captured before the delete, obviously, not after (WS-6.4) -- this
+        # is the pre-image the "deliberate friction" before re-accepting a
+        # changed key used to leave no evidence for.
+        db.session.add(DeviceHostKeyAudit(
+            ansible_host=row.ansible_host, action='deleted',
+            key_type=row.key_type, fingerprint_sha256=row.fingerprint_sha256,
+            actor_id=current_user.id,
+        ))
         db.session.delete(row)
         db.session.commit()
         flash(f'Removed the pin for {row.ansible_host}.', 'success')
     return redirect(url_for('hostkeys.list_hostkeys'))
+
+
+@hostkeys_bp.route('/hostkeys/history/<address>')
+@login_required
+def hostkey_history(address):
+    """The confirm/delete trail for one address (WS-6.4).
+
+    Keyed on the address string, not on `DeviceHostKey.id` -- the row this
+    history is about can be deleted and recreated, and the whole point of
+    `DeviceHostKeyAudit` is that it outlives that.
+    """
+    entries = (DeviceHostKeyAudit.query.filter_by(ansible_host=address)
+              .order_by(DeviceHostKeyAudit.at.desc()).all())
+    return render_template(
+        'pages/hostkey_history.html', address=address, entries=entries,
+        users={u.id: u.username for u in User.query.all()},
+    )
 
 
 # -- runs --------------------------------------------------------------------
