@@ -55,6 +55,18 @@ def create_app():
     def not_found_error(error):
         return render_template('errors/404.html'), 404
 
+    @app.errorhandler(413)
+    def too_large_error(error):
+        # MAX_CONTENT_LENGTH's default (~1.5 GB) is comfortably above a real
+        # IOS-XE image, so a real 413 is almost always a mistaken upload
+        # rather than a legitimately oversized one -- but Werkzeug's bare
+        # default error page doesn't say why the request failed or what the
+        # limit is, which reads as a broken upload rather than an explained
+        # refusal (WS-5.6).
+        return render_template(
+            'errors/413.html', max_bytes=app.config['MAX_CONTENT_LENGTH']
+        ), 413
+
     # Under gunicorn, hand Flask's logger gunicorn's own handlers so errors
     # go to stdout (captured by `podman logs`/journald) instead of a
     # relative-path error.log file -- that path doesn't exist, and wouldn't
