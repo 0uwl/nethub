@@ -302,3 +302,63 @@ class TestCredentialInterlock:
             store.hold(job.id, 'jsmith', PASSWORD,
                        approved_by=job.approved_by or user)
             assert store.release(job.id, self.verify(app)(job.id)) == ('jsmith', PASSWORD)
+
+
+class TestCancelDropsTheCredential:
+    """WS-2.1: `discard()` had no callers anywhere in nethub/ before this.
+
+    A cancelled job's credential will never be fetched, so without this it sat
+    in the gunicorn worker -- the one that also serves the only
+    unauthenticated route -- until its TTL or a process restart.
+    """
+
+    def login(self, client):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        return client
+
+    def test_cancelling_discards_a_queued_jobs_credential(
+        self, app, client, user, confirmed
+    ):
+        self.login(client)
+        resp = client.post('/upgrades/new', data={
+            'bundle': 'iosxe-17-12-06',
+            'hosts': 'sw01, 192.0.2.10', 'device_password': PASSWORD,
+        }, follow_redirects=True)
+        assert resp.status_code == 200
+
+        store = app.extensions['credential_store']
+        assert len(store) == 1, "submit holds pre-check's credential"
+
+        with app.app_context():
+            run = UpgradeRun.query.one()
+            run_id = run.id
+        client.post(f'/upgrades/{run_id}/cancel', follow_redirects=True)
+        assert len(store) == 0
+
+    def test_a_running_jobs_credential_is_left_alone(
+        self, app, client, user, confirmed
+    ):
+        """`release()` pops before validating, so a running job's entry is
+        already gone -- and discarding by run would be the keying mistake
+        §9.1 forbids. Only `queued` rows are swept.
+        """
+        from nethub.models import UpgradePhaseJob
+
+        self.login(client)
+        client.post('/upgrades/new', data={
+            'bundle': 'iosxe-17-12-06',
+            'hosts': 'sw01, 192.0.2.10', 'device_password': PASSWORD,
+        }, follow_redirects=True)
+
+        store = app.extensions['credential_store']
+        with app.app_context():
+            run = UpgradeRun.query.one()
+            run_id = run.id
+            job = UpgradePhaseJob.query.filter_by(run_id=run_id).one()
+            job.status = 'running'
+            db.session.commit()
+
+        client.post(f'/upgrades/{run_id}/cancel', follow_redirects=True)
+        # Untouched: the sibling may be mid-fetch, and release() is what
+        # consumes it.
+        assert len(store) == 1

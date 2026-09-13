@@ -163,7 +163,20 @@ def main(argv=None) -> int:
     _say('')
 
     pin = resolve_pin(args.host, args.fingerprint)
-    password = os.environ.get('NETHUB_DEVICE_PASSWORD') or getpass.getpass('Device password: ')
+    password = os.environ.get('NETHUB_DEVICE_PASSWORD')
+    if password:
+        # Kept because a scripted recovery needs it, but not silently. An env
+        # var sits in /proc/<pid>/environ for the whole run -- up to ~20
+        # minutes for `--phases all`, since activate alone is 605-622s -- is
+        # inherited by every child, and lands in shell history if set inline.
+        # CLAUDE.md's rule is that the device credential never reaches disk or
+        # a process argument, and this is the same class of exposure.
+        _say('WARNING: reading the device password from NETHUB_DEVICE_PASSWORD.')
+        _say('         It is readable in /proc/<pid>/environ for this whole run')
+        _say('         and inherited by every child process. Prefer the prompt.')
+        _say('')
+    else:
+        password = getpass.getpass('Device password: ')
     image = os.path.basename(args.image) if args.image else None
     search_dir = os.path.dirname(os.path.abspath(args.image)) if args.image else None
 
