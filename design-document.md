@@ -9,7 +9,7 @@
 > out-of-process/never-in-Flask discipline this document argues for. The
 > alpha's actual deviations from what follows — local username/password
 > auth instead of OIDC, no `sessions` table, no `settings`/`settings_audit`,
-> no roles — are tracked in `alpha.md`; `CLAUDE.md` is the authoritative
+> no roles — are tracked in `CLAUDE.md`, which is the authoritative
 > account of what exists today. Provisioning (day-0) remains entirely
 > unimplemented. Sections below describing unbuilt pieces (day-0, OIDC,
 > server-side sessions, the `settings` table, role-based access, a
@@ -3115,11 +3115,16 @@ with the session still up and only then reboots; the reload took
 228–238s against a 900s default deadline; `install remove inactive` took
 ~5s. Version comparison had to be normalised (`facts.same_version`) once
 a real device reported `17.12.8` for a target declared `17.12.08` — a
-naive string compare would have failed a *successful* upgrade. What
-remains untested is the pull adapter's prompt sequence (§4.3.1, §10) and
-a stage/activate/verify/cleanup sequence driven in one sitting starting
-from a pre-check kicked off through the web app rather than through
-`upgrade_cli.py` or a direct call into `nethub/devices/`.
+naive string compare would have failed a *successful* upgrade. The
+reload deadline has ample headroom at 228–238s against a 900s default;
+untested is whether a stack or a slower chassis eats into that margin,
+and whether a push over a genuinely constrained WAN link (as opposed to
+the lab's own link) moves the bottleneck somewhere this timing table
+doesn't cover. What remains untested beyond timing is the pull adapter's
+prompt sequence (§4.3.1, §10) and a stage/activate/verify/cleanup
+sequence driven in one sitting starting from a pre-check kicked off
+through the web app rather than through `upgrade_cli.py` or a direct
+call into `nethub/devices/`.
 
 ## 9. Deployment
 
@@ -3519,7 +3524,40 @@ the next attempt gets a credential.
   it should be settled the same way, by running it against a real device
   and recording the answer here. This is the one item from the pre-
   Netmiko design that outlived the rewrite unresolved. A wrong prompt
-  list does not fail fast: it hangs until the read timeout.
+  list does not fail fast: it hangs until the read timeout. Capture the
+  session with Netmiko's `session_log` **off** (hard rule, §4.3.1's
+  reasoning on why the pull adapter must never enable it) and replay it
+  offline rather than logging the live channel.
+- **Whether `_pull_sftp`'s unanchored `read_until_pattern(r"[>#]")` can
+  terminate mid-copy.** The pattern matches the first `>` or `#` anywhere
+  in the stream, and `copy sftp://…` is exactly the kind of long-running
+  device command that can emit a progress indicator before it actually
+  finishes. If IOS-XE's `copy` emits anything containing either character
+  while the transfer is still in progress, the adapter would return
+  early and `verify_sha512` would then hash a partial file rather than
+  failing loudly. This is answerable from the same real-device run the
+  prompt-sequence question above needs, not a separate one.
+- **Whether an IOS-XE upgrade can legitimately regenerate a device's SSH
+  host key.** This decides whether `wait_for_device()`'s reconnect loop
+  is right to leave `connection.HostKeyError` untouched by the
+  not-transient carve-out it already gives `AuthenticationError` (design
+  doc "Device layer" above, and the module notes in `nethub/devices/
+  install.py`). If a legitimate upgrade can rotate the host key, treating
+  a mismatch as non-transient during the exact window a device might do
+  that would turn a successful upgrade into a hard failure the operator
+  has no way to distinguish from an actual on-path attack. If it cannot,
+  the current caution is free to relax. Settled by asking the platform
+  question directly or by observing it across enough real upgrades, not
+  by guessing either way.
+- **Whether the credential socket needs a wall-clock bound in addition to
+  its per-operation ones (§9.2).** `settimeout` on the listening side is
+  per-`recv`/`send` call, not cumulative, so a peer that trickles one byte
+  every few seconds never trips any single read's timeout while
+  occupying the sibling's only dispatch loop for as long as it keeps
+  doing that — on the order of a full day before anything notices.
+  Bounding total elapsed time per connection (not just per operation)
+  closes it; worth doing before this channel is exposed to anything less
+  trusted than a same-host, same-uid peer.
 - **Whether to build a purpose-built transfer script instead of relying
   on deprecated Paramiko indefinitely.** The options tried so far are
   both unsatisfying: `libssh` doesn't work under either library binding,

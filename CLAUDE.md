@@ -30,9 +30,12 @@ whatever version `requirements.txt` actually resolves). It implements a
 first slice of the Software Lifecycle module: local username/password auth
 (everyone who can log in is an admin — no roles, no OIDC), admin-driven user
 creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
-`alpha.md` is that slice's plan and records its deliberate deviations from
-`design-document.md` — no `registry_jobs`/git-committed registry, and sessions
-are Flask-Login's signed cookie rather than a `sessions` row (§4.5).
+This file is now the sole record of that slice's deliberate deviations from
+`design-document.md` — no OIDC, no roles, and sessions are Flask-Login's
+signed cookie rather than a `sessions` row (§4.5) — superseding the earlier
+`alpha.md`/`HANDOFF.md`, both deleted once their content moved here and into
+`design-document.md` §10, since a completed planning/remediation doc left in
+the tree is exactly the stale-and-conflicting risk this file exists to avoid.
 
 **The login path is hardened but the mechanism has a schema cost worth
 knowing.** `nethub/auth.py` verifies a password on *every* attempt — an
@@ -253,7 +256,7 @@ The `ADMIN_USERNAME`/`ADMIN_PASSWORD`/credential priority order in
 var beats generated-and-printed — but does **not** carry over
 Drawbridge's forced-password-reset-on-first-login behavior for the
 env/generated tiers. That's not an oversight: this alpha's `User` model
-has no such field and no reset flow to force into (see `alpha.md`), so
+has no such field and no reset flow to force into, so
 replicating the label without the mechanism behind it would just be a
 UI claim nothing enforces. Don't add a `must_reset_password` column
 without building the flow that reads it.
@@ -1088,7 +1091,7 @@ procedure, and five things in it are load-bearing:
   and a device that comes back with AAA unreachable and falls back to a local
   database the submitter isn't in would trip a fleet-wide TACACS+/RADIUS
   lockout. `connection.HostKeyError` is deliberately **not** carved out the
-  same way yet — see design doc §10 / `HANDOFF.md` WS-7.3: whether an IOS-XE
+  same way yet — see design doc §10: whether an IOS-XE
   upgrade can legitimately regenerate a device's host key is an open hardware
   question, and re-raising here on an unverified assumption could turn a
   successful upgrade into a hard failure instead of a transient reconnect.
@@ -1490,8 +1493,7 @@ requested by `current_user`, and has not already backed a confirmation
 gap** — the same person can still scan and then confirm, since alpha has no
 roles — it only proves a confirmation corresponds to a key NetHub itself
 observed at some specific prior moment rather than to whatever a form
-claims. `alpha.md` records the residual gap; the real fix is role-based
-access control.
+claims. The real fix is role-based access control.
 
 **`confirm_hostkey`/`delete_hostkey` write a `device_host_key_audit` row
 (WS-6.4).** Neither used to leave any record of who acted or what the pin

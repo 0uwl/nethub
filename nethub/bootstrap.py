@@ -19,7 +19,7 @@ def _initial_admin_password():
     2. ADMIN_PASSWORD, a plaintext env var -- has to persist at rest
        somewhere (a Quadlet unit, a .env file) to survive restarts.
     3. A freshly generated random password, printed once. There's no
-       forced-password-reset mechanism in this alpha (see alpha.md), unlike
+       forced-password-reset mechanism in this alpha (see CLAUDE.md), unlike
        Drawbridge's equivalent -- whatever password is set here is the one
        that stays live until someone changes it.
     """
@@ -39,7 +39,7 @@ def _initial_admin_password():
 def bootstrap_admin():
     """Create the first login user if the database has none yet. Everyone
     who can log in is an admin in this alpha -- there are no roles to pick
-    between (see alpha.md).
+    between (see CLAUDE.md).
     """
     if User.query.count() > 0:
         return

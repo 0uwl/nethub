@@ -122,7 +122,7 @@ def confirm_hostkey():
     is "the same authenticated user" rather than literally the same session,
     and it does not fully close the separation-of-duty gap -- the same
     person can still scan and then confirm. The real fix is role-based
-    access control, out of scope for this alpha (see `alpha.md`).
+    access control, out of scope for this alpha (see `CLAUDE.md`).
     """
     raw_scan_id = request.form.get('scan_id', '')
     scan = db.session.get(HostKeyScan, int(raw_scan_id)) if raw_scan_id.isdigit() else None
