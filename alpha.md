@@ -302,6 +302,19 @@ what alpha skipped and why it's safe to skip *for now*:
   yet), but the general principle — don't add durable-write-per-request
   on a path an attacker controls — doesn't bite here either, since
   every route requires a session.
+- **Confirming a host-key pin has no separation of duty from submitting a
+  run against it (WS-6.3).** §4.3 rests its "a submitter cannot be handed a
+  colleague's AAA credential" property on confirmation being a genuinely
+  separate admin action. `confirm_hostkey` now binds a confirmation to a
+  `HostKeyScan` row NetHub itself performed, so a confirmation provably
+  corresponds to a key NetHub actually observed at that address — but it
+  binds to "the same authenticated user who requested the scan" rather than
+  to a distinct approver, because alpha has no roles and no `sessions` row
+  (§4.5) to check a second identity against. Everyone who can log in is an
+  admin, so the same web-only login can scan, confirm, and later approve a
+  run against the address it just pinned. The real fix is role-based access
+  control (§4.4) — a submitter and a confirmer as distinct capabilities —
+  which is out of scope for this alpha.
 
 ## Rough build order
 

@@ -237,6 +237,85 @@ class DeviceHostKey(db.Model):
         return self.confirmed_at is not None
 
 
+#: `HostKeyScan.status` -- a deliberately smaller subset of `JOB_STATUSES`
+#: (WS-6.2b). A scan has no approval gate and nothing to time out against
+#: beyond `connection.CONNECT_TIMEOUT`, so `cancelled`/`expired`/`timed_out`
+#: don't apply the way they do to a phase job.
+HOSTKEY_SCAN_STATUSES = ('queued', 'running', 'succeeded', 'failed', 'abandoned')
+
+#: `DeviceHostKeyAudit.action` (WS-6.4).
+HOSTKEY_AUDIT_ACTIONS = ('confirmed', 'deleted')
+
+
+class HostKeyScan(db.Model):
+    """One scan of an address's host key, dispatched to the sibling (WS-6.2b).
+
+    Scanning is device I/O -- a TCP connect and an SSH key exchange -- so it
+    belongs in the process that does all other device I/O; §3.2's argument
+    against blocking Flask applies to any blocking device call, not only
+    phase executions. It needs no device credential (the key is exchanged
+    before authentication), so it never touches §9.1's credential socket --
+    it is dispatched like a phase job, just simpler: no state machine, no
+    approval gate, no per-host loop.
+
+    `ansible_host` is a plain string, not a foreign key to `DeviceHostKey` --
+    this row's lifecycle is independent of whatever pin exists (or does not)
+    at that address, and `confirm_hostkey` (WS-6.3) has to bind against a
+    scan even when no `DeviceHostKey` row exists there yet.
+    """
+
+    __tablename__ = 'host_key_scans'
+
+    id = db.Column(db.Integer, primary_key=True)
+    ansible_host = db.Column(db.String(64), nullable=False)
+    requested_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    status = db.Column(_enum(HOSTKEY_SCAN_STATUSES, 'hostkey_scan_status'),
+                       nullable=False, default='queued')
+    key_type = db.Column(db.String(32))
+    fingerprint_sha256 = db.Column(db.String(64))
+    error_summary = db.Column(db.String(500))
+
+    #: The queue has nothing else to order by -- `started_at` is null until
+    #: claimed, mirroring `UpgradePhaseJob` (§5).
+    created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+
+    #: Same reason `UpgradePhaseJob` has one: lets `sweep()` abandon a scan
+    #: stranded by a dead sibling instance, via the same NULL-safe predicate
+    #: WS-3.4 fixed for phase jobs.
+    runner_instance_id = db.Column(db.String(36))
+
+    #: Set once this scan has backed a confirmation (WS-6.3). A succeeded scan
+    #: may confirm at most once, the same one-shot pattern §4.1 uses for the
+    #: provisioning allowlist -- without it, one scan could back two different
+    #: confirmations later, reopening the gap WS-6.3 exists to close.
+    consumed_at = db.Column(db.DateTime)
+
+
+class DeviceHostKeyAudit(db.Model):
+    """Who confirmed or deleted a pin, and what it was pinned to (WS-6.4).
+
+    `ansible_host` is a plain string, **not** a foreign key to
+    `device_host_keys.id` -- the whole point of this table is that it
+    outlives a deleted row (no cascade to break, nothing to restore). The
+    `key_type`/`fingerprint_sha256` pair is the pre-image: the value being
+    recorded, for `confirmed`, or removed, for `deleted` -- the part that
+    actually answers "what was this pinned to before".
+    """
+
+    __tablename__ = 'device_host_key_audit'
+
+    id = db.Column(db.Integer, primary_key=True)
+    ansible_host = db.Column(db.String(64), nullable=False)
+    action = db.Column(_enum(HOSTKEY_AUDIT_ACTIONS, 'hostkey_audit_action'), nullable=False)
+    key_type = db.Column(db.String(32), nullable=False)
+    fingerprint_sha256 = db.Column(db.String(64), nullable=False)
+    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+
+
 class UpgradeRun(db.Model):
     """One upgrade dispatch: a bundle across a set of devices (§8.1)."""
 

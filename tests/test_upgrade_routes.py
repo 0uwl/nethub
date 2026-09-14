@@ -6,13 +6,21 @@ and the confirmed host key -- and where the credential is taken without ever
 being stored.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from nethub import upgrades
 from nethub.extensions import db
-from nethub.models import Artifact, DeviceHostKey, UpgradePhaseJob, UpgradeRun, User
+from nethub.models import (
+    Artifact,
+    DeviceHostKey,
+    DeviceHostKeyAudit,
+    HostKeyScan,
+    UpgradePhaseJob,
+    UpgradeRun,
+    User,
+)
 
 NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
 DIGEST = "a" * 128
@@ -481,3 +489,192 @@ class TestCancelDropsTheCredential:
         # Untouched: the sibling may be mid-fetch, and release() is what
         # consumes it.
         assert len(store) == 1
+
+
+class TestHostkeyScanDispatch:
+    """WS-6.2b: scanning is dispatched to the sibling, not run inline."""
+
+    def login(self, client):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        return client
+
+    def test_a_valid_address_queues_a_scan_without_blocking(self, app, client, user, monkeypatch):
+        from nethub.devices import connection
+
+        def hang(*a, **kw):
+            raise AssertionError('scan_hostkey must not call scan_host_key inline')
+        monkeypatch.setattr(connection, 'scan_host_key', hang)
+
+        self.login(client)
+        resp = client.post('/hostkeys/scan', data={'address': '192.0.2.10'})
+        assert resp.status_code == 302
+        with app.app_context():
+            scan = HostKeyScan.query.one()
+            assert scan.status == 'queued'
+            assert scan.ansible_host == '192.0.2.10'
+            assert scan.requested_by == user
+
+    def test_an_address_outside_the_cidr_is_refused(self, app, client, user):
+        self.login(client)
+        resp = client.post('/hostkeys/scan', data={'address': '198.51.100.7'},
+                           follow_redirects=True)
+        assert b'outside the configured' in resp.data
+        with app.app_context():
+            assert HostKeyScan.query.count() == 0
+
+    def test_a_hostname_is_refused(self, app, client, user):
+        self.login(client)
+        resp = client.post('/hostkeys/scan', data={'address': 'sw01.example.net'},
+                           follow_redirects=True)
+        assert b'not an IP literal' in resp.data
+        with app.app_context():
+            assert HostKeyScan.query.count() == 0
+
+
+class TestConfirmHostkeyBinding:
+    """WS-6.3: confirm_hostkey binds to a HostKeyScan NetHub itself produced,
+    rather than trusting whatever a form claims.
+    """
+
+    def login(self, client):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        return client
+
+    def make_scan(self, app, *, requested_by, status='succeeded',
+                  ansible_host='192.0.2.10', key_type='ssh-rsa',
+                  fingerprint='SHA256:x', finished_at=None, consumed_at=None):
+        with app.app_context():
+            scan = HostKeyScan(
+                ansible_host=ansible_host, requested_by=requested_by, status=status,
+                key_type=key_type if status == 'succeeded' else None,
+                fingerprint_sha256=fingerprint if status == 'succeeded' else None,
+                finished_at=finished_at or upgrades._utcnow(), consumed_at=consumed_at,
+            )
+            db.session.add(scan)
+            db.session.commit()
+            return scan.id
+
+    def test_confirming_a_succeeded_scan_pins_the_address(self, app, client, user):
+        scan_id = self.make_scan(app, requested_by=user)
+        self.login(client)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'Confirmed' in resp.data
+        with app.app_context():
+            row = DeviceHostKey.query.filter_by(ansible_host='192.0.2.10').one()
+            assert row.is_confirmed
+            assert row.key_type == 'ssh-rsa'
+            assert row.fingerprint_sha256 == 'SHA256:x'
+
+    def test_a_scan_belonging_to_a_different_user_is_refused(self, app, client, user):
+        with app.app_context():
+            other = User(username='bob', device_username='bob')
+            other.set_password('bob-long-enough-pw')
+            db.session.add(other)
+            db.session.commit()
+            other_id = other.id
+        scan_id = self.make_scan(app, requested_by=other_id)
+        self.login(client)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'No matching scan' in resp.data
+        with app.app_context():
+            assert DeviceHostKey.query.count() == 0
+
+    def test_a_queued_scan_cannot_confirm(self, app, client, user):
+        scan_id = self.make_scan(app, requested_by=user, status='queued')
+        self.login(client)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'No matching scan' in resp.data
+
+    def test_a_failed_scan_cannot_confirm(self, app, client, user):
+        scan_id = self.make_scan(app, requested_by=user, status='failed')
+        self.login(client)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'No matching scan' in resp.data
+
+    def test_an_already_consumed_scan_cannot_confirm_twice(self, app, client, user):
+        """A succeeded scan confirms at most once -- the same one-shot
+        pattern §4.1 uses for the provisioning allowlist."""
+        scan_id = self.make_scan(app, requested_by=user)
+        self.login(client)
+        client.post('/hostkeys/confirm', data={'scan_id': scan_id}, follow_redirects=True)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'already been used' in resp.data
+        with app.app_context():
+            assert db.session.get(HostKeyScan, scan_id).consumed_at is not None
+
+    def test_a_stale_scan_outside_the_freshness_window_is_refused(self, app, client, user):
+        old = upgrades._utcnow() - timedelta(minutes=20)
+        scan_id = self.make_scan(app, requested_by=user, finished_at=old)
+        self.login(client)
+        resp = client.post('/hostkeys/confirm', data={'scan_id': scan_id},
+                           follow_redirects=True)
+        assert b'too old' in resp.data
+
+    def test_confirm_ignores_extra_fields_in_the_post_body(self, app, client, user):
+        """key_type/fingerprint/address come from the HostKeyScan row, never
+        from whatever else a POST body might carry alongside scan_id."""
+        scan_id = self.make_scan(app, requested_by=user, key_type='ssh-rsa',
+                                 fingerprint='SHA256:real')
+        self.login(client)
+        client.post('/hostkeys/confirm', data={
+            'scan_id': scan_id, 'key_type': 'ssh-ed25519', 'fingerprint': 'SHA256:fake',
+            'address': '198.51.100.7',
+        }, follow_redirects=True)
+        with app.app_context():
+            row = DeviceHostKey.query.filter_by(ansible_host='192.0.2.10').one()
+            assert row.key_type == 'ssh-rsa'
+            assert row.fingerprint_sha256 == 'SHA256:real'
+
+
+class TestHostkeyAudit:
+    """WS-6.4: confirm/delete leave an audit row with the pre-image."""
+
+    def login(self, client):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        return client
+
+    def test_deleting_a_pin_leaves_an_audit_row_with_the_pre_delete_fingerprint(
+        self, app, client, user, confirmed
+    ):
+        self.login(client)
+        with app.app_context():
+            key_id = DeviceHostKey.query.filter_by(ansible_host='192.0.2.10').one().id
+        client.post(f'/hostkeys/{key_id}/delete', follow_redirects=True)
+        with app.app_context():
+            entry = DeviceHostKeyAudit.query.filter_by(ansible_host='192.0.2.10').one()
+            assert entry.action == 'deleted'
+            assert entry.fingerprint_sha256 == 'SHA256:x'
+            assert entry.actor_id == user
+
+    def test_confirming_leaves_an_audit_row_with_the_new_fingerprint(self, app, client, user):
+        with app.app_context():
+            scan = HostKeyScan(ansible_host='192.0.2.10', requested_by=user,
+                               status='succeeded', key_type='ssh-rsa',
+                               fingerprint_sha256='SHA256:new',
+                               finished_at=upgrades._utcnow())
+            db.session.add(scan)
+            db.session.commit()
+            scan_id = scan.id
+        self.login(client)
+        client.post('/hostkeys/confirm', data={'scan_id': scan_id}, follow_redirects=True)
+        with app.app_context():
+            entry = DeviceHostKeyAudit.query.filter_by(
+                ansible_host='192.0.2.10', action='confirmed'
+            ).one()
+            assert entry.fingerprint_sha256 == 'SHA256:new'
+
+    def test_the_audit_row_survives_the_pins_deletion(self, app, client, user, confirmed):
+        self.login(client)
+        with app.app_context():
+            key_id = DeviceHostKey.query.one().id
+        client.post(f'/hostkeys/{key_id}/delete', follow_redirects=True)
+        with app.app_context():
+            assert DeviceHostKey.query.count() == 0
+            assert DeviceHostKeyAudit.query.filter_by(
+                ansible_host='192.0.2.10'
+            ).count() == 1

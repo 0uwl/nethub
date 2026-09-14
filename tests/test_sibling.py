@@ -12,10 +12,11 @@ import pytest
 
 from nethub import sibling as S
 from nethub.credential_socket import CredentialError
-from nethub.devices import phases, transfer
+from nethub.devices import connection, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
     DeviceHostKey,
+    HostKeyScan,
     UpgradePhaseJob,
     UpgradeRun,
     UpgradeRunHost,
@@ -460,3 +461,99 @@ class TestSweepPredicate:
             db.session.commit()
             assert make_sibling().sweep() == 1
             assert db.session.get(UpgradePhaseJob, job.id).status == "abandoned"
+
+
+class TestHostKeyScanDispatch:
+    """WS-6.2b: a scan is dispatched like a phase job, but simpler -- no
+    credential, no PhaseContext, no gate, no state machine beyond
+    queued/running/succeeded/failed/abandoned.
+    """
+
+    @pytest.fixture
+    def scan_user(self, app):
+        with app.app_context():
+            u = User(username="alice")
+            u.set_password("hunter2")
+            db.session.add(u)
+            db.session.commit()
+            yield u.id
+
+    def queue_scan(self, requested_by, status="queued", **kw):
+        scan = HostKeyScan(ansible_host="192.0.2.10", requested_by=requested_by,
+                           status=status, created_at=NOW, **kw)
+        db.session.add(scan)
+        db.session.commit()
+        return scan
+
+    def test_next_queued_scan_is_fifo(self, app, scan_user):
+        with app.app_context():
+            older = self.queue_scan(scan_user)
+            newer = self.queue_scan(scan_user)
+            newer.created_at = NOW + timedelta(minutes=5)
+            db.session.commit()
+            assert make_sibling().next_queued_scan().id == older.id
+
+    def test_only_one_sibling_wins_a_scan(self, app, scan_user):
+        with app.app_context():
+            scan = self.queue_scan(scan_user)
+            first, second = make_sibling(), make_sibling()
+            assert first.claim_scan(scan.id) is True
+            assert second.claim_scan(scan.id) is False, "a read-then-write would double-claim"
+            assert db.session.get(HostKeyScan, scan.id).runner_instance_id == \
+                first.runner_instance_id
+
+    def test_run_scan_once_returns_none_when_the_queue_is_empty(self, app):
+        with app.app_context():
+            assert make_sibling().run_scan_once() is None
+
+    def test_run_scan_once_records_a_successful_scan(self, app, scan_user, monkeypatch):
+        with app.app_context():
+            scan_id = self.queue_scan(scan_user).id
+        monkeypatch.setattr(
+            connection, "scan_host_key",
+            lambda host, **kw: connection.HostKey("ssh-rsa", "SHA256:real"))
+        worker = make_sibling()
+        with app.app_context():
+            assert worker.run_scan_once() == "succeeded"
+            row = db.session.get(HostKeyScan, scan_id)
+            assert row.status == "succeeded"
+            assert row.key_type == "ssh-rsa"
+            assert row.fingerprint_sha256 == "SHA256:real"
+            assert row.finished_at is not None
+
+    def test_run_scan_once_records_a_failure_without_the_library_text(
+        self, app, scan_user, monkeypatch
+    ):
+        with app.app_context():
+            scan_id = self.queue_scan(scan_user).id
+
+        def boom(host, **kw):
+            raise connection.DeviceConnectionError(
+                "could not reach 192.0.2.10:22: secret=hunter2",
+                summary="could not reach 192.0.2.10:22",
+            )
+        monkeypatch.setattr(connection, "scan_host_key", boom)
+        worker = make_sibling()
+        with app.app_context():
+            assert worker.run_scan_once() == "failed"
+            row = db.session.get(HostKeyScan, scan_id)
+            assert row.status == "failed"
+            assert row.error_summary == "could not reach 192.0.2.10:22"
+            assert "hunter2" not in row.error_summary
+
+    def test_a_stale_running_scan_is_abandoned_by_sweep(self, app, scan_user):
+        with app.app_context():
+            scan = self.queue_scan(scan_user, status="running",
+                                   runner_instance_id="a-dead-instance")
+            make_sibling().sweep()
+            row = db.session.get(HostKeyScan, scan.id)
+            assert row.status == "abandoned"
+            assert row.finished_at is not None
+
+    def test_our_own_running_scan_is_left_alone_by_sweep(self, app, scan_user):
+        with app.app_context():
+            worker = make_sibling()
+            scan = self.queue_scan(scan_user, status="running",
+                                   runner_instance_id=worker.runner_instance_id)
+            worker.sweep()
+            assert db.session.get(HostKeyScan, scan.id).status == "running"

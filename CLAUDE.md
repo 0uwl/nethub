@@ -984,7 +984,11 @@ undo by accident:
   `scan_host_key()` is the separate admin confirmation action — key exchange
   only, so it spends no device credential — and it deliberately **writes
   nothing**, because persisting what it fetched would rebuild the silent pin
-  §4.3 exists to refuse.
+  §4.3 exists to refuse. It is called from the sibling now, not from Flask
+  (WS-6.2b) — it is device I/O like everything else this module does, so it
+  moved to the process that does all other device I/O rather than blocking a
+  Flask request. `connection.py` itself is unchanged either way; only the
+  caller moved.
 - **The client loads no host keys from disk, and that is the mechanism.**
   Paramiko consults a missing-host-key policy only for a host it has no loaded
   key for, so `_build_ssh_client` loads none: every connection reaches our
@@ -1127,6 +1131,21 @@ The schema is in `nethub/models.py` — `device_host_keys`, `upgrade_runs`,
 the EE is gone: there is no `private_data_dir`, and `playbook_log_path` is
 `log_path`. `upgrade_run_hosts.artifact_id` is a bare integer, not a foreign
 key — there is no `artifacts` table until step 7.
+
+**Two more tables joined the schema for WS-6.2b/6.3/6.4, and neither is a
+job table in §7.3's sense.** `host_key_scans` is a scan dispatched to the
+sibling exactly like a phase job — same conditional-claim shape, same FIFO
+queue, same NULL-safe sweep predicate — but with a deliberately smaller
+status vocabulary (`HOSTKEY_SCAN_STATUSES`: `queued`/`running`/`succeeded`/
+`failed`/`abandoned`, no `cancelled`/`expired`/`timed_out`): a scan has no
+approval gate and nothing to time out against beyond
+`connection.CONNECT_TIMEOUT`. Its `consumed_at` column is what makes a
+succeeded scan confirm at most once (see "Upgrade routes" below).
+`device_host_key_audit` is unrelated to dispatch — a plain append-only log
+of `confirmed`/`deleted` events, keyed on the address string rather than a
+foreign key to `device_host_keys.id` specifically so it outlives a deleted
+pin. Don't add either kind of relationship to the other table by accident:
+a scan is not a job, and an audit row is not a pin.
 
 **Two constraints were silently absent and are easy to lose again.**
 
@@ -1419,7 +1438,8 @@ Things that are refusals rather than validation niceties:
   keyed on a string whose meaning can change afterwards (§4.3).
 - **An address with no *confirmed* `device_host_keys` row cannot be
   submitted**, and a row that exists but is unconfirmed counts as absent.
-  Scanning writes nothing; only the confirm step does.
+  Scanning writes a `host_key_scans` row (WS-6.2b — see below); only the
+  confirm step writes a `device_host_keys` row.
 - **Re-confirming a *changed* key is refused** on the confirm route — it is
   indistinguishable from the attack the pin exists to catch, so an admin has
   to delete the pin first. That friction is the point.
@@ -1447,6 +1467,46 @@ sees the approver's username while the run row records the submitter's, which
 breaks the attribution §4.3 is built for. Closing it means either restricting
 approval to the submitter or recording the device username per phase; both
 are design decisions rather than fixes.
+
+**Host-key scanning is dispatched to the sibling, and confirming is bound to
+a scan NetHub itself performed (WS-6.2b/6.3).** `scan_hostkey` (POST) used
+to call `connection.scan_host_key()` inline in the request handler — the one
+place in the tree still doing blocking device I/O in Flask, and with no
+`DEVICE_TARGET_CIDRS` check either. It now validates the address through the
+same `upgrades.check_target()` the submit path uses, inserts a `queued`
+`host_key_scans` row, and redirects to `GET /hostkeys/scan/<id>` — a plain
+"reload to check" result page, since this app has no client-side polling
+anywhere else. The sibling's dispatch loop checks for a queued scan *before*
+a queued phase job on every iteration (`sibling.py`'s `main()`): an admin
+watching a confirm screen shouldn't queue behind a phase job that might be a
+15-minute stage already in flight. `confirm_hostkey` takes a `scan_id`
+rather than raw `key_type`/`fingerprint_sha256` form fields — those two, and
+the address, now come from the referenced `host_key_scans` row, never from
+the request body, and the route refuses unless the scan `succeeded`, was
+requested by `current_user`, and has not already backed a confirmation
+(`consumed_at`, a one-shot flag mirroring §4.1's allowlist pattern) — plus a
+15-minute freshness window past the scan's `finished_at`
+(`SCAN_CONFIRM_WINDOW`). **This does not fully close §4.3's separation-of-duty
+gap** — the same person can still scan and then confirm, since alpha has no
+roles — it only proves a confirmation corresponds to a key NetHub itself
+observed at some specific prior moment rather than to whatever a form
+claims. `alpha.md` records the residual gap; the real fix is role-based
+access control.
+
+**`confirm_hostkey`/`delete_hostkey` write a `device_host_key_audit` row
+(WS-6.4).** Neither used to leave any record of who acted or what the pin
+was before the action — `delete_hostkey` was the sharper gap, since it is
+the "deliberate friction" step before a *changed* key can be re-accepted,
+and left zero evidence. The audit row is written with the **pre-image**:
+the fingerprint being removed, for a delete, or newly confirmed, for a
+confirm, captured before the mutation. There is no "changed" action —
+`confirm_hostkey`'s existing guard already refuses to overwrite a confirmed
+row in place, so the only way to change a pinned key is delete-then-
+reconfirm, which is a `deleted` row followed by a fresh `confirmed` one.
+`GET /hostkeys/history/<address>` shows it, linked from the host-keys list
+page; note it's keyed on the address string and reachable only for
+addresses currently listed there, so a fully-deleted address's history has
+no link pointing at it today.
 
 **Operational note:** an `AF_UNIX` path is capped near 108 bytes. The socket
 path the Quadlet mount produces has to stay under it, and the failure is an
