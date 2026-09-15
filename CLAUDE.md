@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**The Ansible-to-Netmiko migration is most of the way done.** `netmiko.md`
-is the handoff document: a numbered build order, of which **steps 1–6 are
-complete** — the migration is finished. Its supersession table is now a record of edits
-already applied to this file rather than a list of pending ones — read the
-hard rules below directly. The device layer is validated end-to-end against
-real hardware (two live upgrades, plus a live pre-check driven through the
-Flask app); step 6 deleted `ansible/` entirely, so there is only one layer in
-the tree now. The one thing not yet done on the day-2 path is a full
-app-driven run past pre-check — stage/activate/verify/cleanup are each
-hardware-validated through the device layer, but not yet in one run started
-from the UI.
+**The Ansible-to-Netmiko migration is finished.** Device work is ordinary
+Python driving Netmiko in `nethub/devices/`; `ansible/` is gone entirely,
+along with every trace of `ansible-runner`, the EE, and the rendered
+inventory it used. The device layer is validated end-to-end against real
+hardware (two live upgrades, plus a live pre-check driven through the
+Flask app), so there is only one layer in the tree now, and it has been
+exercised, not just written. The one thing not yet done on the day-2 path
+is a full app-driven run past pre-check — stage/activate/verify/cleanup
+are each hardware-validated through the device layer, but not yet in one
+run started from the UI. The migration's own handoff document
+(`netmiko.md`) is gone too, once its build order and reasoning had all
+either landed in code or been folded into this file and
+`design-document.md` — read the hard rules below directly rather than
+looking for a supersession table.
 
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
 package, built as an application factory (`nethub.create_app()`) rather
@@ -879,8 +882,8 @@ seems to require one, the design is what needs revisiting, not the rule.
 
 ## Device layer (`nethub/devices/`)
 
-Ordinary Python driving Netmiko. This replaced `ansible/`, which build step
-6 deleted (`netmiko.md`). The five modules:
+Ordinary Python driving Netmiko. This replaced `ansible/`, which the
+migration deleted outright. The five modules:
 
 - `facts.py` — `show version`, `dir` and `show privilege`, parsed with
   ntc-templates where a template exists.
@@ -910,8 +913,9 @@ open item.
 **`install.py` is fully validated too, including the reload.** A round trip
 was run on the lab switch — 17.12.6 → 17.12.08 → 17.12.6, both directions
 through `stage_image` → `activate` → `wait_for_device` → `verify_upgrade` →
-`cleanup`. That also closes `netmiko.md` build step 1, which had asked for
-the reconnect loop to be spiked against real hardware and never was.
+`cleanup`. That also validates the reconnect loop against real hardware for
+the first time — a spike the original migration plan called for and never
+carried out before the code was written.
 
 Timings, consistent across both runs and worth planning against:
 
@@ -1520,8 +1524,8 @@ path the Quadlet mount produces has to stay under it, and the failure is an
 Build step 8, and it exists to pay back a cost the migration knowingly
 incurred: the playbooks it replaced were deliberately standalone, so an
 operator could run them by hand against a fleet with nothing else running.
-Folding device work into `nethub/devices/` took that away, and `netmiko.md`
-recorded the loss as accepted rather than unnoticed.
+Folding device work into `nethub/devices/` took that away — an accepted
+loss, not an unnoticed one.
 
 It needs **no Flask app, no sibling, no credential socket and no job rows**,
 because `nethub/devices/` never depended on any of them. That is why this is a
