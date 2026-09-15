@@ -36,10 +36,9 @@ hardware (a Catalyst 9200CX on IOS-XE 17.12.06, including two live
 upgrades); a full run driven end-to-end from the UI has not been done
 yet.
 
-See [alpha.md](alpha.md) for that slice's exact scope and its deliberate
-deviations from the design below, and [HANDOFF.md](HANDOFF.md) for the
-open remediation work. The full target architecture — data model,
-security model, failure/concurrency semantics — is written up in
+See [CLAUDE.md](CLAUDE.md) for that slice's exact scope and its deliberate
+deviations from the design below. The full target architecture — data
+model, security model, failure/concurrency semantics — is written up in
 [design-document.md](design-document.md). Treat that document as the
 design target, not a description of current code.
 
@@ -175,8 +174,6 @@ before being merged.
 
 - [design-document.md](design-document.md) — full architecture, security
   model, data model, and open questions.
-- [HANDOFF.md](HANDOFF.md) — the open remediation work from a four-lane
-  review of the Netmiko migration, with the reasoning behind each item.
 - [CLAUDE.md](CLAUDE.md) — the settled decisions, and the list of things
   that deliberately must not be built.
 - [LICENSE](LICENSE)

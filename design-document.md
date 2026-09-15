@@ -1,8 +1,21 @@
 # NetHub — Design Document
 
-> NOTE: NetHub is in active development, expect nothing to work as expected for now. Features mentioned in
-this document might or might not be actually implemented yet. A roadmap will be developed as soon as
-the core architecture has been properly established and a scope has been defined.
+> NOTE: This document is the target architecture, not a description of
+> current code. The Software Lifecycle module's device-facing half (day-2:
+> onboarding images, publishing, and driving upgrades) is implemented —
+> `nethub/devices/` drives real hardware over Netmiko, replacing the
+> Ansible/EE design this document originally specified for that half, and
+> `nethub/sibling.py` replaces `ansible-runner` dispatch with the same
+> out-of-process/never-in-Flask discipline this document argues for. The
+> alpha's actual deviations from what follows — local username/password
+> auth instead of OIDC, no `sessions` table, no `settings`/`settings_audit`,
+> no roles — are tracked in `CLAUDE.md`, which is the authoritative
+> account of what exists today. Provisioning (day-0) remains entirely
+> unimplemented. Sections below describing unbuilt pieces (day-0, OIDC,
+> server-side sessions, the `settings` table, role-based access, a
+> git-committed registry) are kept as forward-looking design, argued at
+> the same level of detail as the parts that now exist — verify against
+> `CLAUDE.md` before assuming any specific claim below is already true.
 
 *NetHub is a new, standalone project which extends my previous project [Drawbridge](https://github.com/0uwl/drawbridge).
 It takes architectural lessons and components from both the existing
@@ -19,9 +32,9 @@ system:
 - **Provisioning** (day-0): a new device phones home, is checked
   against a serial allowlist, and receives its initial config/image.
 - **Software Lifecycle** (day-2): onboarding new IOS-XE software
-  images into the `software_registry` group_vars structure, publishing them
-  into NetHub's own store, and triggering fleet upgrades via Ansible,
-  all through the same admin UI and backend.
+  images into NetHub's own artifact store, publishing them, and
+  triggering fleet upgrades by driving each device directly over
+  Netmiko, all through the same admin UI and backend.
 
 One Flask backend, one database, one admin frontend, one deployment
 unit. The device-facing provisioning endpoint is the only
@@ -46,11 +59,11 @@ effectiveness at provisioning and upgrading their inventory.
 
 **Non-goals**
 - Not a general job scheduler / orchestration platform (not an AWX/AAP
-  replacement). NetHub dispatches a closed set of curated playbooks
-  against an inventory it renders itself. It does not run user-supplied
-  playbooks or accept user-supplied inventories, so the set of things it
-  can do to a device is fixed at build time rather than at submit time
-  (§8.1).
+  replacement). NetHub dispatches a closed set of code it ships in
+  `nethub/devices/` against a request it validates and compiles itself.
+  It does not run user-supplied playbooks or scripts and does not accept
+  user-supplied inventories, so the set of things it can do to a device
+  is fixed at build time rather than at submit time (§8.1).
 - Not an inventory management system. Device/serial data is retained
   only as long as operationally needed (allowlist, bounded provisioning
   log, job audit trail), not as a persistent asset database. One
@@ -63,8 +76,6 @@ effectiveness at provisioning and upgrading their inventory.
   inventory in any useful sense: it records that a key was seen at an
   address, answers no operational question about the fleet, and is never
   rolled up into a per-device view (§7.4).
-- Does not perform the device upgrade's actual command sequence itself;
-  that logic stays in the existing Ansible playbook.
 - No image transformation/repackaging.
 - **Not a distributed content-delivery system.** NetHub is the sole
   source of day-2 image bytes (§3.3, §3.4); there is no support for
@@ -83,10 +94,12 @@ effectiveness at provisioning and upgrading their inventory.
 
 Only Cisco IOS-XE is supported initially. The Software Lifecycle module
 carries an explicit `platform` field through its schema and job model
-(even with one valid value today) and selects its upgrade playbook per
-platform, so a second platform is an addition rather than a rework.
-Publishing no longer varies by platform at all — with NetHub owning the
-store (§3.3) it is a local file operation, and a file is a file.
+(even with one valid value today), so a second platform is an addition to
+`nethub/devices/` — new facts-parsing, transfer, and install modules
+selected by that field — rather than a rework of the schema or the phase
+model around it. Publishing does not vary by platform at all — with
+NetHub owning the store (§3.3) it is a local file operation, and a file is
+a file.
 
 Things a second platform inherits, worth checking early: §4.3.1's push
 transport assumes the device can run a temporary file-transfer server
@@ -124,9 +137,10 @@ One Flask service, organized as two logical modules:
 - **Provisioning module**: phone-home endpoint, allowlist checks,
   DHCP integration, provisioning log.
 - **Software Lifecycle module**: upload handling and SHA-512
-  verification, bundle-key validation, per-job Ansible EE invocation via
-  `ansible-runner`, registry file update under a lock, job audit
-  logging.
+  verification, bundle-key validation, per-host-phase dispatch to
+  `nethub/devices/` (facts, connection, transfer, install — driven
+  directly over Netmiko, with no intermediate runner or container),
+  registry/publish update under a lock, job audit logging.
 
 Every Software Lifecycle route requires an authenticated admin session.
 The phone-home route stays the system's sole unauthenticated entry
@@ -136,30 +150,33 @@ Runs as a single *worker* — one OS process, threaded within it — with no
 multi-process/shared-nothing concurrency handling in the Flask app
 itself. The traffic volume here (occasional device phone-homes,
 occasional admin-triggered uploads) doesn't warrant that complexity, and
-the heavy lifting for both modules happens inside the Ansible EE
-containers the backend invokes rather than in the Flask process. The
+the heavy lifting for both modules happens in a separate sibling process
+the backend dispatches to rather than in the Flask process itself. The
 one-process constraint is not a scale judgement and cannot be relaxed
 later as one: §9.2 shows two workers silently breaking the credential
 path. Threads within that process are how the long operations below are
 kept from blocking each other.
 
-That justification only holds if EE invocation never blocks a request
-handler. A publish job runs for minutes. A synchronous
-`ansible_runner.run()` inside a route would stall the entire process for
+That justification only holds if device work never blocks a request
+handler. A single-device stage phase alone runs for minutes at measured
+push throughput (~1.4 MB/s, see §8), and an `install add … activate
+commit` runs 600+ seconds before the device even reloads. A synchronous
+Netmiko session opened inside a route would stall the entire process for
 its duration, including the day-0 phone-home endpoint, which has to stay
 responsive because a device booting on the provisioning VLAN can't wait
-or retry indefinitely. Publish requests therefore return as soon as the
-job row is written: the EE run is dispatched out-of-band by a sibling
-process that owns the queue (§9), and the dashboard reports progress by
-polling `registry_jobs.status` instead of holding a request open. Job
-execution is serialized, one EE run at a time. That is sufficient at
-this scale, and it is what makes the registry write path in §7
-tractable.
+or retry indefinitely. Requests that would trigger device work therefore
+return as soon as the job row is written: the phase execution is
+dispatched out-of-band by the sibling process that owns the queue (§9),
+and the dashboard reports progress by polling the job row's `status`
+instead of holding a request open. Execution is serialized, one phase
+execution at a time. That is sufficient at this scale, and it is what
+makes the registry write path in §7 tractable.
 
 The same argument applies to ingest, and it is easy to miss because
-ingest never enters an EE. A 1.2 GB image upload occupies a request
-handler for the length of the transfer plus a full SHA-512 pass, which
-is longer than most publish jobs spend inside Podman. On a
+ingest never dispatches to the sibling at all — it runs synchronously in
+the request handler that received the upload. A 1.2 GB image upload
+occupies that handler for the length of the transfer plus a full SHA-512
+pass, which is longer than most publish jobs spend in the sibling. On a
 single-threaded process the phone-home route would return nothing for
 that whole window — the exact failure the paragraph above legislates
 against, arriving through the other half of the same design. So the
@@ -202,13 +219,13 @@ trusted to ask:
   two different things — see "the day-0 fetch sequence" below.
 - **Day-2**: images move between the store and an already-enrolled
   device in whichever direction the deployment's `image_transport`
-  setting selects (§4.3.1). By default NetHub **pushes** over SCP
-  (`ansible.netcommon.net_put`), under the same device credential the
-  run already holds — no second credential is minted or held. A
-  deployment whose devices may open outbound connections can instead
-  have the device **pull** over SFTP from a distribution daemon, which
-  costs a listening service and a distribution credential and is priced
-  in §4.3.1.
+  setting selects (§4.3.1). By default NetHub **pushes** over SCP —
+  Netmiko's `CiscoIosFileTransfer`, Paramiko underneath — under the same
+  device credential the run already holds — no second credential is
+  minted or held. A deployment whose devices may open outbound
+  connections can instead have the device **pull** over SFTP from a
+  distribution daemon, which costs a listening service and a
+  distribution credential and is priced in §4.3.1.
 
 **NetHub is the sole source of the bytes, and that is not modular.**
 Earlier revisions let the image *source* be either a local bundled
@@ -223,7 +240,7 @@ whom and changes nothing about provenance.
 
 Which is worth separating explicitly, because the two were conflated
 before: **the source is fixed, the direction is configurable.** Under
-push the EE mounts the published subtree read-only (§3.5) and pushes
+push the sibling reads the published subtree read-only (§3.5) and pushes
 straight from it over the connection the run already holds, and
 "distribution host" names only the box the bytes are read from. Under
 pull the same subtree is additionally exposed by an SFTP daemon and
@@ -243,8 +260,8 @@ docroot: the daemon serves only the day-0 subtree (artifacts of `kind`
 script/config, and only in the narrow arrangement the next section
 specifies), with directory indexing disabled. Day-2 images are never
 served by the **HTTP** daemon — they live under a subtree the HTTP
-docroot never includes, mounted read-only into the EE container (§3.5),
-reachable only by a process the sibling started. Without that split the
+docroot never includes, read directly by the sibling process itself
+(§3.5), and reachable by no other component. Without that split the
 HTTP adapter would be an unauthenticated read path over the image store,
 bypassable by anyone who can guess a filename. The point of the shared
 store is to make the day-0/day-2 split cheap; a shared docroot would
@@ -348,7 +365,7 @@ only at the very last step. Everything is a single pipeline:
 ingest (upload → hash → size → store → record)
    │
    ├─ egress A (day-0): device pulls, HTTP, allowlist-gated, device-initiated
-   └─ egress B (day-2): admin-initiated via Ansible, credentialed, one of
+   └─ egress B (day-2): admin-initiated, dispatched to the sibling, credentialed, one of
         ├─ push (default): NetHub → device, SCP
         └─ pull:           device → NetHub, SFTP
 ```
@@ -425,9 +442,11 @@ verifies today, which for an image store means a superseded IOS-XE build
 carrying a correct NetHub hash. Both egress adapters therefore resolve
 what to serve server-side rather than honoring a client-supplied path.
 Day-0 maps an allowlisted serial to a set of artifact rows — a config,
-optionally an image, each in a distinct *role* — and day-2 renders a
-specific artifact row into the registry the playbook reads. The
-`artifacts.id` values resolved are recorded on the log entry (§5), so
+optionally an image, each in a distinct *role* — and day-2 snapshots a
+specific artifact row's `filename`/`sha512`/`version`/`file_size` onto
+`upgrade_run_hosts` at submit (§5), so a run reads its own rows rather
+than the `artifacts` table again at dispatch. The `artifacts.id` values
+resolved are recorded on the log entry (§5), so
 "which bytes was this device offered" is answerable after the fact
 instead of inferred from a filename.
 
@@ -448,47 +467,54 @@ logs §3.1 requires. Shared plumbing; no merged timeline, no cross-entry
 correlation.
 
 Three things stay explicitly un-unified. Day-0 does not route through
-Ansible, since it is Kea plus phone-home and needs no EE. The two logs
-are not merged into one timeline. The two egress protocols stay
-distinct, because the shared store beneath them is what makes that split
-cheap.
+the device layer at all, since it is Kea plus phone-home and touches no
+device. The two logs are not merged into one timeline. The two egress
+protocols stay distinct, because the shared store beneath them is what
+makes that split cheap.
 
-### 3.5 Everything the EE reads is rendered
+### 3.5 Everything a phase acts on is read from rows, not supplied
 
 §3.4's registry file is the first instance of a pattern the rest of the
-system follows: **NetHub renders the inputs its playbooks consume rather
-than accepting them.** The registry file is a projection of the
-`artifacts` table (§7.2). So is the per-job inventory — hosts,
-`software_bundle` references, connection variables — written at dispatch
-into a `private_data_dir` that is discarded with the job. So is the
-playbook, in the weaker sense that it ships with NetHub and is selected
-by `platform` rather than supplied.
+system follows: **NetHub renders or snapshots the inputs a phase acts on
+rather than accepting them.** The registry file is a projection of the
+`artifacts` table (§7.2). So is the per-run inventory a phase actually
+reads: hosts, bundle reference, connection variables are snapshotted onto
+`upgrade_run_hosts` at submit rather than re-resolved from `artifacts` at
+dispatch (§5), so a mid-run supersede cannot silently re-target a run
+already in flight. There is no template and no playbook selected per
+platform any more — the code that acts on a host is `nethub/devices/`
+itself, chosen by `platform` in the sense that a second platform is a new
+set of modules there, not a new file rendered per job.
 
 What a user submits is a request: which devices, and which published
 bundle each should end up on. NetHub validates it and compiles the rest.
 The reasoning is in §8.1, and the rule is the one §7.2 already states
-for the registry — the table is the source of truth, the file is derived
-from it, and there is no second place for the two to disagree.
+for the registry — the table is the source of truth, the rendered or
+snapshotted form is derived from it, and there is no second place for the
+two to disagree.
 
-This is also why the rendered inventory carries no credentials.
-Connection variables come from the submitting admin's identity (§4.3),
-and the one secret a run needs is passed in memory rather than written
-into the directory the EE mounts.
+This is also why nothing a phase reads carries credentials. Connection
+variables come from the submitting admin's identity (§4.3), and the one
+secret a phase execution needs is passed in memory — a Python attribute
+on `phases.PhaseContext`, not a file — rather than written anywhere a
+phase's inputs are.
 
-The image bytes themselves never enter the *rendered inventory*, and
-that falls out of the same rule rather than being an exception to it:
-what NetHub renders is the *reference* — filename, digest, size — not
-the file. Under push (§4.3.1) the EE does handle the bytes: it mounts
-the published subtree read-only and reads the file directly off that
-mount, rather than the file being copied into or generated inside
-`private_data_dir`. Under pull the EE never touches them — the daemon
-serves them and the device receives them — so that mode is the one this
-paragraph was originally written for. Either way the invariant this
-section actually needs holds: nothing *written into* `private_data_dir`
-(the rendered `env/`, `inventory/`) is ever larger than a few
-kilobytes. What changed is only that "the EE is blind to the bytes" is
-now true of one transport and not the other, rather than being a
-property of the design.
+The image bytes themselves never enter that snapshotted state, and that
+falls out of the same rule rather than being an exception to it: what
+NetHub snapshots onto `upgrade_run_hosts` is the *reference* — filename,
+digest, size — not the file. Under push (§4.3.1) the sibling does handle
+the bytes: `stage_image()` reads the file directly off the published
+subtree and streams it to the device over the second SSH session Netmiko
+opens for the transfer, rather than the file being copied anywhere else
+first. Under pull the sibling never touches them — the distribution
+daemon serves them and the device receives them — so that mode is the one
+this paragraph was originally written for. Either way the invariant this
+section actually needs holds: nothing the credential socket or the
+snapshotted row set carries is ever the multi-hundred-megabyte image
+itself, only a reference to where it already sits on the one mount both
+transports read. What changed is only that "the phase never touches the
+bytes" is now true of one transport and not the other, rather than being
+a property of the design.
 
 ## 4. Security Model
 
@@ -787,7 +813,7 @@ implementer reads to decide which routes need this treatment.
 
 Day-2 image delivery deliberately stays credentialed, unlike day-0, and
 stays credentialed in **both** transport directions (§4.3.1). Under push
-the image rides the `network_cli` session already authenticated with the
+the image rides the Netmiko session already authenticated with the
 submitter's own device credential; under pull the device authenticates
 to the distribution daemon. Neither is the plain HTTP used for the day-0
 script fetch (§3.3). The two days are in different trust situations, so
@@ -827,11 +853,12 @@ assertion establishes *who*, a local list decides *what*, and neither is
 trusted to do the other's job.
 
 **The device credential is a separate mechanism, deliberately.** OIDC's
-value is that NetHub never sees a password; `network_cli` needs a
+value is that NetHub never sees a password; a Netmiko session needs a
 password to send. Both are true, so the upgrade dispatch (§8.1) collects
-the submitter's device credential and hands it to `ansible-runner` in
-memory. It is never written into the `private_data_dir`, never kept in
-the session, and never persisted.
+the submitter's device credential and holds it in memory as a plain
+Python attribute — `phases.PhaseContext`'s credential field — for the life
+of one phase execution. It is never written to disk, never kept in the
+session, and never persisted.
 
 It belongs to a *phase execution* rather than to the session or to the
 run. The session is the wrong owner because a serial activation wave
@@ -840,10 +867,9 @@ because §8.1 lets a run park at an approval gate for days, and "held for
 the life of the run" would mean a plaintext password resident in some
 process's memory across a weekend. So it is collected with each approval
 and dropped when the execution that approval released reaches a terminal
-state. §4.3.1 covers why push no longer needs a second credential with a
-lifetime of its own; §9.1–§9.2 cover how this one crosses from the
-browser to the EE without touching disk, and what that costs the
-operator.
+state. §4.3.1 covers why push needs no second credential with a lifetime
+of its own; §9.1–§9.2 cover how this one crosses from the browser to the
+sibling without touching disk, and what that costs the operator.
 
 Every `users` row also carries a `role` (`admin` | `operator`). An admin
 manages other users, the allowlist's steady-state config, and any
@@ -859,10 +885,10 @@ from the OIDC identity server-side and set by an administrator rather
 than by its owner. A username the submitter can type is not evidence of
 anything, and evidence is the entire point of the arrangement:
 
-**Two-sided attribution.** Under a shared `ansible` service account,
-every change on every device is attributed to "ansible", and who
-actually made it is answerable only from NetHub's own records — that is,
-from the one system that would also be wrong if it were compromised.
+**Two-sided attribution.** Under a shared service account, every change
+on every device is attributed to that one account, and who actually made
+it is answerable only from NetHub's own records — that is, from the one
+system that would also be wrong if it were compromised.
 Under per-user credentials the same human appears in
 `upgrade_runs.submitted_by` on NetHub's side and in the device's own AAA
 accounting and syslog on the other, recorded by two systems that share
@@ -874,8 +900,8 @@ assumes: **centralized AAA with command accounting enabled.** With
 per-human accounts configured locally on each device, both records —
 NetHub's and the device's — are ultimately statements NetHub's own
 deployment made, and "two systems that share no trust domain" stops
-being true. The arrangement still beats a shared `ansible` account, but
-it is corroboration by a second copy rather than by a second authority.
+being true. The arrangement still beats a shared service account, but it
+is corroboration by a second copy rather than by a second authority.
 Deployments without central AAA should read the attribution claim at
 that weaker strength, and the fact that command accounting has to be on
 is also what makes §4.3.1's disclosure structural rather than
@@ -899,8 +925,8 @@ Two operational consequences follow:
   authentications at the AAA server, which is how an engineer loses
   access to the entire estate. What NetHub does about this is a
   single-connection credential probe: before dispatch, the sibling opens
-  one `network_cli` connection — to the first host in the run's target
-  set — with the submitted credential and confirms it authenticates. A
+  one Netmiko session — to the first host in the run's target set — with
+  the submitted credential and confirms it authenticates. A
   full AAA-client integration (NetHub itself speaking to the TACACS+/
   RADIUS server) was considered and rejected as out of proportion: it
   would add a standing trust relationship and a shared secret of its own
@@ -915,7 +941,7 @@ Two operational consequences follow:
   a claim of completeness.
 - **The device proves who it is before the credential is sent — and
   that proof must be confirmed by someone other than whoever is about to
-  benefit from skipping it.** `network_cli` authenticates by sending the
+  benefit from skipping it.** Netmiko authenticates by sending the
   password after key exchange, and `hosts[].ansible_host` is
   submitter-supplied (§8.1) and must be an IPv4/IPv6 literal, checked
   against the target CIDR (§8.1) by numeric comparison rather than
@@ -927,9 +953,13 @@ Two operational consequences follow:
   colleague's AAA credential, or an on-path attacker on the management
   network can take it. §4.3.1 concludes that the old *distribution*
   password's exposure was structural and mitigated it with lifetime;
-  this one is not structural and does not get that excuse. NetHub
-  renders a `known_hosts` into the `private_data_dir` from the
-  fingerprints in `device_host_keys` (§5) and fails closed on mismatch.
+  this one is not structural and does not get that excuse. NetHub pins
+  the fingerprint from `device_host_keys` (§5) as a `paramiko` host-key
+  policy object built fresh for each connection — there is no rendered
+  `known_hosts` file for a connection plugin to read from a different
+  path than the one NetHub intended, because the client that opens the
+  connection is NetHub's own (`nethub/devices/connection.py`) — and fails
+  closed on mismatch.
 
   **First contact is where the excuse runs out, and the design used to
   get this wrong.** TOFU pinning fails closed only on a *changed* key —
@@ -961,8 +991,9 @@ Two operational consequences follow:
   a platform quirk.** Every command an upgrade runs — `write memory`,
   `copy` to flash, `install add … activate commit` — needs level 15 on
   IOS-XE. NetHub asks for it *at login* rather than reaching it through
-  `enable`, so there is no escalation step in the playbook and no
-  `become_password` to collect. That removes a second secret from a
+  `enable`, so `connection.connect()` passes no `secret` and nothing ever
+  calls Netmiko's `.enable()` — there is no escalation step and no second
+  secret to collect. That removes a second secret from a
   design whose whole §4.3 argument is about minimising them, and it
   removes the shared-enable-secret problem, which is the same
   shared-credential objection §4.3 raises about a service account wearing
@@ -995,8 +1026,8 @@ Two operational consequences follow:
   bracketed rather than standing, and it belongs to the push transport
   alone: the stage phase enables the device's own SCP server for the
   duration of the push and restores whatever it found — enabled or not —
-  in an `always:` block, confirmed by re-reading the running-config
-  rather than trusted from the module's exit status (§4.3.1). That
+  in a `finally:` block, confirmed by re-reading the running-config
+  rather than trusted from the adapter's exit status (§4.3.1). That
   confirmation is why "does not write configuration outside the upgrade
   itself" still holds: the toggle is scoped to one phase execution on one
   host, not a standing device change. Under pull the exception does not
@@ -1004,7 +1035,7 @@ Two operational consequences follow:
 - **Whether a distribution account exists is a deployment choice, and
   the default is that it does not.** Under push there is no second
   account to keep shared and no second password to rotate: the transfer
-  rides the same `network_cli` session already authenticated with the
+  rides the same Netmiko session already authenticated with the
   submitter's own device credential. Under pull there is a distribution
   daemon and therefore a distribution identity, which is either the
   submitter's own credential again or one dedicated read-only account
@@ -1021,11 +1052,11 @@ design. **Push** — NetHub writes the image to the device over SCP — is
 the default. **Pull** — the device fetches the image from a distribution
 host over SFTP — is the alternative. Both adapters read from the same
 store NetHub owns (§3.3), both end in the same `verify /sha512` against
-the digest computed once at ingest (§3.4), and the stage playbook
-selects between them by including one task file or the other
-(`tasks/push_image_scp.yml` / `tasks/pull_image_sftp.yml`, dispatched
-from `tasks/transfer_image.yml`). Everything either side of the transfer
-is shared, which is what keeps this a choice of adapter rather than two
+the digest computed once at ingest (§3.4), and `nethub/devices/
+transfer.py`'s `stage_image()` selects between them by dispatching to a
+push or a pull adapter function based on the deployment's
+`image_transport` setting. Everything on either side of the transfer is
+shared, which is what keeps this a choice of adapter rather than two
 upgrade paths to maintain.
 
 Making it a setting is not indecision. The two directions fail in
@@ -1036,9 +1067,9 @@ direction, because the choice is now an operator's to make and an
 operator cannot make it from a section that argues for one.
 
 **The history matters, because the default was reversed once already.**
-`upgrade_iosxe.yml` originally had the device fetch its own image over
-SFTP, authenticating to a distribution account NetHub minted a password
-for on every phase execution. **That design assumed the device could
+An earlier revision of this design had the device fetch its own image
+over SFTP, authenticating to a distribution account NetHub minted a
+password for on every phase execution. **That design assumed the device could
 open an outbound connection to NetHub, and a nontrivial fraction of real
 deployments block exactly that.** Outbound SSH from a network device is
 a common perimeter rule — it is the same jump-host concern that motivates
@@ -1055,26 +1086,30 @@ permits the egress is not helped by NetHub pretending it does not exist,
 and the costs below are costs, not disqualifications.
 
 **Push inverts the connection, and where it is available that inversion
-pays for itself immediately.** Every device in a run already has an inbound,
-admin-initiated `network_cli` (SSH) session open for pre-check, activate,
+pays for itself immediately.** Every device in a run already has an
+inbound, admin-initiated Netmiko session open for pre-check, activate,
 verify and cleanup, authenticated with the submitter's own device
-credential (§4.3). The stage phase pushes under **that same identity**
-rather than opening a second, device-initiated connection the other way
-— that claim needs to be stated at that precision and no stronger.
-`net_put`'s SCP path for a `network_cli`-backed connection most likely
-opens its own transport rather than multiplexing through the persistent
-session already in use for command execution, so "the same session" is
-probably better read as "the same credential, over a second connection"
-than as one continuous channel. The credential claim below is unaffected
-either way — nothing new is minted, so this is still a real
-simplification, not a wash — but the connection-count claim has real
-consequences a single-session model wouldn't: a second SSH/AAA
-authentication event gives command-authorization policy a second chance
-to diverge between an exec session and a transfer session, and some
-IOS-XE deployments cap concurrent sessions per user, which a second
-simultaneous connection under the same identity could trip. Tracked
-alongside the `net_put`-viability question below (§10) rather than
-assumed settled.
+credential (§4.3). The stage phase pushes under **that same identity**,
+over a **second** SSH session rather than the persistent one already in
+use for command execution — this is now settled by construction rather
+than probable. Netmiko's `CiscoIosFileTransfer` opens its own SCP
+transport for the put, and `SCPConn.establish_scp_conn` builds that
+second session through `connection.py`'s own `_build_ssh_client()`
+override, so the pinned host-key policy and the keyboard-interactive
+authentication both apply to it exactly as they do to the primary
+session — verified end-to-end against a real Catalyst 9200CX, not
+inferred from the library's documentation. The credential claim below is
+unaffected either way — nothing new is minted — and the host-key
+question this section used to leave open for a second connection is
+answered by construction under Netmiko: there is one connection-opening
+path in the whole codebase (`connection.py`), and both sessions go
+through it. What real hardware has not yet exercised is the
+session-*count* consequence: a second SSH/AAA authentication event gives
+command-authorization policy a second chance to diverge between an exec
+session and a transfer session, and some IOS-XE deployments cap
+concurrent sessions per user, which a second simultaneous connection
+under the same identity could trip. That risk is unchanged by which
+library carries the second session, and is tracked in §10.
 
 Under push, nothing new is minted regardless: there is no distribution
 account, no distribution password, no per-phase credential lifecycle
@@ -1089,64 +1124,67 @@ requirements return, in the reduced form the pull half of this section
 specifies; the point is that a deployment on push pays none of them, not
 that they were wrong.
 
-**What push costs instead is a device configuration change, and the
-playbook is explicit about the price.** Pulling left the device
-untouched; pushing requires the device's own SCP server to be listening,
-which means NetHub has to enable it, use it, and turn it back off. The
-stage playbook (`stage_cisco_upgrade.yml`, the current stand-in for
-§8.1's stage phase) does this narrowly and defensively:
+**What push costs instead is a device configuration change, and
+`transfer.py`'s push adapter is explicit about the price.** Pulling left
+the device untouched; pushing requires the device's own SCP server to be
+listening, which means NetHub has to enable it, use it, and turn it back
+off. The push adapter does this narrowly and defensively, and this
+sequence is validated end-to-end against a real Catalyst 9200CX, not
+just written to spec:
 
 - It reads the device's current `ip scp server enable` state *before*
   changing anything, so a device that legitimately runs its own SCP
   server is left alone rather than having NetHub's restore turn it off
   underneath whatever else depends on it.
 - It enables the server only if it was not already enabled, pushes the
-  image via `ansible.netcommon.net_put`, and re-verifies the pushed
-  bytes on the device with `verify /sha512` — §3.4's third consumption of
-  the ingest digest, unchanged by which direction the bytes travelled.
-  The transfer lives in its own included task file
-  (`tasks/push_image_scp.yml`), which is a reversal worth naming: that
-  isolation was dropped once the connection library became a settled
-  decision (below), and it is back for a different reason — not to keep
-  a future library swap cheap, but because the transport direction is a
-  live setting and each direction is one file.
-- It restores the prior state in an `always:` block that runs whether the
-  push succeeded, failed, or errored partway, and it does not trust the
-  restore module's exit status: it reads the running-config back and
-  compares it explicitly. **This is now the committed behavior as well
-  as the target**: an unconfirmed restore sets the host's staging result
-  to failed and calls `end_host`, rather than the debug-only warning the
-  playbook carried until the transport split. The gap that let a stray
-  `ip scp server enable` ride into startup-config on a later
-  `write memory` is closed for every path that reaches `always:` at
+  image via Netmiko's `CiscoIosFileTransfer` with `hash_supported=False`
+  (Netmiko's transfer class MD5s the source file in its constructor
+  whenever that flag is left on — including under
+  `file_transfer(disable_md5=True)`, which only skips the *comparison* —
+  and this design has exactly one hash algorithm, §3.4), and re-verifies
+  the pushed bytes on the device by asking it for its own `verify
+  /sha512` digest and comparing in Python rather than substring-testing
+  the device's echoed output — §3.4's third consumption of the ingest
+  digest, unchanged by which direction the bytes travelled.
+- It restores the prior state in a `finally:` block that runs whether the
+  push succeeded, failed, or raised partway, and it does not trust the
+  restore call's return value: it reads the running-config back and
+  compares it explicitly. **This is the committed behavior, not just the
+  target**: an unconfirmed restore raises from the `finally:` block
+  itself, superseding an in-flight push failure and keeping it as
+  `__context__`, and fails the host outright rather than logging a
+  warning — a device left changed is the more urgent of the two facts.
+  `_restore_scp_server` never raises on its own: a restore that could not
+  be attempted *is* an unconfirmed restore. The gap that would let a
+  stray `ip scp server enable` ride into startup-config on a later
+  `write memory` is closed for every path that reaches `finally:` at
   all — which is still not every path, per the next paragraph.
 
 **What that mechanism does not cover is the honest gap, and it is worth
 stating rather than implying it away.** The confirm-and-fail-host logic
-only runs if the play reaches its `rescue:`/`always:` blocks at all. A
-killed process, an abandoned run, or a crashed EE container mid-transfer
-never gets there, and can leave a device with its SCP server enabled and
-nothing in NetHub recording it — exactly the "cannot enumerate afterward"
-problem the design once used to reject push outright. Closing it fully
-would mean either a device-side timeout on the enabled state (IOS-XE does
-not offer one for this knob) or a periodic reconciliation pass that
-connects to every device that was ever mid-stage and checks, which is the
-per-device current-state view §2 and §7.4 refuse to build for anything
-else in the system. This is recorded as an accepted residual risk, not a
-solved one.
+only runs if the transfer's `try`/`finally` is reached at all. A killed
+process, an abandoned run, or a crashed sibling mid-transfer never gets
+there, and can leave a device with its SCP server enabled and nothing in
+NetHub recording it — exactly the "cannot enumerate afterward" problem
+the design once used to reject push outright. Closing it fully would mean
+either a device-side timeout on the enabled state (IOS-XE does not offer
+one for this knob) or a periodic reconciliation pass that connects to
+every device that was ever mid-stage and checks, which is the per-device
+current-state view §2 and §7.4 refuse to build for anything else in the
+system. This is recorded as an accepted residual risk, not a solved one.
 
 **That gap is reachable through two paths this design controls, not only
 through a crash, and both are closeable without the reconciliation pass
 above.** §8 gives the stage phase a per-host wall-clock bound derived
 from `file_size`, described as the run being "killed on expiry" — if
-that kill is a process-level `SIGKILL`, a slow link (exactly the
-condition a multi-site deployment hits, §3.3) routinely ends the EE
-mid-transfer without ever reaching `always:`, making the "exceptional"
-case the *frequent* one for the deployments that need push most. Fixed
-by scoping the bound to the transfer task itself
-(`ansible_command_timeout`, or `async:`/`poll:`) so expiry raises inside
-the play and falls into `rescue:`/`always:` like any other task failure;
-the job-level wall clock (§8) remains as an outer backstop for
+that kill is a process-level `SIGKILL` against the sibling itself, a slow
+link (exactly the condition a multi-site deployment hits, §3.3) routinely
+ends the transfer without ever reaching `finally:`, making the
+"exceptional" case the *frequent* one for the deployments that need push
+most. Fixed by scoping the bound to the transfer call itself — Netmiko's
+own read timeout on the SCP session — so expiry raises inside the
+adapter's own `try`/`finally` rather than killing the sibling process
+outright; the job-level wall clock (§8) remains as an outer backstop for
 everything else, not the mechanism for this one bound. Separately, §8.1
 calls cancelling a stage "safe, non-disruptive by construction" — true
 for the fleet's traffic, not for a device mid-SCP-toggle: stage is the
@@ -1155,8 +1193,8 @@ only phase that mutates device config, and the stage concurrency cap
 sentence is corrected to **"cancelling a stage is safe for the fleet;
 an in-flight host may still need its SCP server restored,"** and the
 cancel handling waits for in-flight transfers to reach their own
-`rescue:`/`always:` before honoring the cancel, rather than dropping the
-EE process outright.
+`try`/`finally` before honoring the cancel, rather than killing the
+sibling process outright.
 
 Both of those keep the mechanism above intact — they stop it from being
 bypassed by two things this design chooses to do on purpose — so the
@@ -1164,7 +1202,7 @@ tracking this needs is a state to distinguish "restore confirmed" from
 "restore owed," not the per-device inventory §2 refuses to build. A
 nullable `scp_restore_confirmed` boolean on the stage row in
 `upgrade_host_phase_results` (§5) — the persisted counterpart of the
-same-named fact the playbook already computes locally — is that state:
+same-named fact the adapter already computes locally — is that state:
 null or `false` means the run ended (by any means, including a hard
 kill outside this design's control) without a confirmed restore for
 that host, which is exactly the row a future reconciliation mechanism
@@ -1173,66 +1211,66 @@ is a queryable answer to "which devices might still be exposed" that
 today's design has no column for at all.
 
 **The transfer library was the one part of this design not settled on
-paper — it's now settled, pragmatically rather than cleanly.**
-`ansible.netcommon.net_put`'s SCP path was tested against a real IOS-XE
-device at image size, not just with the small text file a different
-playbook had moved successfully. Under the `libssh` connection type it
-is unusable: the SSH connection broke repeatedly for reasons the debug
-log did not surface, with nothing actionable to fix. Under `paramiko` it
-works. `paramiko` is deprecated upstream with a scheduled removal, but
-it's the only thing that works today, so it's what's committed
-(`stage_cisco_upgrade.yml` / `tasks/push_image_scp.yml`) — there is no
-`net_put_probe.yml` anymore; the real-device test replaced it, and its
-result is recorded here rather than left unrecorded (§10 used to flag
-that gap). The transfer is isolated in its own task file again, which
-reverses an earlier decision to inline it: that isolation was dropped
-because the connection type was settled, and it is back because the
-*direction* is not — one file per adapter is what makes the transport a
-setting rather than a fork of the playbook. IOS-XE has no SFTP server — Cisco documents the SFTP client
-as always enabled and the server as unsupported, consistently across
-trains — so under push, SCP is the only wire protocol available
-regardless of which library carries it; switching to SFTP the way pull
-could, or falling back to the device fetching its own image, is not an
-option in this direction either.
+paper — it's now settled, pragmatically rather than cleanly.** Under
+Ansible, `net_put`'s SCP path with the `libssh` connection type was
+tested against a real IOS-XE device at image size, not just with the
+small text file a different playbook had moved successfully, and found
+unusable: the SSH connection broke repeatedly for reasons the debug log
+did not surface, with nothing actionable to fix. That result carried
+over the switch to Netmiko rather than being re-litigated: Netmiko is
+Paramiko-based, and Paramiko is the library the working case above used,
+so push works here and is validated at 471 MB against real hardware.
+Paramiko is deprecated upstream with a scheduled removal, but it's the
+only thing that has actually worked at image size, so it's what's
+committed (`nethub/devices/transfer.py`; if it is ever swapped, §10
+records that the swap needs re-testing at image size rather than
+assuming a smaller transfer generalises). IOS-XE has no SFTP server —
+Cisco documents the SFTP client as always enabled and the server as
+unsupported, consistently across trains — so under push, SCP is the only
+wire protocol available regardless of which library carries it;
+switching to SFTP the way pull could, or falling back to the device
+fetching its own image, is not an option in this direction either.
 
-**Shelling out to OpenSSH `scp` inside the EE was considered as the
+**Shelling out to OpenSSH `scp` as a subprocess was considered as the
 documented fallback and rejected, not merely deferred.** The reason is
-the second bullet below: unlike `net_put`, a bare `scp` subprocess needs
-the device password on an interface that has no secure way to receive
-it yet. Solving that properly means building the same
-stdin-pipe-delivery mechanism §9.2 already requires for the
-socket-delivered credential reaching `ansible-runner`, and that hasn't
-been built for this path. Until it is, the deprecated-but-working
-`paramiko` path is the safer of the two, not because deprecation is
-harmless but because the alternative's credential handling isn't solved
-yet. This contract is kept here, unbuilt, as the reference for whoever
-builds it or the custom transfer script that might replace both
-(§10):
+the second bullet below: unlike Netmiko's file-transfer class, a bare
+`scp` subprocess needs the device password on an interface that has no
+secure way to receive it. The credential already lives as a plain Python
+attribute for the life of one phase execution (§3.5, §9.1) rather than
+being handed to a container or a runner, so the sibling *could* pass it
+to a child process — but only over a pipe on `stdin` via a small wrapper,
+never as an argument or an environment variable, and nothing here builds
+that wrapper. Until it is, the deprecated-but-working Paramiko path is
+the safer of the two, not because deprecation is harmless but because
+the alternative's credential handling isn't solved yet. This contract is
+kept here, unbuilt, as the reference for whoever builds it or the custom
+transfer script that might replace both (§10):
 
-- It would be a **second SSH connection**, independent of the
-  `network_cli` session, with its own host-key answer to get right. It
-  must be given `-o StrictHostKeyChecking=yes -o
-  UserKnownHostsFile=<the same rendered `known_hosts` §4.3 already
-  produces>` explicitly — `scp`'s default behavior on an unrecognized
-  host does not fail closed on its own, and inheriting that default
-  would quietly reopen the first-contact problem §4.3 just closed.
-- It needs the device password on an interface `net_put` doesn't need
-  one for. The obvious wrappers — `sshpass`, an expect script, a naive
-  `SSH_ASKPASS` — put the credential on a command line, landing in
-  `/proc/<pid>/cmdline`, which is exactly what §9.2 forbids for
-  `envvars` and for the identical reason. This is the unsolved part:
-  the credential would need to reach the `scp` subprocess over a pipe on
-  `stdin` via a small wrapper, and nothing here builds that wrapper yet.
+- It would be a **second SSH connection**, independent of the primary
+  Netmiko session, with its own host-key answer to get right. It must be
+  given `-o StrictHostKeyChecking=yes -o UserKnownHostsFile=<a file
+  rendered from the same `device_host_keys` fingerprint §4.3 already
+  pins>` explicitly — `scp`'s default behavior on an unrecognized host
+  does not fail closed on its own, and inheriting that default would
+  quietly reopen the first-contact problem §4.3 just closed.
+- It needs the device password on an interface Netmiko's own transfer
+  class doesn't need one for. The obvious wrappers — `sshpass`, an expect
+  script, a naive `SSH_ASKPASS` — put the credential on a command line,
+  landing in `/proc/<pid>/cmdline`, which is exactly what §9.2 forbids for
+  the credential socket's payload and for the identical reason. This is
+  the unsolved part: the credential would need to reach the `scp`
+  subprocess over a pipe on `stdin` via a small wrapper, and nothing here
+  builds that wrapper yet.
 - Its per-host timeout is a killed child process either way, which is
-  the same failure mode the restore-gap fix above addresses for
-  `net_put` — the task-level timeout / `rescue:`/`always:` structure
-  around it wouldn't change with the swap.
+  the same failure mode the restore-gap fix above addresses for the
+  Netmiko path — the read-timeout / `try`/`finally` structure around it
+  wouldn't change with the swap.
 
 **The concern that image encryption "moves onto the process that must
 not stall" does not survive contact with where the code actually runs.**
 The earlier rejection worried that push would relocate every image's
 crypto into NetHub's own process on the host §3.2 protects from
-stalling. `net_put` runs inside the EE, dispatched by the sibling exactly
+stalling. The transfer runs inside the sibling's own process, exactly
 where every other device-touching phase already runs (§8, §9) — never in
 Flask, either direction. Only *which side of the wire* performs the SSH
 work changed; where that work happens did not.
@@ -1252,12 +1290,20 @@ push did not touch them:
   form. A run
   parked at the reload gate from Monday to Saturday holds no device
   credential in memory (§9.1) and has made no standing change to any
-  device — the same property §8.1 claims for the EE process itself.
+  device — the same property §8.1 claims for the sibling's phase
+  execution itself.
 
 **Pull, and what it buys.** Under `image_transport = pull_sftp` the
-stage phase issues one `copy sftp://…` on the device's own CLI, answers
-the password prompt, and then runs the same `verify /sha512` push runs.
-The gains are the exact mirror of push's costs:
+stage phase issues one `copy sftp://…` on the device's own CLI over the
+existing Netmiko session, answers the two prompts it raises on that same
+channel, and then runs the same `verify /sha512` push runs. The gains are
+the exact mirror of push's costs. **This adapter's prompt sequence
+remains unverified against a real device** (§10) — it is the one item
+from the pre-Netmiko design that outlived the rewrite unresolved, and
+naming only the filesystem as the destination is deliberate: it forces
+the `Destination filename` prompt to appear so the pair of prompts arrives
+in a known order. A wrong prompt list does not fail fast; it hangs until
+the read timeout:
 
 - **Nothing on the device is reconfigured.** The enable/restore bracket
   above does not exist under pull, and neither does the residual
@@ -1268,17 +1314,17 @@ The gains are the exact mirror of push's costs:
   together with the row's transport rather than alone. For an
   organisation whose change policy treats any running-config write as a
   change requiring its own approval, this bullet is the entire argument.
-- **It depends on neither `net_put` nor `paramiko`.** The transfer is
-  performed by the device's own SFTP client and driven by one CLI
-  command, so the deprecation tracked in §10 and the `libssh` failure
-  that forced `paramiko` in the first place do not reach it. A
-  deployment that finds push unreliable now has somewhere to go that is
-  not "wait for a purpose-built transfer script".
+- **It depends on neither Netmiko's file-transfer class nor Paramiko.**
+  The transfer is performed by the device's own SFTP client and driven by
+  one CLI command, so the Paramiko deprecation tracked in §10 and the
+  `libssh` failure that forced Paramiko in the first place do not reach
+  it. A deployment that finds push unreliable now has somewhere to go
+  that is not "wait for a purpose-built transfer script".
 - **It uses whatever outbound management path the device already
   has**, including a source-interface or VRF it is already configured
   for. The `ip ssh source-interface` check the pre-check dropped when
   push became the default was a pull-era requirement, and it is relevant
-  again here — not as an assertion NetHub makes (the playbooks have no
+  again here — not as an assertion `phase_precheck` makes (there is no
   pre-check assertion infrastructure to hang it on today), but as a
   prerequisite an operator selecting pull has to satisfy on the device
   side.
@@ -1345,44 +1391,49 @@ row.** `distribution_credential_source` (§5) takes two values:
   readable by every admin, and this password would be the most useful
   one in it.
 
-Either way the credential reaches the playbook the way the device
-credential already does: injected into the execution's tmpfs-backed
-`private_data_dir`, destroyed with it, never written to the database and
-never rendered into anything retained. Under `same_as_device` it crosses
-§9.1's socket, because it is a per-execution secret Flask collected at a
-gate. Under `dedicated` it does not cross the socket at all — the
-sibling reads its own unit's credential directly and Flask never holds
-it. The second case is a smaller surface than the socket, not a wider
-one, and neither widens what the socket is permitted to carry: it is
-still per-execution credentials and nothing else.
+Either way the credential reaches the phase execution the way the device
+credential already does: held as a plain Python attribute on
+`PhaseContext` (`transfer.py`'s `PullTarget` carries it, `field(repr=False)`
+so it never renders into a traceback or a stray `log.debug`), destroyed
+when the phase ends, never written to the database and never rendered
+into anything retained. Under `same_as_device` it crosses §9.1's socket,
+because it is a per-execution secret Flask collected at a gate. Under
+`dedicated` it does not cross the socket at all — the sibling reads its
+own unit's credential directly and Flask never holds it. The second case
+is a smaller surface than the socket, not a wider one, and neither
+widens what the socket is permitted to carry: it is still per-execution
+credentials and nothing else.
 
 **The password is answered at a prompt, never embedded in the URL.** A
 `copy sftp://user:pass@host/…` form would place the credential in the
 device's command history and in its AAA command accounting — the same
 record §4.3 leans on for attribution, which would then contain a
-password, turning the audit property into a disclosure. So the playbook
-issues the command with no credential in it and answers the device's own
-`Password:` prompt, with `no_log` on the task. `no_log` covers Ansible's
-own output and **not** the connection plugin's debug logging, so a
-pull-transport stage must not run at elevated verbosity or with
-`ansible_persistent_log_messages` enabled. That is a constraint on how
-the sibling invokes the EE, recorded here because nothing else in this
-document would record it.
+password, turning the audit property into a disclosure. So the pull
+adapter issues the command with no credential in it and answers the
+device's own `Password:` prompt on the channel. It also refuses to put
+exception text into its own error messages, because a channel read can
+quote back whatever was written to that channel — the same reasoning
+§7.3 states for `error_summary` generally, arriving here through a
+different mechanism. Netmiko's `session_log` must not be enabled on a
+pull-transport phase for the identical reason: it would capture the raw
+channel bytes, prompt and password both, to a file. That is a constraint
+on how the sibling drives this one adapter, recorded here because nothing
+else in this document would record it.
 
-**Ansible Vault is still not the answer, and this is the change that
-would most plausibly have brought it back.** Vault encrypts a secret at
-rest in a file the EE reads. The file the EE would read here sits in a
-tmpfs `private_data_dir` destroyed with the execution, so vault would be
-protecting the copy that is already the least exposed one — and
-protecting it with a vault password that has to reach the same container
-by the same means, which is two secrets where one would do and restores
-exactly the key-disposal problem removed when the old distribution
-password went away. The secret that genuinely needs protecting at rest
-is the `dedicated` account's password, and that one is not in a file the
-EE reads: it is a systemd credential, the mechanism this deployment
-already uses for the OIDC client secret and the shared-account password
-(§4.4, §5). Adding a fourth secret store to hold a copy of it would be
-strictly worse than using the third.
+**Ansible Vault was considered while this design still used Ansible, and
+the reasoning against it carries over unchanged now that it doesn't.**
+Vault encrypts a secret at rest in a file a runner reads. The credential
+this section is about was never in a file to begin with — it is a Python
+attribute held for the life of one phase execution — so vault would have
+protected a copy that was already the least exposed one, with a vault
+password that has to reach the same process by the same means, which is
+two secrets where one would do and restores exactly the key-disposal
+problem removed when the old minted distribution password went away.
+The secret that genuinely needs protecting at rest is the `dedicated`
+account's password, and that one was never a candidate for vaulting: it
+is a systemd credential, the mechanism this deployment already uses for
+the shared-account password (§4.4, §5). Adding a secret store to hold a
+copy of it would be strictly worse than using the one it already has.
 
 **One thing pull does not change, stated because it would be easy to
 assume it does.** The authorization gate is identical: an
@@ -1493,11 +1544,11 @@ authenticates to devices under their own name. A team on one shared
 device account can't produce that, and forcing them to fake per-user
 device logins just to use NetHub is worse than admitting the gap
 outright. **Shared account mode** is an explicit, deployment-level
-setting (not a per-user fallback, and not implied by choosing the local
-auth backend) that fixes `ansible_user` to one admin-configured value
-for every upgrade run in that deployment, instead of reading
-`users.device_username`. It costs exactly what §4.3's two-sided
-attribution argument warned against for a shared `ansible` service
+setting (`SHARED_ACCOUNT_MODE`; not a per-user fallback, and not implied
+by choosing the local auth backend) that fixes the device username to one
+admin-configured value for every upgrade run in that deployment, instead
+of reading `users.device_username`. It costs exactly what §4.3's
+two-sided attribution argument warned against for a shared service
 account: every device-side change attributed to one name,
 answerable only from NetHub's own audit trail rather than corroborated
 by the device's own AAA/syslog. That's a decision an admin makes once
@@ -1611,106 +1662,76 @@ suggestion.
     the return of a pull transport (§4.3.1) does not bring it back: that
     column existed because the distribution host could once have been a
     separate remote machine whose layout NetHub did not control (§3.3),
-    which is no longer true in either direction. Push reads from the EE's
-    read-only mount of the published subtree by filename; pull has the
-    device fetch by filename under the one directory the SFTP daemon
-    exposes, which is that same subtree and is named once for the
-    deployment rather than once per artifact. So there is still no
-    per-artifact directory to record, and the constraint below is what
-    both modes rely on instead. `UNIQUE(filename) WHERE state IN
-    ('staged', 'published')` is the constraint that makes "push reads by
-    filename" safe: without it, two artifacts uploaded under the same
-    original filename can promote to the same on-disk path and silently
-    overwrite one artifact's bytes with another's, and every downstream
-    hash check still passes — each one compares a row's own `sha512`
-    against whatever currently sits at that path, not confirming the row
-    and the disk agree on *which* artifact this is. That would quietly
-    break the "hashed once, consumed three times" chain of custody §3.4
-    is built on, so the constraint is load-bearing rather than tidy.
+    which is no longer true in either direction. Push reads the file
+    directly off the published subtree by filename, in the sibling's own
+    process; pull has the device fetch by filename under the one
+    directory the SFTP daemon exposes, which is that same subtree and is
+    named once for the deployment rather than once per artifact. So there
+    is still no per-artifact directory to record, and the constraint
+    below is what both modes rely on instead. `UNIQUE(filename) WHERE
+    state IN ('staged', 'published')` is the constraint that makes
+    "push reads by filename" safe: without it, two artifacts uploaded
+    under the same original filename can promote to the same on-disk
+    path and silently overwrite one artifact's bytes with another's, and
+    every downstream hash check still passes — each one compares a row's
+    own `sha512` against whatever currently sits at that path, not
+    confirming the row and the disk agree on *which* artifact this is.
+    That would quietly break the "hashed once, consumed three times"
+    chain of custody §3.4 is built on, so the constraint is load-bearing
+    rather than tidy.
   - `bytes_state` / `bytes_pruned_at` split blob retention from row
     retention, which §7.4 otherwise conflates. "Retained while
     referenced, regardless of age" is the right rule for the *row* and
     the wrong one for half a gigabyte of superseded IOS-XE image pinned
     forever by one surviving job row. The row outlives the bytes and
     says so, so an audit query returns "published 2023-04, image pruned
-    2026-04" rather than a path that silently no longer resolves.
-  - `bundle_key` is what makes the registry renderable: it is the
-    key an `software_bundle` entry appears under, so rendering is a
-    projection of rows rather than a merge against whatever the file
-    already said. `UNIQUE(platform, bundle_key)` over rows where
-    `kind = 'image'` and `state = 'published'` gives one published image
-    per bundle key per platform, enforced by the database rather than by
-    the publish job remembering to check.
+    2026-04" rather than a path that silently no longer resolves. In
+    practice only `published` and `present` are ever written today —
+    there is no promotion step that reaches `staged` through and no
+    supersede flow yet, the same no-supersede stance an earlier iteration
+    of this store had — so `superseded_by_id` handling arrives with the
+    flow that reads it, not before.
+  - `bundle_key` is what a day-2 request names to resolve an image
+    (`hosts[].bundle`, §8.1): `UNIQUE(platform, bundle_key)` over rows
+    where `kind = 'image'` and `state = 'published'` gives one published
+    image per bundle key per platform, enforced by the database rather
+    than by whatever writes the row remembering to check.
   - `state` runs `staged` → `published` → `superseded`, with
-    `superseded_by_id` pointing at the row that replaced it. This is what
-    §6's "overwrite requires confirmation" does: confirming an overwrite
-    supersedes the old row instead of updating it in place. Updating in
-    place would rewrite history underneath the `registry_jobs` rows
-    referencing it, leaving the audit trail describing artifacts that no
-    longer exist as described. Only `published` rows render into the
-    registry.
+    `superseded_by_id` pointing at the row that replaced it, though in
+    practice only `published` is ever written today (`bytes_state`
+    likewise only ever reaches `present`, above); delete is still a hard
+    removal of row and bytes rather than a supersede.
   - Indexed on `(kind, platform)` for the browse views and on `sha512`
     for duplicate detection at ingest.
-- `software_registry.yml` (git-tracked), **a rendered projection of the
-  `artifacts` table rather than an independent source of truth.** Its
-  `software_bundle` entries are serialized artifact records field-for-field
-  (`filename`, `sha512`, `version`, `file_size`), and the
-  publish job is its sole writer. It remains the
-  file the upgrade playbook reads from; it is simply no longer
-  hand-maintained, so the two cannot drift. Because it is derived, it is
-  also *re-derivable*: the whole file is rendered from the table on
-  every publish rather than patched in place, which is what makes the
-  recovery path in §7.2 possible.
-- `registry_jobs` table: `id`, `artifact_id`, `supersedes_artifact_id`,
-  `platform`, `bundle_key`, `version`, `filename`, `sha512`,
-  `file_size`, `submitted_by`, `status`, `failure_stage`,
-  `error_summary`, `render_state`, `created_at`, `started_at`,
-  `heartbeat_at`, `deadline_at`, `finished_at`, `runner_instance_id`,
-  `job_log_path`, `registry_commit_sha`.
-  - `artifact_id` is the foreign key to the row being published. The
-    `version`/`filename`/`sha512`/`file_size` columns
-    sitting alongside it duplicate it on purpose: they are an immutable
-    snapshot of what this job published *at the time it ran*, which has
-    to survive the artifact later being superseded. The FK answers
-    "which artifact"; the snapshot answers "what did we publish that
-    day". The snapshot has to carry every field the rendered registry
-    entry carries (§3.4), or the row that exists to answer that question
-    cannot reproduce the entry it wrote.
-  - `supersedes_artifact_id` records the row the admin was actually
-    shown at confirmation time. §6's overwrite check happens at submit
-    and the supersede happens when the job runs, minutes later and
-    possibly behind another queued publish of the same key, so the admin
-    can confirm replacing X and have the job supersede Y. The promote
-    step fails if this is no longer the published row for the key. §5's
-    partial unique index catches only the end state — two published rows
-    — and not the wrong-predecessor case.
-  - `status`, `failure_stage`, `error_summary`, and `render_state` are
-    specified in §7.3 and §7.2.
-  - `created_at`, `deadline_at` and `runner_instance_id` are the columns
-    §7.3's machinery needs and §9 assumes. `created_at` is what the sibling orders the queue by —
-    `started_at` is null until dispatch, so ordering on it means
-    ordering on `NULL` for exactly the rows the sibling reads.
-    `deadline_at` makes §8's wall-clock timeout survive a sibling
-    restart, since a bound held only in the runner's memory is not a
-    bound. `runner_instance_id` is a UUID minted at sibling startup and
-    also written to settings; it is how the sweep identifies a job from
-    a dead runner, where a bare PID is reused across container restarts
-    and is meaningless across PID namespaces. There is no
-    `private_data_dir` here: with NetHub owning the store (§3.3),
-    publishing is a local operation rather than an EE dispatch (§8), so
-    the log column is named `job_log_path` rather than
-    `playbook_log_path`.
-  - Indexed on `(status, created_at)`, which is what the dashboard's
-    default view and the sibling's queue read both query.
-  - `UNIQUE(platform, bundle_key) WHERE status IN ('queued','running')`.
-    §7.1's `flock` serializes writers to the registry *file*; this
-    serializes claimants on a *bundle key*, which is a different
-    collision and the one that produces the wrong-predecessor case
-    above.
+
+**There is no separate rendered registry file, no publish job, and no
+git commit, and that is a deliberate simplification rather than a gap
+this document forgot to update.** An earlier revision of this design had
+publish write a `software_registry.yml` the device-side automation read,
+committed to git under an advisory `flock`, with its own `registry_jobs`
+row, `render_state` machine, and startup reconcile (§7.1, §7.2 as they
+used to read) — because that file was the only thing the automation could
+consume, and NetHub did not yet own the store it described. Both
+preconditions are gone: NetHub owns the store outright (§3.3), and the
+phase model reads a run's own snapshotted `upgrade_run_hosts` columns
+directly (§3.5) rather than a rendered file, so nothing left in the
+system reads `software_registry.yml`. The maintainer confirmed nothing
+*outside* NetHub read it either — it existed only for the old
+automation layer — so removing it was a deletion rather than an export
+path that needed replacing. What replaces the whole publish-job
+machinery is `artifacts.ingest()` itself: uploading an artifact *is*
+publishing it, synchronously, in the request that received the upload,
+with the two constraints above as the only concurrency control (§7.1
+restates why that is enough and §7.2 restates what atomicity story
+replaces the render/commit/reconcile one). There is consequently no
+`registry_jobs` table, no `job_log_path`, and nothing for §7.3's sweep to
+apply to on the publish side — the sweep and the terminal-status trigger
+described there are `upgrade_phase_jobs`-only now.
 - `upgrade_runs` table, the parent record for one upgrade dispatch —
   staging and installing a software bundle across a set of devices
   (§8.1): `id`, `platform`, `submitted_by`,
-  `device_username_used`, `shared_account_mode`, `request_document`,
+  `device_username_used`, `shared_account_mode`, `image_transport_used`,
+  `distribution_host_used`, `request_document`,
   `request_sha512`, `state`, `awaiting_phase`, `gate_expires_at`,
   `cancel_requested_at`, `cancel_requested_by`, `created_at`,
   `finished_at`.
@@ -1737,7 +1758,7 @@ suggestion.
     in §8.1 — cancelling a stage is safe, cancelling an activation
     mid-wave is not.
   - `device_username_used` snapshots `users.device_username` at
-    dispatch, for the reason `registry_jobs` snapshots
+    dispatch, for the same reason `upgrade_run_hosts` (below) snapshots
     `version`/`filename`/`sha512`: an audit row that re-reads its own
     answer from a mutable table stops being an audit row the first time
     somebody's mapping is corrected. `shared_account_mode` snapshots
@@ -1774,52 +1795,42 @@ suggestion.
   `file_size`, `flash_dir`, `config_backup_path`, `reported_version_pre`,
   `reported_version_post`, `state`, `last_phase`, `error_summary`, with
   `PRIMARY KEY (run_id, hostname)`. One row per targeted device, using
-  the same foreign-key-plus-snapshot arrangement as `registry_jobs`.
-  Per-host state living here rather than in the play is what retires the
-  `rescue`/`upgrade_stage_failed` bookkeeping §8.1 describes moving into
-  the backend.
-  - `config_backup_path` gives the pre-reload `ios_config: backup: true`
-    task a home the phase model actually accounts for. As written, that
-    task runs once at pre-check and writes to a relative path that
-    resolves inside the tmpfs-backed `private_data_dir` (§8, §9.2) — so
-    the one artifact worth keeping is destroyed with the execution that
-    made it, and even a surviving copy would be stale by the time
-    activate reloads the device days later (§8.1). Under the phase
-    model the backup moves to immediately before the reload — inside
-    the *activate* phase, not pre-check — and is written outside the
-    destroyed tmpfs tree, to a NetHub-owned directory this column
-    records the path into. It gets the same retention horizon as the
-    run it belongs to (365 days, §7.4), purged as a unit with it, since
-    a config backup with no expiry would be exactly the persistent
-    per-device record §2 refuses to keep, and one that outlives its own
-    run's audit trail is a backup nobody can date. `stdout`/`job_events`
-    scrubbing (§8, §7.3) is likewise scoped beyond the device credential
-    it was written for: retained install logs will contain full `show`
-    output, and a device's running-config is the same class of secret
-    §4 spends a page on (AAA keys, SNMP communities, enable hashes).
+  the same foreign-key-plus-snapshot arrangement `upgrade_runs` uses for
+  its own request-level snapshot. Per-host state living here rather than
+  scattered across ad hoc bookkeeping is what makes the phase model's
+  per-host history legible at all.
+  - `config_backup_path` is a home for a pre-reload running-config
+    capture that the phase model accounts for at the point that actually
+    matters: `phases.phase_activate` calls
+    `install.capture_running_config()` immediately before issuing the
+    reload, not at pre-check — a capture taken at submit time would be
+    stale by the time activation happens days later (§8.1), and this is
+    the same reasoning that puts `write memory` last during install
+    (below). The column exists so a backup taken minutes before an
+    upgrade is retrievable afterward rather than living only in a job
+    log; wiring the capture through to a written file at this path is
+    tracked as outstanding rather than claimed done here. It gets the
+    same retention horizon as the run it belongs to (365 days, §7.4),
+    purged as a unit with it, since a config backup with no expiry would
+    be exactly the persistent per-device record §2 refuses to keep, and
+    one that outlives its own run's audit trail is a backup nobody can
+    date. Whatever eventually reads it back has to treat a device's
+    running-config as the same class of secret §4 spends a page on (AAA
+    keys, SNMP communities, enable hashes), which bounds who may retrieve
+    it the same way `error_summary` bounds what may be written to a row.
   - The primary key is load-bearing rather than tidy. A request document
-    naming the same host twice is trivially producible in hand-written
-    YAML, and without the key it yields two inventory entries and two
-    reloads.
-  - `file_size` completes the snapshot for the same reason it does on
-    `registry_jobs`, and here the consequence is operational rather than
+    naming the same host twice is trivially producible by hand, and
+    without the key it yields two host rows and two reloads.
+  - `file_size` completes the snapshot for the same reason `sha512` and
+    `version` do, and here the consequence is operational rather than
     archival: §8's per-host stage bound is derived from it *at dispatch*,
-    before any play runs, so NetHub needs the value regardless of the
-    playbook now measuring the file itself (§8). The two are a
-    cross-check rather than a duplication — a mismatch between this
-    column and the bytes on the mount stops the run before the transfer. There is no `remote_dir` snapshot here for the same
-    reason there is no `remote_dir` column on `artifacts` (§5 above):
-    push addresses the source by filename under a fixed local mount and
-    never needed one. Without `file_size` the stage phase either cannot
-    render its inventory from this table, or has to re-read `artifacts`
-    at dispatch, which makes the snapshot
-    decorative
-    and lets a mid-run supersede silently re-target the run. With them,
-    each phase renders from the run's own rows and reads `artifacts` not
-    at all — which also settles a question the document otherwise leaves
-    open, namely whether dispatch consumes the committed
-    `software_registry.yml` or re-renders from the table. A self-contained
-    run makes the question moot.
+    before any connection opens, so NetHub needs the value in this row
+    regardless of anything measured device-side. Without it the stage
+    phase either cannot render its host list from this table, or has to
+    re-read `artifacts` at dispatch, which makes the snapshot decorative
+    and lets a mid-run supersede silently re-target the run. With it,
+    each phase reads only the run's own rows and reads `artifacts` not
+    at all.
   - `version` is the snapshotted *target*, so §7.4's own sentence — that
     these rows record "the version a device reported during that run" —
     needed columns that did not exist. `reported_version_pre` and
@@ -1859,8 +1870,8 @@ suggestion.
     `upgrade_runs.image_transport_used` rather than reading this column
     alone — including whatever eventually acts on §10's open question
     about it. It is otherwise
-    the persisted counterpart of the fact the playbook already computes
-    locally in its `always:` block. It is how a future reconciliation
+    the persisted counterpart of the fact the push adapter already
+    computes locally in its own `finally:` block. It is how a future reconciliation
     pass, or an operator running an ad hoc query today, finds "which
     devices might still have their SCP server enabled" without NetHub
     needing to keep a persistent per-device inventory to answer it
@@ -1892,20 +1903,58 @@ suggestion.
     first. `first_seen_at` still records the raw first contact,
     separately from `confirmed_at`, for the audit trail to distinguish
     "we saw this key" from "a human accepted it."
+- `host_key_scans` table: `id`, `ansible_host`, `requested_by`, `status`
+  (its own smaller vocabulary — `queued`/`running`/`succeeded`/`failed`/
+  `abandoned`, deliberately without `cancelled`/`expired`/`timed_out`,
+  since a scan has no approval gate and nothing to time out against
+  beyond the connect timeout), `key_type`, `fingerprint_sha256`,
+  `error_summary`, `created_at`, `started_at`, `finished_at`,
+  `runner_instance_id`, `consumed_at`. This is what makes the confirming
+  admin action above dispatched work rather than a Flask-side connection:
+  scanning is device I/O like everything else in `nethub/devices/`, so it
+  runs in the sibling and is claimed and swept exactly like a phase job
+  (same conditional-claim shape, same FIFO queue, same NULL-safe sweep
+  predicate) even though it is not a phase job in §7.3's sense — it has no
+  `failure_stage` vocabulary of its own and no approval gate. `consumed_at`
+  is what makes a succeeded scan confirmable at most once: the confirm
+  action reads the address, key type and fingerprint off this row rather
+  than from request-body fields a submitter could otherwise supply, and
+  refuses a scan already spent, from a different requester, or older than
+  a short freshness window past `finished_at`. It does not close §4.3's
+  separation-of-duty gap by itself — the same person can still scan and
+  then confirm, since there is no role model yet (§4.4) — it only proves a
+  confirmation corresponds to a key NetHub itself observed at some
+  specific prior moment rather than to whatever a form claims.
+- `device_host_key_audit` table: `id`, `ansible_host`, `action`
+  (`confirmed` | `deleted`), `key_type`, `fingerprint_sha256`, `actor_id`,
+  `at`. An append-only log of who confirmed or deleted a pin and what the
+  fingerprint was at that moment — captured as the **pre-image**: the
+  fingerprint being removed, for a delete, or the one newly confirmed, for
+  a confirm. It is keyed on the address string rather than on a foreign
+  key to `device_host_keys.id`, deliberately, so the record of a deletion
+  outlives the row it describes; a foreign key here would either block
+  the delete this table exists to log or dangle the moment it succeeds.
+  There is no "changed" action, because confirming already refuses to
+  overwrite a confirmed row in place (above) — the only way to change a
+  pinned key is delete, which this table records, followed by a fresh
+  confirm, which it also records.
 - `upgrade_phase_jobs` table: `id`, `run_id`, `phase`, `attempt`,
   `approved_by`, `approved_at`, `status`, `failure_stage`,
   `error_summary`, `created_at`, `started_at`, `heartbeat_at`,
-  `deadline_at`, `finished_at`, `runner_instance_id`,
-  `private_data_dir`, `playbook_log_path`. One row per EE execution,
-  reusing `registry_jobs`' status vocabulary and startup sweep (§7.3)
-  unchanged — including the four columns that vocabulary turned out to
-  need, which apply here identically. `approved_by` and `approved_at`
-  are what §8.1 means by an approval being a row rather than a
-  keystroke; without them the gate is a UI affordance instead of a
-  record.
+  `deadline_at`, `finished_at`, `runner_instance_id`, `log_path`. One row
+  per phase execution, reusing the same status vocabulary and startup
+  sweep (§7.3) a publish job would need if one still existed as a
+  dispatched job kind — it no longer does (above), so this table is the
+  sole consumer of that machinery today. There is no `private_data_dir`
+  here at all: nothing renders a directory for an execution to read, so
+  there is no `env/extravars` and no per-execution filesystem tree to
+  name. `log_path` records NetHub's own transcript of the execution
+  rather than a playbook's stdout. `approved_by` and `approved_at` are
+  what §8.1 means by an approval being a row rather than a keystroke;
+  without them the gate is a UI affordance instead of a record.
   - `UNIQUE(run_id, phase, attempt)`, and this is the mutex the gate
     actually needs. §8.1's serialization guarantee is scoped to
-    *execution*: it stops two EE processes overlapping, not two rows
+    *execution*: it stops two phase executions overlapping, not two rows
     being created. Two admins on the approval screen both clicking
     "approve: reload" write two rows, and the serial queue then runs
     them one after the other — the fleet reloads twice. §8.1 says an
@@ -2014,12 +2063,13 @@ suggestion.
     artifact rows are retained-while-referenced (§7.4), and a dangling
     junction row pointing at a purged artifact would be the opposite
     bug, silently answering "which bytes" with nothing.
-- The provisioning log and `registry_jobs` share a row shape and
-  retention helper per §3.4, distinguished by kind rather than merged.
+- The provisioning log and the software-lifecycle job tables share a row
+  shape, a retention-purge helper, and a viewer component per §3.4,
+  distinguished by kind rather than merged into one timeline.
 - `settings` table: `key`, `value`, `updated_by`, `updated_at`, plus an
   append-only, never-purged `settings_audit` recording every change with
   its old and new value. §4.4 names five OIDC settings, shared account
-  mode and its fixed `ansible_user`, and `local_accounts_enabled`; §8.1
+  mode and its fixed device username, and `local_accounts_enabled`; §8.1
   adds the target CIDR and the stage-phase concurrency cap; §4.3.1 adds
   the four transport keys below; §4.3 makes managing all of it an
   admin's job — and none of it had anywhere to live.
@@ -2149,27 +2199,25 @@ plain HTTP → hash verification on the device → attempt, outcome and
 resolved artifacts logged.
 
 **Day-2, publish** (behind admin auth): admin submits bundle
-key/version/file/checksum → backend verifies SHA-512 against staged
-bytes → artifact row written as `staged` → bundle key checked against
-the currently published row (overwrite requires confirmation, and
-supersedes rather than overwrites, §5) → job row written and the request
-returns → the sibling promotes the bytes into the published subtree,
-promotes the artifact row to `published`, re-renders the registry from
-the table under lock and commits it → job result and log recorded and
-surfaced in the dashboard.
+key/version/file/checksum → bytes stream to a temp file in the store,
+hashed incrementally as they're written → digest compared against the
+submitted claim → the two uniqueness constraints checked (§5) → the file
+is linked into place with `os.link` and the artifact row committed as
+`published` in the same request that received the upload → the result is
+surfaced immediately, with no further step and nothing left to poll.
 
-Publishing stopped being an EE dispatch when NetHub became the
-distribution host (§3.3). It was one because the store might be a remote
-machine and Ansible was the remote-operation tool already to hand; with
-the store local, publish is a rename within one filesystem plus a git
-commit. Two things this does *not* change, because the obvious
-misreading is that dropping the EE drops the machinery with it. It does
-not move into Flask — §3.2's argument applies unchanged, so publish
-stays in the sibling, keeps its `registry_jobs` row, its place in the
-serial queue, `render_state`, the `flock`, the startup sweep, and every
-state in §7.3. And it does not merge with installing: publishing touches
-no device, installing is now the only EE dispatch in the system, and
-that makes the two harder to confuse rather than easier.
+Publishing is synchronous, in-request work rather than a dispatched job,
+and that is a real simplification over an earlier revision of this
+design rather than an oversight. That revision needed a job because the
+store might be a remote machine and Ansible was the remote-operation
+tool already to hand to reach it; with the store local and owned by
+NetHub outright (§3.3), publishing is a local filesystem operation with
+nothing left to dispatch to. There is consequently no publish job row,
+no rendered registry file, no lock, and no git commit (§5, §7.1, §7.2
+say what replaced each of those). What this does *not* change is the
+separation from installing: publishing still touches no device, and
+installing is the only phase-execution dispatch in the system, which
+makes the two harder to confuse rather than easier.
 
 **Day-2, upgrade** (behind admin auth): admin uploads an upgrade request
 → request validated (supported platform, every bundle key resolving to a
@@ -2189,13 +2237,14 @@ for that execution, with each target host's confirmed-by identity and
 confirmation date shown on the approval screen → the image is
 transferred by whichever adapter `image_transport` selects (§4.3.1):
 under push, the device's SCP server is enabled if not already (prior
-state captured first), the image goes over `net_put` under the same
-credential on what is most likely a second connection, and the SCP
-server is restored to its prior state with the restore confirmed or the
-host fails; under pull, the device fetches the image from the
-distribution daemon and nothing on it is reconfigured → either way the
-image is verified against its SHA-512 on the device → admin approves
-activation → devices reloaded in serial
+state captured first), the image goes over Netmiko's
+`CiscoIosFileTransfer` under the same credential on a second SSH session
+opened through NetHub's own pinned connection path, and the SCP server
+is restored to its prior state with the restore confirmed or the host
+fails; under pull, the device fetches the image from the distribution
+daemon and nothing on it is reconfigured → either way the image is
+verified against its SHA-512 on the device → admin approves activation →
+devices reloaded in serial
 waves → verification runs without a gate →
 optionally, admin approves cleanup, or declines it and closes the run →
 per-host outcomes and phase logs surfaced in the dashboard.
@@ -2206,10 +2255,11 @@ rest". An operator can cancel a run at any gate, and between hosts
 during a phase; §8.1 says what that costs at each one.
 
 All three flows above are the success path. What happens when an
-individual step fails is §7. Because the publish flow spans a database,
-a working tree, and a git repository — and the upgrade flow spans a
-database and a fleet of devices that reboot — "what if it fails here"
-has a different answer at almost every arrow.
+individual step fails is §7. Because the upgrade flow spans a database
+and a fleet of devices that reboot, "what if it fails here" has a
+different answer at almost every arrow; publish, now synchronous and
+scoped to one filesystem plus one database row, has a much shorter list
+of ways to fail partway (§7.1, §7.2).
 
 ### 6.1 The API surface
 
@@ -2243,33 +2293,50 @@ source prefix rather than on serial plus source.
 
 **Everything else is session-authenticated, CSRF-protected on writes
 (§4.5), and falls into four groups.** Allowlist management (`GET`/`POST`
-`/allowlist`, `POST /allowlist/<id>/rearm`, `DELETE /allowlist/<id>`),
-now joined by `POST /allowlist/hosts/<address>/confirm` for the
-device-host-key confirmation §4.3.1 requires before an address can be
-targeted by any run — a deliberately separate action from anything a
-run's own submit or approval does. Artifacts and publishing
-(`POST /artifacts` for the streaming upload, `POST /publish` returning
-`202` with a job id, `GET /registry`). Upgrade runs (`POST /runs`,
-`GET /runs/<id>`, `POST /runs/<id>/approve` carrying the phase and the
-device credential, `POST /runs/<id>/decline`, `POST /runs/<id>/cancel`).
-Administration (users, settings, the audit views). Role gates the last
-group to `admin`; the rest accept `operator`.
+`/allowlist`, `POST /allowlist/<id>/rearm`, `DELETE /allowlist/<id>`, none
+of it built yet, day-0 being entirely unimplemented), joined by
+`GET /hostkeys`, `GET`/`POST /hostkeys/scan`, `GET /hostkeys/scan/<id>`,
+`POST /hostkeys/confirm`, `POST /hostkeys/<id>/delete`, and
+`GET /hostkeys/history/<address>` for the device-host-key scan/confirm
+flow §4.3.1 requires before an address can be targeted by any run — a
+deliberately separate action from anything a run's own submit or
+approval does. Artifacts and publishing (`GET /artifacts`,
+`GET`/`POST /artifacts/new` for the streaming upload — which is
+publishing itself, synchronously, per §6 above — `POST
+/artifacts/<id>/delete`, `POST /artifacts/check` for the on-demand drift
+check §5's `check_store()` describes). Upgrade runs (`GET /upgrades`,
+`GET`/`POST /upgrades/new`, `GET /upgrades/<id>`,
+`POST /upgrades/<id>/approve` carrying the phase and the device
+credential, `POST /upgrades/<id>/decline-cleanup`,
+`POST /upgrades/<id>/cancel`). Administration (`GET /users`,
+`GET`/`POST /users/new`, plus `GET /profile` and
+`POST /profile/device-username` for a user's own device-username
+mapping). Role gates the administration group to `admin`; the rest
+accept `operator` once roles exist (§4.3) — today, with no role model
+built, every authenticated user can reach everything an operator could.
 
-**Long operations return `202` and a job id, never a held connection.**
-That is §3.2's rule as an API contract. The dashboard polls `GET
-/jobs/<id>` and `GET /runs/<id>`, which return the row's `status`,
-`render_state` or `awaiting_phase`, `heartbeat_at`, and a stalled flag
-computed per §7.3. Polling rather than streaming is the same decision
-§8.1 made against a PTY, for the same reason.
+**Long operations return `202` and a job id, never a held connection**
+is the target contract; today's routes are server-rendered pages that
+redirect after a `POST` and ask the operator to reload rather than
+returning a JSON envelope a frontend polls. The underlying rule §3.2
+states is honored either way — a route that would trigger device work
+returns as soon as the job row is written, never after device I/O
+completes — but the API shape described here (a `202` plus a job id,
+`GET /jobs/<id>` and `GET /runs/<id>` returning `status`,
+`awaiting_phase`, `heartbeat_at`, and a stalled flag per §7.3) is target
+design for a richer frontend, not what a request against today's routes
+receives back. §3.1's frontend section is the place that decision
+belongs; this section states the contract it would need to honor.
 
-**One error envelope, speaking §7.3's vocabulary.** Failures carry the
-`failure_stage` and `error_summary` already stored on the row rather
-than a separately-invented set of UI strings. Where those two are enum
-values, the API returns the enum and the frontend renders it, so the
-dashboard and the log agree on words. §7.3's rule that the credential
-path emits fixed enums and never lets an exception object across that
-boundary applies to the response body exactly as it applies to the
-column, and for the same reason.
+**One error envelope, speaking §7.3's vocabulary, is the same target/
+actual split.** The row itself always carries `failure_stage` and
+`error_summary` rather than a separately-invented set of internal
+strings — that part is built, and §7.3's rule that the credential path
+emits fixed enums and never lets an exception object cross into either
+column is enforced today. Whether those values reach the browser as a
+structured API response for a frontend to render, or as text interpolated
+into a server-rendered page, is the same target-vs-actual distinction as
+the paragraph above.
 
 Approval endpoints deserve one explicit note, because they are the
 routes that carry a password and reload a fleet: `SameSite=Strict`,
@@ -2281,93 +2348,86 @@ approve, per §5's uniqueness constraint.
 ## 7. Failure, Concurrency, and Staleness
 
 §6 describes what happens when everything works. This section describes
-what happens when it doesn't, which for a system writing to three places
-that can't be committed together is most of the design.
+what happens when it doesn't, which for a system writing to a database
+and a filesystem with no shared transaction, and separately driving a
+fleet of devices that reboot, is most of the design.
 
-### 7.1 One writer, one lock, named explicitly
+### 7.1 One writer per byte, and why a lock stopped being the mechanism
 
-Registry writes are serialized by a single advisory `flock` on the
-registry repository, taken by the publish job for the whole
-render-commit sequence and released only at the end. Saying "the
-registry is locked" without naming the mechanism leaves the important
-part unspecified. An in-process mutex is the obvious default and the
-wrong choice here, because the things that can concurrently touch that
-tree are not all inside one process: a retention purge, an operator's
-shell, a second NetHub started by accident mid-deploy, and the EE
-container itself are all outside it. A file lock is the smallest
-mechanism covering all of them.
+An earlier revision of this design had publish render a git-committed
+registry file, serialized by a single advisory `flock` taken for the
+whole render-commit sequence, because the things that could concurrently
+touch that tree were not all inside one process — a retention purge, an
+operator's shell, a second NetHub started by accident mid-deploy, and
+the automation container itself were all outside it. That file, and the
+lock protecting it, are both gone (§5): with no rendered projection to
+diverge from, there is nothing left for a `flock` to serialize writers
+to. What replaced it is narrower and lives at the point bytes actually
+land on disk, in `artifacts.ingest()` — see §7.2.
 
-The job runner executes one EE run at a time (§3.2). Concurrency at this
-scale buys nothing, since publishes are occasional and admin-initiated,
-and it costs the entire class of interleaved-write bugs. The queue is
-serial by construction rather than by locking discipline.
+The publish half of the "one run at a time" rule in §3.2 is gone with
+it, because publish is no longer a dispatched run at all; it is ordinary
+request-handling work, and ordinary concurrent HTTP requests are exactly
+what §7.2's constraints are built to survive. The rule that *is* still
+true, and still named explicitly rather than left implicit, is that the
+sibling executes one phase execution at a time (§3.2, §8.1). Concurrency
+at this scale buys nothing there either, since upgrade dispatch is
+occasional and admin-initiated, and it costs the entire class of
+interleaved-device-work bugs. That queue is serial by construction
+rather than by locking discipline, the same reasoning the old registry
+lock used, applied to the one thing left in the system that still
+needs it.
 
-Before rendering, the publish job checks that the registry working tree
-is clean. A dirty tree means something outside NetHub edited the file
-NetHub is supposed to be sole writer of. The correct response is to stop
-and say so, rather than render over it and destroy the evidence.
+### 7.2 Ingest isn't atomic across two stores, so the ordering is chosen deliberately
 
-That is the right response to *one* of the two things a dirty tree can
-mean, and §7.2's reconcile prescribes the opposite response to the
-other. Both fire on the same observable signal — the file no longer
-matches what the table renders — and one says preserve, the other says
-overwrite. `render_state` is the disambiguator, and using it is what
-keeps the two sections from cancelling each other out:
+The day-2 publish touches two stores with no transaction spanning them:
+the bytes on disk and the artifact row in the database. A crash between
+the two steps leaves a visible inconsistency — bytes on disk with no row
+naming them, or (if the ordering were reversed) a row naming bytes that
+were never actually written. The design does not try to make the
+sequence atomic. It chooses an ordering and a linking primitive that
+make the failure modes each step can leave behind either harmless or
+self-correcting:
 
-- **A `registry_jobs` row sitting at `written` and not `committed`**
-  means NetHub itself was interrupted mid-publish. The table wins, the
-  reconcile re-renders, and the correction is *committed* so the repair
-  lands in history rather than appearing as a file that silently changed.
-- **No such row** means something outside NetHub edited the file — an
-  operator during an incident, most plausibly, which is the case this
-  check exists to protect. The tree is preserved untouched, publishes
-  refuse, and NetHub surfaces it as a blocking condition rather than a
-  failed job.
+- **Every check at ingest's top runs before the upload streams, and
+  proves nothing by the time the bytes are moved.** The uniqueness
+  checks (§5: `UNIQUE(filename)`, `UNIQUE(platform, bundle_key)`) are
+  read at the start of the request, but a 1.2 GB upload takes long
+  enough that a second concurrent upload sharing a filename can pass the
+  same check before either one finishes streaming. This is not a
+  hypothetical: it happened, and it corrupted a store before the fix
+  below. Two uploads sharing a filename both reached the final move, and
+  the loser overwrote the winner's already-committed bytes with its own
+  — before hitting its own `IntegrityError` — leaving the winner's row
+  recording one artifact's SHA-512 against the *other* artifact's
+  content, silently breaking the "hashed once, consumed three times"
+  chain of custody §3.4 depends on.
+- **The final move is `os.link`, never `os.replace`.** `os.link` raises
+  `FileExistsError` instead of silently overwriting the destination.
+  Both the temp path and the final path are on the same store by
+  construction, so a hard link is always available, and the race that
+  used to corrupt a store now fails loudly on whichever request loses it
+  instead of destroying the winner's bytes.
+- **The database commit is wrapped too, and ordered after the link
+  rather than before it.** The schema's uniqueness constraints fire only
+  *after* the bytes are already in place, so a file on disk with no row
+  accounting for it would otherwise block that filename for every later
+  upload forever. Losing the race removes its own bytes as part of the
+  same wrapped operation, so the filename is free again for the next
+  attempt.
 
-The second case then needs a way out, or the check is a trap: as
-written, a dirty tree refuses every publish and the only cleaner
-described anywhere is a startup reconcile, which quietly makes "restart
-the sibling" the documented remedy. So an admin can resolve the
-condition explicitly — review the diff in the UI, then either adopt the
-outside edit (commit it as-is, attributed) or discard it (reset the tree
-and re-render from the table). Either way it is an attributable action
-with a record, which is the property the stop-and-say-so rule was
-protecting in the first place.
+Bounded rather than eliminated: the corruption this closes was real, and
+its blast radius was bounded by a control one layer downstream rather
+than by this fix alone — the device's own `verify /sha512` compares
+against the row's digest at day-2 install time, so a corrupted store
+failed upgrades outright rather than installing the wrong bytes onto a
+device. That is the control this section's fix removes the need for, not
+one this section duplicates.
 
-### 7.2 The registry write isn't atomic, so it's made re-derivable
-
-The day-2 publish touches three stores with no transaction spanning
-them: the database row, the rendered `software_registry.yml`, and the git
-commit recording it. A crash between any two steps leaves a visible
-inconsistency, either a registry entry with no job row, or a job row
-naming a `registry_commit_sha` for a commit that was never made. The
-latter is guaranteed by ordering alone, since the SHA can't be recorded
-until after the commit it names exists.
-
-The design doesn't try to make the sequence atomic. It makes it
-*recoverable*, by keeping the file fully derivable from the table:
-
-- **Render whole, never patch.** Every publish regenerates the entire
-  `software_registry.yml` from all `published` artifact rows. A patched file
-  depends on its own prior contents being correct; a rendered one depends
-  only on the database, so any inconsistency is corrected by rendering
-  again.
-- **`render_state` on the job row** advances `pending` → `written` →
-  `committed`, so an interrupted publish stays identifiable afterwards
-  instead of looking like a completed one.
-- **Reconcile on startup.** NetHub re-renders the registry from the table
-  and compares against the file on disk. Equal is the normal case and
-  costs a hash comparison. Unequal means a publish was interrupted — as
-  distinguished from an outside edit by §7.1's `render_state` test — and
-  the table wins: it is the source of truth by definition (§5), and the
-  file is a projection of it. The divergence is recorded before it is
-  corrected, and the correcting commit carries a distinguishable
-  message. "The table wins" is right; doing it silently is how a tamper
-  disappears into a diff nobody reads.
-
-**Tamper-evidence currently stops at the file, and it is worth saying
-where the line falls — and being precise about which tables actually
-sit on that line.** The clean-tree check and the whole-file re-render
+**Tamper-evidence used to stop at a rendered file, and now there is no
+rendered file for it to stop at — which is a real regression worth
+naming rather than a gap this document forgot to update.** The earlier
+revision's clean-tree check and whole-file re-render
 make a modified *file* detectable and correctable. The *table* is
 covered by neither. Framed only around `artifacts.sha512` (the digest
 devices verify against, §3.4), this understates the exposure: the same
@@ -2388,42 +2448,47 @@ yield than the baseline currently prices, and it is priced correctly
 only once the tamper gap is understood to cover those tables and not
 only the digest.
 
-Two partial mitigations were already in place for the registry file, and
-one is worth extending rather than adding a third mechanism next to it:
-registry commits are signed with a key Flask does not hold, so the audit
-copy cannot be rewritten from the web tier alone, and the reconcile's
-divergence record gives a file change a witness outside the file. The
-same signed-projection pattern extends to `device_host_keys` and the
-security-relevant `settings` keys — both are already rendered-and-
-reconciled data in spirit (§3.5's render-don't-accept rule), just never
-signed — with the sibling re-checking, immediately before dispatch, that
-each target host's pinned fingerprint and the relevant settings match
-the last signed commit, refusing to proceed on mismatch. That is
-strictly cheaper than the append-only hash chain considered for
-`artifacts` alone (§10) and closes the higher-value gap first. The
-honest statement, even after that extension, is unchanged in kind: NetHub
-detects drift between its stores and does not detect a consistent lie
-told across all of them — it is now a materially smaller lie a
-compromise can tell undetected, not a closed gap.
-
-Git is an audit copy rather than a synchronization partner. Its job is
-to answer "what did this file look like on Tuesday", and a missing or
-extra commit is a gap in the audit trail rather than a corruption of
-state. The database commits first, deliberately, so the failure mode is
-always "the table knows something the file doesn't", which the reconcile
-pass fixes. The reverse case it could not fix.
+**There is currently no mitigation at all, and that is a real regression
+from the git-commit-signing design this section used to describe, not a
+detail this rewrite chose to drop.** The earlier revision signed registry
+commits with a key Flask did not hold, so an audit copy could not be
+rewritten from the web tier alone, and proposed extending that
+signed-projection pattern to `device_host_keys` and the security-relevant
+`settings` keys once they existed. With the registry file gone (§5, §7.2)
+there is nothing left to sign a commit of, and nothing built has replaced
+it: `device_host_keys`, `host_key_scans`, and `device_host_key_audit`
+(§5) all guard against a *submitter* naming an unconfirmed or wrong
+address, none of them against a *Flask-side compromise* silently rewriting
+a confirmed pin, and there is no settings table yet for the transport-repointing
+scenario below to apply to at all. An append-only hash chain over
+`artifacts`, or a signed/countersigned projection of the security-relevant
+rows once `settings` exists, is tracked as open in §10 rather than
+described here as built. The honest statement is unchanged from before,
+only weaker in degree: NetHub detects drift between the row and the bytes
+on disk (§7.2's own mechanism) and detects nothing at all about a
+consistent lie told from the row itself outward — a Flask-side RCE's real
+yield is not "forge a queued row" (§9.2's stated baseline), it is
+silently repointing a confirmed host-key pin, widening the target CIDR
+once one exists, or (once `settings` and pull-transport deployments both
+exist) naming a distribution host the attacker controls, ahead of the
+exact moment §9.1's socket releases an approver's own AAA password. That
+last one needs neither table to exist today to be worth recording as the
+highest-yield future write in the system once they do.
 
 ### 7.3 Job lifecycle and failure semantics
 
-`registry_jobs.status` is a state machine with explicit terminal states
-rather than a success flag:
+`upgrade_phase_jobs.status` is a state machine with explicit terminal
+states rather than a success flag. `host_key_scans` reuses the shape with
+a deliberately smaller vocabulary of its own (below); there is no longer
+a publish-side job status to share it with, since publish is synchronous
+(§7.1, §7.2):
 
 | status | meaning |
 | --- | --- |
-| `queued` | job row written, EE run not yet started |
-| `running` | EE run in progress; `heartbeat_at` is being updated |
-| `succeeded` | playbook completed, artifact published, registry committed |
-| `failed` | playbook ran and returned non-zero |
+| `queued` | job row written, phase execution not yet started |
+| `running` | phase execution in progress; `heartbeat_at` is being updated |
+| `succeeded` | phase completed on every targeted host |
+| `failed` | phase ran and a host reported failure |
 | `timed_out` | exceeded the per-job wall-clock limit and was killed |
 | `abandoned` | was `running` when the process died; assigned by the startup sweep |
 | `cancelled` | a human asked for it to stop, and it stopped |
@@ -2434,11 +2499,15 @@ The last two are deliberately not folded into `abandoned`. One word for
 with different follow-ups — a crash is investigated, a cancellation is
 not — and it would do so in the column an operator scans first.
 Splitting the vocabulary is what keeps `abandoned` diagnostic.
+`host_key_scans` carries only `queued`/`running`/`succeeded`/`failed`/
+`abandoned` — no `cancelled`/`expired`/`timed_out` — because a scan has
+no approval gate to expire at and nothing to time out against beyond the
+connect timeout itself (§5).
 
 **A row in a terminal `status` doesn't get written to again, and that
-needs a trigger behind it, not just a habit.** `registry_jobs` and
-`upgrade_phase_jobs` both get a `BEFORE UPDATE` trigger that raises if
-the row being replaced already had a terminal `status`
+needs a trigger behind it, not just a habit.** `upgrade_phase_jobs` gets
+a `BEFORE UPDATE` trigger that raises if the row being replaced already
+had a terminal `status`
 (`succeeded`/`failed`/`timed_out`/`abandoned`/`cancelled`/`expired`).
 Without it, nothing distinguishes "this row has always accurately
 described what happened" from "this row was mutated after the fact,"
@@ -2446,19 +2515,21 @@ which is exactly the property the audit-table triggers elsewhere in §5
 exist to guarantee and this table shares the same requirement for.
 
 `failure_stage` records *where* it stopped, and `error_summary` carries a
-short operator-facing reason. `status` is shared across job kinds —
-same machine, same sweep — but `failure_stage` is **per job kind**, or
-it collides with the phase names. A publish job stops at `promote`,
-`render`, or `commit`; §8.1's phases include `stage` and `verify`, so a
-shared vocabulary would produce an upgrade phase row reading
-`phase='activate', failure_stage='stage'` that is ambiguous on its face.
-Phase jobs use their own vocabulary (`credential`, `connect`, `hostkey`,
-`privilege`, `precheck`, `transfer`, `checksum`, `install`, `reload`,
-`postcheck`), which also carries more information than the publish set
-could. `privilege` is worth calling out: it means the submitter's account
-is not at level 15 (§4.3), which is a deployment fault rather than a
-device fault, and it surfaces at pre-check rather than part-way through a
-wave.
+short operator-facing reason. With no publish job status left to share a
+vocabulary with, `failure_stage` for a phase job is free to be exactly
+the phase-specific vocabulary this design always needed: `credential`,
+`connect`, `hostkey`, `privilege`, `precheck`, `transfer`, `checksum`,
+`install`, `reload`, `postcheck`. That it no longer has to avoid
+colliding with a publish-side `promote`/`render`/`commit` set is a side
+effect of that set no longer existing, not the original reason for
+keeping the vocabularies separate — the original reason survives anyway,
+since §8.1's phases are themselves named `stage` and `verify`, and a
+value called `failure_stage` reading `phase='activate',
+failure_stage='stage'` would still be ambiguous on its face if the two
+vocabularies were ever merged. `privilege` is worth calling out: it means
+the submitter's account is not at level 15 (§4.3), which is a deployment
+fault rather than a device fault, and it surfaces at pre-check rather
+than part-way through a wave.
 
 Both fields are written by the code paths that sit closest to the
 secrets, and `error_summary` is free text retained for a year (§7.4). A
@@ -2468,47 +2539,30 @@ that the credential path emits fixed enum strings into these two columns
 and never lets an exception object cross that boundary; the detail
 belongs in the scrubbed log, not in the row.
 Without them, a failed job in the dashboard says only that something
-went wrong, leaving the operator to go reading `playbook_log_path` by
-hand at exactly the moment they need an answer quickly.
+went wrong, leaving the operator to go reading `log_path` by hand at
+exactly the moment they need an answer quickly.
 
 Several rules fall out of this:
 
 - **A crashed job doesn't stay `running` forever.** `heartbeat_at` is
   updated during the run **on its own timer inside the sibling's
-  monitoring loop, independent of ansible-runner task-event
-  boundaries** — that precision matters because §8 gives the stage phase
-  a per-host bound derived from `file_size` specifically because a
-  single job-level bound is the wrong shape for a phase moving
-  gigabytes, and the same reasoning applies to heartbeat freshness. A
-  single transfer of a multi-hundred-megabyte image is one Ansible task
-  in either transport — a `net_put` push, or a `copy sftp://…` the
-  device runs while the session waits; driving `heartbeat_at` off
-  task-start/task-end events rather
-  than a wall-clock timer would render a slow-but-healthy transfer as
-  *stalled* for its whole duration, undermining the distinction the next
-  paragraph is built on. A sweep at startup moves any `running` job from
-  a *different* `runner_instance_id` than the current sibling's to
-  `abandoned` (§5). Keying on the instance UUID rather than on a PID is
-  what makes that test correct: a PID is reused across container
-  restarts and arrives as a meaningless number across PID namespaces. A
-  job stuck at `running` is otherwise indistinguishable from a slow one,
-  which means nobody investigates it.
-
-  **That sweep needs one check before it writes `abandoned`, or it can
-  misclassify a job that actually finished.** The publish sequence
-  (§7.2) — promote, write file, git commit, then the trailing
-  `render_state`/`status` writes — is not transactional. A crash after
-  the commit lands but before those trailing writes leaves a `running`
-  row with a foreign `runner_instance_id`, and the sweep as described
-  marks it `abandoned` unconditionally — permanently, since abandonment
-  needs a fresh approval rather than an auto-retry (below). But the
-  publish already succeeded: the file and git history are correct. Before
-  writing `abandoned` to a `registry_jobs` row, the sweep checks whether
-  the rendered file already matches this job's own snapshot and its
-  `registry_commit_sha` already exists in git — if so, it finishes the
-  row to `succeeded`/`committed` instead. Without this, an auditor
-  reading the row a year later sees a failed publish that was in fact
-  live in production the entire time.
+  monitoring loop, independent of any per-host event boundary** — that
+  precision matters because §8 gives the stage phase a per-host bound
+  derived from `file_size` specifically because a single job-level bound
+  is the wrong shape for a phase moving gigabytes, and the same reasoning
+  applies to heartbeat freshness. A single transfer of a
+  multi-hundred-megabyte image is one long-running call in either
+  transport — a Netmiko SCP push, or a `copy sftp://…` the device runs
+  while the session waits; driving `heartbeat_at` off per-host
+  start/end events rather than a wall-clock timer would render a
+  slow-but-healthy transfer as *stalled* for its whole duration,
+  undermining the distinction the next paragraph is built on. A sweep at
+  startup moves any `running` job from a *different* `runner_instance_id`
+  than the current sibling's to `abandoned` (§5). Keying on the instance
+  UUID rather than on a PID is what makes that test correct: a PID is
+  reused across container restarts and arrives as a meaningless number
+  across PID namespaces. A job stuck at `running` is otherwise
+  indistinguishable from a slow one, which means nobody investigates it.
 - **A sibling that dies and stays dead is swept by nobody.** §9 puts the
   sweep in the sibling so it can never fire while a healthy run
   progresses under another process, which is the right reasoning and
@@ -2538,40 +2592,36 @@ Several rules fall out of this:
   `cancelled`. What that means differs by phase and is §8.1's subject:
   cancelling a stage is safe *for the fleet* — an in-flight host may
   still need its SCP server restored, so the sibling lets a host already
-  mid-push reach its own `rescue:`/`always:` before honoring the cancel,
-  rather than dropping the EE process outright (§4.3.1) — cancelling an
-  activation mid-wave leaves the fleet split across two versions, and
+  mid-push reach its own `try`/`finally` before honoring the cancel,
+  rather than killing the sibling process outright (§4.3.1) — cancelling
+  an activation mid-wave leaves the fleet split across two versions, and
   the UI says so before it accepts the request. A `queued` job cancels
   cleanly by never starting.
-- **`queued` is bounded too, and the bound now has a stated resolution
-  for the case where publish and phase jobs might otherwise compete for
-  it.** §8's wall-clock timeout starts at *run*, so a job that never
-  starts has no bound at all. `deadline_at` (§5) is set at enqueue
-  rather than at dispatch, and a job that passes it without being
-  claimed goes to `expired`. This is the same bound §9.1 puts on a held
-  credential, arriving from the queue's side — and it is the reason
-  `registry_jobs` and `upgrade_phase_jobs` share **one FIFO queue in the
-  sibling**, ordered by `created_at` across both kinds, rather than two
-  independently-scheduled tracks. Publishing stopped being an EE
-  dispatch (§8) but is still the sibling's own serialized work; running
-  it on a second concurrent track would need its own fairness and
-  locking story for a benefit this design doesn't need, and it would
-  make §9.1's "queued for hours behind a long activation wave" scenario
-  depend on an unstated scheduling policy instead of the one rule above.
-  A consequence worth stating plainly: `expired` is reachable for
-  `registry_jobs` (no credential involved) but effectively unreachable
-  for `upgrade_phase_jobs` in practice, since the credential TTL (§9.1,
+- **`queued` is bounded too.** §8's wall-clock timeout starts at *run*,
+  so a job that never starts has no bound at all. `deadline_at` (§5) is
+  set at enqueue rather than at dispatch, and a job that passes it
+  without being claimed goes to `expired`. This is the same bound §9.1
+  puts on a held credential, arriving from the queue's side. The
+  sibling's dispatch loop checks for a queued `host_key_scans` row ahead
+  of a queued `upgrade_phase_jobs` row on every iteration, rather than
+  merging the two into one ordered queue: a scan takes seconds and an
+  admin is watching a result page for it, so it should not queue behind
+  a phase job that might be a 15-minute stage already in flight. A
+  consequence worth stating plainly: `expired` is a real state in
+  `upgrade_phase_jobs`' vocabulary but effectively unreachable in
+  practice, since the credential TTL (§9.1,
   measured in minutes) will almost always expire and fail the phase
   `failure_stage: credential` before any sane `deadline_at` would — not
   a bug, just a reason not to spend effort tuning `deadline_at`
   precision for phase jobs specifically.
-- **A failed publish doesn't promote the artifact.** The artifact stays
-  `staged`, the previously published row stays published, and the
-  registry is never rendered, so a failed job leaves the fleet on the
-  last known-good registry instead of in a partial state. Staged bytes
-  already written into the staging tree are left in place and collected
-  by retention (§7.4). Deleting them on failure would destroy evidence of
-  what went wrong, and nothing references them in the meantime.
+- **A failed ingest doesn't leave a partial artifact.** §7.2 already
+  covers this at the mechanism level: the row commits only after the
+  bytes are linked into place, so a failure at any point before that
+  leaves no `published` row and no orphaned filename claim, and a
+  previously published row for the same bundle key is untouched. There is
+  no separate "failed publish" state to reason about, because there is no
+  longer a window between "bytes moved" and "row committed" wide enough
+  to observe as one.
 
 **All three machines, with the actor on every edge.** The table above
 enumerates job status and the rest of the document named the other two
@@ -2581,7 +2631,8 @@ states: §9's whole architecture is a statement about which process may
 write what, and a transition table that does not say who performs each
 edge cannot be checked against it.
 
-*Job status* — `registry_jobs` and `upgrade_phase_jobs` alike:
+*Job status* — `upgrade_phase_jobs`, and `host_key_scans` sharing the
+same shape minus the three states it has no use for:
 
 | from | to | actor |
 | --- | --- | --- |
@@ -2589,7 +2640,7 @@ edge cannot be checked against it.
 | `queued` | `running` | sibling, conditional claim (§9.2) |
 | `queued` | `cancelled` | sibling, seeing the cancel column |
 | `queued` | `expired` | sibling, past `deadline_at` |
-| `running` | `succeeded` / `failed` | sibling, on EE exit |
+| `running` | `succeeded` / `failed` | sibling, on phase completion |
 | `running` | `timed_out` | sibling, at `deadline_at` |
 | `running` | `cancelled` | sibling, between hosts |
 | `running` | `abandoned` | sibling's startup sweep, foreign `runner_instance_id` |
@@ -2649,21 +2700,20 @@ system, which requires numbers rather than an adjective:
   space §4.2 defines. "Never purged" is only affordable because the keys
   are bounded; over an attacker-chosen key space it would be an
   unbounded-growth attack on the database every other subsystem shares.
-- **`registry_jobs`**: 365 days, matching the operational question they
-  answer ("what did we deploy last year, and when").
 - **`upgrade_runs`** and their host and phase rows: 365 days, purged as
-  a unit with the run. They answer the same class of question from the
-  other end ("what did we install, where, and who approved it"), so
-  splitting the horizon between the two would leave half of a publish-
-  then-install story on disk and the other half collected.
+  a unit with the run, matching the operational question they answer
+  ("what did we install, where, and who approved it, and when").
+  `host_key_scans` is not part of this horizon — it is a dispatch record
+  rather than a publish or install audit trail, and is cheap enough to
+  retain on its own shorter schedule or purge on use via `consumed_at`.
 - **Allowlist entries**: expire on their per-entry TTL (§4.1), not on a
   global schedule.
 - **Artifact rows**: retained while referenced. A row that is
-  `published`, or that any non-purged job row points at, is never
-  collected regardless of age. That's a hard constraint rather than a
-  policy knob. Collecting a published artifact would break the registry
-  referencing it, and collecting a referenced one would leave the audit
-  trail pointing at nothing.
+  `published`, or that any non-purged run's `upgrade_run_hosts` snapshot
+  points at, is never collected regardless of age. That's a hard
+  constraint rather than a policy knob. Collecting a published artifact
+  would break day-2 dispatch resolving it, and collecting a referenced
+  one would leave the audit trail pointing at nothing.
 - **Artifact bytes**: a separate axis, because the two were conflated
   and one of them is measured in hundreds of megabytes. The rule above
   is right for a row and wrong for a blob: a three-year-old superseded
@@ -2677,55 +2727,60 @@ system, which requires numbers rather than an adjective:
   row and bytes together, which is what §7.3's "left in place and
   collected by retention" was promising and had no mechanism for.
 
-**The purge runs in the sibling.** §7.1 lists it among the things that
-can concurrently touch the registry tree and never says which process it
-lives in, which leaves the `flock` argument naming a contender that
-exists nowhere. It belongs with the sibling for the same reason the
-startup sweep does: it takes the registry lock, it deletes files on the
-store, and neither is work for the process holding the unauthenticated
-route (§3.2). It runs on a timer rather than at startup,
-so a long-lived deployment collects on schedule rather than on restart.
+**The purge runs in the sibling.** It deletes artifact bytes and rows,
+run/phase/host rows, and provisioning-log rows on the store and in the
+database, and neither is work for the process holding the unauthenticated
+route (§3.2) — the same reasoning that keeps every other device-touching
+or filesystem-mutating operation out of Flask (§9). It runs on a timer
+rather than at startup, so a long-lived deployment collects on schedule
+rather than on restart.
 
 `device_host_keys` rows are not purged on a schedule. They are a
 security control rather than a log, and expiring one silently converts a
 fail-closed mismatch back into a first-contact prompt — which is the
 exact moment an attacker would want. A row is removed when an operator
-retires the address, deliberately and attributably.
+retires the address, deliberately and attributably — logged to
+`device_host_key_audit` (§5), which is itself never purged for the same
+reason `user_admin_audit` isn't.
 
-Purging a `registry_jobs` or `upgrade_phase_jobs` row also removes its
-`playbook_log_path` file in the same operation. A retention helper that
-deletes rows and leaves logs behind produces an ever-growing directory
-of orphans nothing can attribute — and the phase model multiplies those
-files per run, so the coupling matters more here than it did with one
-log per publish.
+Purging an `upgrade_phase_jobs` row also removes its `log_path` file in
+the same operation. A retention helper that deletes rows and leaves logs
+behind produces an ever-growing directory of orphans nothing can
+attribute — and the phase model produces one such file per phase
+execution per run, so the coupling matters more here than it would with
+a single log per operation.
 
-Staleness is a property of the fleet, not of NetHub. The registry
-records what a device *should* run. Nothing in NetHub records what it
-*does* run, and per §2 nothing should, because that is inventory. An
-upgrade run is not the exception it looks like: `upgrade_run_hosts`
-records the version a device reported *during that run*, which is a
-property of the job and expires with it, and those rows are deliberately
-never rolled up into a current-state view per device. That roll-up is
-precisely the line between a job record and an inventory. The
-consequence is that NetHub cannot tell an operator which devices are
-behind, only what the current target is and which jobs ran against it.
-Anything resembling fleet drift reporting has to come from the Ansible
-side, where facts are gathered.
+Staleness is a property of the fleet, not of NetHub. NetHub's own
+records describe what was published and what a run targeted; nothing in
+NetHub records what a device *currently* runs, and per §2 nothing
+should, because that is inventory. An upgrade run is not the exception it
+looks like: `upgrade_run_hosts` records the version a device reported
+*during that run*, which is a property of the job and expires with it,
+and those rows are deliberately never rolled up into a current-state view
+per device. That roll-up is precisely the line between a job record and
+an inventory. The consequence is that NetHub cannot tell an operator
+which devices are behind, only what the current target is and which jobs
+ran against it. Anything resembling fleet drift reporting has to come
+from a dedicated fact-gathering pass — `scripts/check_device_facts.py`
+today is a manual, per-device version of that, run and replayed by hand
+rather than a scheduled sweep — not from a persistent view this design
+refuses to build.
 
-**Kea is a fourth store, and §7 was written as though there were
-three.** The database, the rendered registry, and the git repository are
-all handled carefully above; the DHCP reservations §4.1 relies on are
-mentioned nowhere in this section. They are derived data with the same
-drift problem: a reservation that outlives a consumed or expired
-allowlist entry silently re-opens gate 1 — the gate §4.1 introduced
-specifically so that phone-home would not be the only one — and it does
-so invisibly, because nothing compares the two. The fix is §7.2's own
-pattern applied one store over: the reservation set is *rendered whole*
-from `allowlist_entries` rather than patched per entry, and reconciled
-against Kea's configuration on startup and after every allowlist change.
-The table wins there too. This does not make NetHub a DHCP manager any
-more than the registry makes it a file server; it makes the reservation
-a projection rather than a copy.
+**Kea is a third store, and §7 was written as though there were only
+two.** The database and the artifact store on disk are handled carefully
+above (there is no longer a git repository in the mix, §7.1/§7.2); the
+DHCP reservations §4.1 relies on are mentioned nowhere in this section.
+They are derived data with the same drift problem: a reservation that
+outlives a consumed or expired allowlist entry silently re-opens gate 1 —
+the gate §4.1 introduced specifically so that phone-home would not be the
+only one — and it does so invisibly, because nothing compares the two.
+The fix is §7.2's own before-and-after ordering discipline applied one
+store over: the reservation set is *rendered whole* from
+`allowlist_entries` rather than patched per entry, and reconciled against
+Kea's configuration on startup and after every allowlist change. The
+table wins there too. This does not make NetHub a DHCP manager any more
+than owning the artifact store makes it a general file server; it makes
+the reservation a projection rather than a copy.
 
 **The sibling renders it, not Flask, and that follows from a rule §9
 already states for a different store.** "After every allowlist change"
@@ -2741,24 +2796,33 @@ allowlist row exactly as before, and the sibling reconciles on a timer
 and on a polled change signal, the same division of labor it already
 has for the registry.
 
-## 8. Ansible EE Integration
+## 8. Device Layer and Dispatch
 
-Reuse a pinned EE image, invoke via the `ansible-runner` Python API,
-with a minimal per-job `private_data_dir` and a rendered inventory
-rather than the full fleet inventory. **There is one EE dispatch in the
-system and it is the upgrade** (§8.1). Publishing used to be a second
-one, dispatched against a distribution host that might have been remote;
-with NetHub owning the store (§3.3) it is local work the sibling does
-directly (§6), so `publish_image.yml` and its per-platform selection no
-longer exist. The two operations remain firmly separate — publishing
-touches no device, installing is the only thing that does — but they are
-now separate in kind rather than two instances of the same mechanism.
+Ordinary Python driving Netmiko, in five modules under
+`nethub/devices/`: `facts.py` (`show version`/`dir`/`show privilege`,
+parsed with ntc-templates), `connection.py` (the only way any NetHub
+process opens a device session, carrying the host-key pin and the
+authentication mechanics from §4.3), `transfer.py` (`stage_image()` plus
+the push/pull adapters from §4.3.1), `install.py` (activate/reload/
+verify/cleanup), and `phases.py` (the per-host loop, the
+exception-to-`failure_stage` mapping, and the rows). `nethub/sibling.py`
+dispatches them and `nethub/upgrade_routes.py`/`nethub/upgrades.py`
+create the rows they work from. **There is one phase-execution dispatch
+in the system and it is the upgrade** (§8.1). Publishing used to be a
+second one, dispatched against a distribution host that might have been
+remote; with NetHub owning the store (§3.3) it is synchronous, in-request
+work (§6, §7.1, §7.2), so there is nothing left for it to dispatch to.
+The two operations remain firmly separate — publishing touches no
+device, installing is the only thing that does — and they are now
+separate in kind rather than two instances of the same mechanism: one is
+a request handler, the other is a dispatched execution the sibling
+claims from a queue.
 
-Every run carries a wall-clock timeout and is killed on expiry instead
-of being allowed to hang indefinitely (`timed_out`, §7.3). An EE run
-that never returns is the failure mode a serial queue handles worst,
-since one stuck job blocks everything behind it, so the bound matters
-more here than it would with a concurrent runner.
+Every phase execution carries a wall-clock timeout and is killed on
+expiry instead of being allowed to hang indefinitely (`timed_out`, §7.3).
+An execution that never returns is the failure mode a serial queue
+handles worst, since one stuck job blocks everything behind it, so the
+bound matters more here than it would with a concurrent runner.
 
 **A single job-level bound is the wrong shape for a phase that moves
 gigabytes.** Sizing one number for the slowest host on the narrowest
@@ -2768,163 +2832,152 @@ generous stops being diagnostic. The stage phase therefore carries a
 floor transfer rate, so a host that stalls fails in minutes while a
 genuinely slow one is allowed the time it needs. NetHub has the size
 authoritatively at dispatch (below), so this costs nothing to compute.
-**This bound is a task-level timeout on the transfer task itself
-(`ansible_command_timeout`, or `async:`/`poll:`), not a process-level
-kill of the EE job** — the distinction matters most under the push
-transport, where the stage phase brackets the transfer with a
-device-config change it must restore (§4.3.1),
-and a bound implemented as a job-level `SIGKILL` would routinely bypass
-that restore on exactly the slow links this bound exists to catch,
-turning the "accepted residual risk" §4.3.1 describes for a hard kill
-into the common case rather than the rare one. Expiring the task-level
-bound raises inside the play and falls into the stage block's own
-`rescue:`/`always:` like any other task failure. The job-level bound
-remains as the outer backstop for everything else — a genuinely hung EE
-process, not this specific transfer. What is retained for
-diagnosis is the scrubbed `stdout` and `job_events`, written to
-`playbook_log_path` and purged with the job row (§7.4). The
-`private_data_dir` itself is *not* kept: it is tmpfs-backed, and its
-`env/` and `inventory/` subtrees are destroyed when the execution ends
-(§9.2). Retaining the directory wholesale — the obvious reading of "keep
-it for diagnosis" — would park `env/extravars` on disk for the row's
-full 365 days, which is the opposite of what §4.3 and §4.3.1 claim about
-where credentials live.
+**This bound is Netmiko's own read timeout on the transfer call itself,
+not a process-level kill of the sibling** — the distinction matters most
+under the push transport, where the stage phase brackets the transfer
+with a device-config change it must restore (§4.3.1), and a bound
+implemented as a `SIGKILL` against the sibling process would routinely
+bypass that restore on exactly the slow links this bound exists to
+catch, turning the "accepted residual risk" §4.3.1 describes for a hard
+kill into the common case rather than the rare one. Expiring the
+read-timeout bound raises inside the adapter's own `try`/`finally` like
+any other transfer failure. The job-level bound remains as the outer
+backstop for everything else — a genuinely hung phase execution, not
+this specific transfer. What is retained for diagnosis is written to
+`log_path` and purged with the job row (§7.4). There is no directory
+retained wholesale the way an earlier, EE-based revision of this design
+worried about: nothing renders a directory for an execution to read in
+the first place (§3.5, §9.2), so there is no `env/extravars` to
+accidentally park on disk for the row's full 365 days — the credential
+lives only as the `PhaseContext` attribute §4.3 and §4.3.1 describe.
 
-NetHub always populates `file_size` in the rendered registry entry.
-Because ingest measures the file in the same pass that hashes it (§3.4),
-the size is authoritative before any device is ever contacted, which is
-what lets §8's per-host stage bound be computed *at dispatch* — before
-the play starts and therefore before anything in the playbook could
-measure anything. That requirement is unchanged and is the reason
-`file_size` is snapshotted onto `upgrade_run_hosts` as well as onto the
-artifact row (§5): a phase renders its inventory from the run's own rows,
-without a lookup that could return a superseded answer.
+NetHub always populates `file_size` on the artifact row at ingest, and
+snapshots it onto `upgrade_run_hosts` at submit (§5). Because ingest
+measures the file in the same pass that hashes it (§3.4), the size is
+authoritative before any device is ever contacted, which is what lets
+§8's per-host stage bound be computed *at dispatch* — before any
+connection opens and therefore before anything device-side could measure
+anything.
 
-**What changed is who the playbook trusts, not who computes the
-authoritative value.** The playbook now measures the image itself, with
-one `stat` against the controller's own copy of the published tree
-(`tasks/resolve_target_bundle.yml`), and treats a rendered `file_size` as
-something to *agree with* rather than something to depend on: if both are
-present and they disagree, the run stops before any transfer, because the
-bytes on the mount are then not the bytes the registry describes and the
-device-side `verify /sha512` would only discover that after moving several
-hundred megabytes. If only one is present, it is used. The motivation is
-decoupling — the playbooks are meant to stay runnable standalone (§2),
-and a task file that cannot resolve a size without NetHub having rendered
-one is a NetHub dependency sitting in the layer that is supposed not to
-have any.
-
-This is not a reinstatement of `upgrade_iosxe.yml`'s remote-size
-discovery cascade, and the difference is worth stating so it is not
-re-litigated as one. That cascade was three tiers — a declared value, a
-per-run `localhost` size cache via `delegate_facts`, and a remote stat
-that shelled out to a `files/remote_image_size.py` helper referenced by
-the playbook but never written — and it *preferred* the declaration,
-discovering only when one was absent. What replaces it is one local
-`stat` and one fallback, in the opposite order, with no cache, no helper
-script and no remote execution. The reason there is no remote tier is the
-same reason there is no `remote_dir` (§5): the image is on a filesystem
-the controller can read under both transports. Push reads it off a
-read-only mount; pull has the SFTP daemon export that same path, so "the
-image is on the distribution host" names the address the *device* dials,
-not a second filesystem. The declared-value fallback exists for the one
-case outside NetHub's own deployment — a hand run against a distribution
-host that really is a separate machine — and would become load-bearing
-again if §10's mirror question is ever answered yes.
+**What the transfer layer trusts is the mount, not the snapshotted
+column, and the snapshot is a cross-check rather than an input.**
+`transfer.resolve_source()` measures the image itself with one `stat`
+against NetHub's own copy of the published tree, and treats the
+snapshotted `file_size` as something to *agree with* rather than depend
+on: if the two disagree, the run stops before any transfer, raising
+`TransferError` rather than proceeding, because the bytes on the mount
+are then not the bytes the row describes and the device-side
+`verify /sha512` would only discover that after moving several hundred
+megabytes. This is a small, direct function rather than a discovery
+cascade with a remote tier: there is no second machine to shell out to
+and measure, for the same reason there is no `remote_dir` column
+anywhere in the schema (§5) — under push the sibling reads the file off
+its own local mount, and under pull the SFTP daemon exports that exact
+same path, so "the image is on the distribution host" names the address
+the *device* dials, not a second filesystem NetHub would need to reach
+across. A design that assumed the store could be a genuinely separate
+machine would need that remote tier back; owning the store outright
+(§3.3) is what removes it.
 
 ### 8.1 Upgrade dispatch and the phase split
 
 Publishing an image and installing it are two different dispatches. §6's
-day-2 flow ends at a published artifact and a committed registry;
-installing is a second job kind, dispatched by the same sibling against
-the same pinned EE, that installs a published image onto a set of
-devices. The committed playbooks (`stage_cisco_upgrade.yml`,
-`install_cisco_upgrade.yml`) are a hand-run, two-file stand-in for this —
-see the note at the end of this section.
+day-2 publish flow ends at a published artifact row, full stop; installing
+is the one dispatch left in the system, run by the sibling against
+`nethub/devices/phases.py`, that installs a published image onto a set
+of devices. This is built and validated against real hardware, not a
+hand-run stand-in — see "Device layer" below for the timings.
 
 What a user submits is a request document, not an inventory: hosts, one
-bundle key per host, and a small closed set of typed knobs. This is
-§3.5's rule applied to the upgrade dispatch. NetHub
-validates it and compiles the real inventory around it. The two things
-it will not take are the reason for that indirection. A user-supplied
-playbook is arbitrary code inside the EE with the live device credential
-in reach — an authenticated RCE primitive beside the unauthenticated
-route §4 spends its length reasoning about. There is no longer a
-separate distribution credential to price this against (§4.3.1 removed
-it); the device credential §9.1 injects for the phase execution is the
-one that matters, and per-phase collection bounds what it is worth after
-the phase ends. It does nothing about what a playbook could do with it
-while the phase is still running, so the rule stands unchanged. A
-user-supplied inventory carries `software_registry`, which would let a
-request name any filename against any SHA-512 and bypass the `artifacts`
-table entirely, breaking §3.4's "hashed once at ingest, consumed three
-times" at the third consumption. Connection vars are withheld for a
-third reason: `ansible_user` is the submitter's own device identity, and
-an identity the submitter can type is not evidence of anything.
+bundle key for the whole run, and a small closed set of typed knobs
+(`nethub/upgrades.py`'s own docstring is the contract itself, having
+moved there from `ansible/inventory/README.md` when build step 6 deleted
+that layer). NetHub validates it and compiles the rest. The two things it
+will not take are the reason for that indirection. User-supplied device
+code is arbitrary code with the live device credential in reach — an
+authenticated RCE primitive beside the unauthenticated route §4 spends
+its length reasoning about; there is nothing left in the tree that
+accepts one, since device work is `nethub/devices/`, closed at build
+time because it is code in this repo rather than anything a request
+selects. There is no longer a separate distribution credential to price
+this against either (§4.3.1 removed it); the device credential §9.1
+injects for the phase execution is the one that matters, and per-phase
+collection bounds what it is worth after the phase ends. It does nothing
+about what code could do with it while the phase is still running, so the
+rule stands unchanged regardless. A user-supplied inventory or registry
+entry would let a request name any filename against any SHA-512 and
+bypass the `artifacts` table entirely, breaking §3.4's "hashed once at
+ingest, consumed three times" at the third consumption — so a request
+names a bundle *key*, resolved server-side to a row, never a filename or
+a digest. Connection vars are withheld for a third reason: the device
+username is the submitter's own identity read server-side
+(`users.device_username`), and an identity the submitter could type
+instead would not be evidence of anything. Two narrowings in the actual
+implementation are worth naming as simplifications rather than
+disagreements with the contract above: today's `submit()` takes one
+bundle key for the whole run rather than one per host, and `flash_dir` is
+not submittable at all (it defaults on the column) — both are additive
+to widen later, needing no rule revisited.
 
-**Every field a request *does* supply is validated against a character
-allowlist before it reaches a rendered Jinja context or a device command
-string, not only the fields called out as connection vars.** §9.2
-already states this rule for the one input closest to a secret — a
-credential "validated against a character allowlist before it goes
-anywhere near a variable or a command string" — but the request
-document's own fields need it too, and didn't have it stated here.
-`hosts[].bundle` resolves to `artifacts.filename`/`version`, which are
-themselves operator-controlled at upload time (§5's `UNIQUE(filename)`
-constraint closes one failure mode of that, not this one) and land
-directly in the rendered registry and in the `install add file …` /
-`verify /sha512 …` command strings the playbook runs — an unescaped
-`{{ ... }}` in a filename is the playbook-upload hole reached through
-ingest instead of through the request document, and unescaped whitespace
-or a newline appends to a level-15 command line. `hosts[].name` is used
-as a literal path component (the config-backup filename, §5); an
-unvalidated `../../` in it escapes the intended directory. `flash_dir`
-is documented as `flash:`/`bootflash:` and is validated as a closed
-enum, not a free string, for the same reason. The rule closing all of
-these: filenames, versions, and hostnames match a restricted charset
-(`[A-Za-z0-9._-]`, no leading `-`) at both ingest and submit time,
-`sha512` matches exactly 128 hex characters, and `{`, `}`, and control
-characters are rejected outright wherever they'd otherwise reach a
-rendered context.
+**Every field a request *does* supply should be validated against a
+character allowlist before it reaches a device command string, and this
+is only partly built today.** §9.2 already states this rule for the
+input closest to a secret — a credential "validated against a character
+allowlist before it goes anywhere near a variable or a command string" —
+and `artifacts.py` enforces it for the fields it owns: `_SHA512_RE`
+requires exactly 128 hex characters, `_BUNDLE_KEY_RE` restricts the
+bundle key to a boring charset, and the filename is passed through
+`werkzeug.secure_filename` at ingest, closing the injection path before
+any of those values reach `install add file …` / `verify /sha512 …`
+command strings at day-2 dispatch. `hosts[].name` (the request's
+hostname field) is **not** charset-restricted in `upgrades.parse_hosts()`
+today — it is deduplicated and rejected if blank, nothing more. That
+matters because the design intends it to become a literal path component
+(the config-backup filename, §5), where an unvalidated `../../` would
+escape the intended directory; the risk is currently latent rather than
+live only because the config-backup write path itself isn't wired up yet
+(§5), and closing the charset gap belongs in the same change that wires
+it up, not after.
 
-**`ansible_host` is the one connection var a request does supply, and
-saying "no connection vars" without that carve-out is wrong in a way
-that matters.** A request has to name the devices it targets; an address
-is not an identity claim and withholding it would leave nothing to
-submit. But the field is the whole attack in §4.3's credential model —
+**The target address is the one connection-shaped field a request does
+supply, and saying "no connection vars" without that carve-out is wrong
+in a way that matters.** A request has to name the devices it targets; an
+address is not an identity claim and withholding it would leave nothing
+to submit. But the field is the whole attack in §4.3's credential model —
 naming a machine you control is enough to be handed someone's device
-password — so it is accepted under three constraints rather than
-trusted, not two. It must be an IPv4/IPv6 **literal** — a hostname would
-let the CIDR check below and the eventual connection resolve to
-different addresses at different times, and would key
-`device_host_keys` on a string whose meaning can silently change later
-(§4.3). It is validated against a deployment-level target CIDR by
+password — so it is accepted under constraints rather than trusted, and
+`upgrades.check_target()` and `confirmed_key()` are exactly this,
+enforced in code today rather than only argued here. It must be an
+IPv4/IPv6 **literal** — a hostname would let the CIDR check and the
+eventual connection resolve to different addresses at different times,
+and would key `device_host_keys` on a string whose meaning can silently
+change later (§4.3). It is validated against `DEVICE_TARGET_CIDRS` by
 numeric comparison on that literal, which is a network boundary rather
 than an inventory and so does not reopen §2's non-goal. And — the
 constraint that closes the gap §4.3.1 describes rather than merely
 raising its cost — the address must already have a **confirmed** row in
-`device_host_keys` (§4.3.1); an address nobody has deliberately
-confirmed cannot be named as `ansible_host` at all, which is what turns
-"an address NetHub will dial" into "a device a human has already met and
-attested to," not merely "a device NetHub happened to meet first during
-this run." The distinction to hold on to is between vars that assert
-*who someone is* — `ansible_user`, credentials, `become` settings —
-which a submitter never supplies, and the address of the thing being
-acted on, which they must and which is now verified before it's acted
-on rather than only afterward.
+`device_host_keys` (§4.3.1); an address nobody has deliberately confirmed
+cannot be submitted at all, which is what turns "an address NetHub will
+dial" into "a device a human has already met and attested to," not
+merely "a device NetHub happened to meet first during this run." The
+distinction to hold on to is between vars that assert *who someone is* —
+the device username, credentials — which a submitter never supplies, and
+the address of the thing being acted on, which they must and which is
+now verified before it's acted on rather than only afterward.
 
-**The playbooks' `pause` prompts assume a terminal that no longer
-exists.** Run by hand, `stage_cisco_upgrade.yml` and
-`install_cisco_upgrade.yml` each stop once, in their own preview play,
-to ask permission before touching any device. Dispatched out-of-band by
-the sibling, there is no stdin to
-answer on. Streaming a PTY to the browser would buy the interactivity
-back at the cost of a general-purpose IPC channel between Flask and the
-sibling, which §9 rules out. §9.1 does open a second channel, but a
-deliberately narrow one carrying secrets in one direction and no control
-at all; a PTY stream fits through neither it nor the job row. So the
-interactivity is removed rather than transported. The run is split into
-phases, each dispatched as its own EE execution, and the confirmations
+**There is no terminal to prompt at dispatch time, and the design was
+never built any other way once the sibling model existed.** An
+interactive tool run by an operator can stop and ask before touching a
+device — `upgrade_cli.py` (§ "Manual escape hatch") does exactly that,
+prompting for confirmation before every phase in its own `MUTATING` set.
+Dispatched out-of-band by the sibling on behalf of a web session, there is
+no stdin to answer on. Streaming a PTY to the browser would buy the
+interactivity back at the cost of a general-purpose IPC channel between
+Flask and the sibling, which §9 rules out. §9.1 does open a second
+channel, but a deliberately narrow one carrying secrets in one direction
+and no control at all; a PTY stream fits through neither it nor the job
+row. So the interactivity is a UI concept instead: the run is split into
+phases, each dispatched as its own phase execution, and the confirmations
 become approval gates in the UI between them:
 
 | phase | device impact | gate before it |
@@ -2943,145 +2996,135 @@ by construction; a terminal transcript is not an audit record.
 
 Five things follow from the split:
 
-- **The plan phase dissolves into the UI.** The preview play reads only
-  `software_bundle` inventory vars and opens no connections — and NetHub
-  wrote that inventory, so it already holds every host and target. The
-  plan renders from the database and the gate is the submit button. The
-  same argument retires the summary play at the other end: per-host
-  results are job rows, so `batch_summary` has nothing left to compute.
-- **`serial` narrows to the one phase that needs it.** The two-playbook
-  split already fixes the specific problem this used to describe — one
-  play forcing host 2's *image copy* to wait on host 1's full reboot —
-  since staging and installing are separate runs with their own
-  `stage_serial`/`install_serial`, and staging is already separable in
-  time this way: images copied Monday, activated in Saturday's window.
-  What's still target rather than committed is the further step of
-  *removing* the serial gate from staging altogether: copying to flash
-  drops no traffic, so pre-check and stage should eventually run across
-  all hosts at once rather than one wave at a time, with only activation
-  staying serialized. `stage_cisco_upgrade.yml` still defaults
-  `stage_serial` to 1 like the old single-file playbook did.
+- **The plan phase dissolves into the UI.** There is no `plan` value in
+  the `PHASES` vocabulary at all (§5) — the request is validated and
+  compiled at submit, `upgrades.submit()` writes the run and its host
+  rows in the same transaction, and the plan a human reviews is simply
+  the submit form and the confirmation screen rendered from those rows.
+  The same reasoning means there is no separate summary step either:
+  per-host results are rows (`upgrade_host_phase_results`, §5), so there
+  is nothing left for a final summary pass to compute that the dashboard
+  can't already read.
+- **Every phase runs its hosts strictly one at a time today, not just
+  activation.** `phases.execute_phase()` loops over a run's hosts in a
+  plain `for` loop, checking cancel and the deadline only *between*
+  hosts (§7.3) — there is no concurrency anywhere in the phase model yet,
+  stage included. That is stricter than the target design below, not a
+  bug: correctness first, parallelism second. **What's still target
+  rather than built** is letting pre-check and stage run across many
+  hosts at once, since copying to flash drops no traffic, while keeping
+  only activation serialized — copying is where a wave actually spends
+  its wall-clock time (§8's measured push throughput, ~1.4 MB/s per
+  device, makes a serial stage phase the dominant cost of a large wave).
+  That parallelism is not free once built: with NetHub the sole source of
+  the bytes (§3.3), an uncapped stage phase would mean NetHub pushing a
+  gigabyte to every targeted device at once, over whatever link separates
+  it from them. Concurrent devices cost NetHub's own link relatively
+  little at the measured rate — twenty devices at once is roughly
+  28 MB/s — but a deployment setting to cap it is still worth building
+  before removing the serial gate, not after.
+- **Almost no state has to cross a phase boundary, and this is built as
+  designed.** `filename`, `sha512`, `version` and `file_size` are
+  snapshotted onto `upgrade_run_hosts` at submit (§5) rather than
+  re-resolved per phase, so a phase reads its own run's rows and touches
+  `artifacts` not at all. What is left is device state — current version,
+  free space — which is re-gathered per phase and *should* be: a
+  pre-check from three days ago must not authorize today's reload. The
+  split is cheap precisely because the expensive facts are snapshotted
+  once. No credential of any kind crosses that gap: the device credential
+  the stage phase needs is collected fresh at its own approval gate
+  (§9.1), same as every other phase, and a pull-transport run's
+  distribution credential is either that same credential or a systemd
+  credential the sibling reads at dispatch (§4.3.1) — neither is held
+  while the run is parked, so the Monday-to-Saturday gap holds no live
+  secret of any kind.
+- **Activation re-checks what staging established, and the check that
+  matters is built correctly.** Between the two phases a device may have
+  been upgraded by hand or had its flash cleaned, so
+  `install.assert_ready_to_activate` reopens with the "not already on
+  target version" assertion and a confirmation that the image is still
+  present and still verifies. This is §7.4's staleness question in its
+  concrete form: the gap between phases is exactly the window in which a
+  prior phase's findings expire.
 
-  It is also strictly faster *for the devices*, which is not the same as
-  free. With NetHub the sole source of the bytes (§3.3), an uncapped
-  stage phase means NetHub pushing a gigabyte to every targeted device at
-  once, over whatever link separates it from them. Stage therefore takes
-  a concurrency cap — a deployment setting (§5), applied as `throttle` on
-  the push task. Narrowing `serial` to activation is still the right
-  call; the cap is what keeps the resulting parallelism from moving the
-  bottleneck onto NetHub's own outbound link.
-- **Almost no state has to cross a phase boundary.** Facts flow through
-  one play today via `set_fact`, which separate executions break. But
-  filename, `sha512` and `version` come from the rendered inventory, and
-  `file_size` from the registry NetHub always populates (above). What is
-  left is device state — current version, free space — which is
-  re-gathered per phase and *should* be: a pre-check from three days ago
-  must not authorize today's reload. The split is cheap precisely because
-  the registry already carries the expensive facts. No credential of any
-  kind crosses that gap: the device credential the stage phase needs is
-  collected fresh at its own approval gate (§9.1), same as every other
-  phase, and a pull-transport run's distribution credential is either
-  that same credential or a systemd credential the sibling reads at
-  dispatch (§4.3.1) — neither is held while the run is parked, so the
-  Monday-to-Saturday gap holds no live secret of any kind.
-- **Activation re-checks what staging established.** Between the two
-  phases a device may have been upgraded by hand or had its flash
-  cleaned, so activation reopens with the "not already on target version"
-  assertion and a confirmation that the image is still present and still
-  verifies. This is §7.4's staleness question in its concrete form: the
-  gap between phases is exactly the window in which a prior phase's
-  findings expire.
-
-  "Still verifies" means **re-running `verify /sha512`**, not stat-ing
-  the file. A file of the right name and size is not the file staging
-  checked, and the gap is measured in days. This is also the third
-  consumption §3.4 promises for the ingest digest, so a phase split that
-  quietly downgraded it to a presence test would break that invariant at
-  the one point it is supposed to bind.
-
-  **A host that fails either check does not proceed to `install add`.**
-  The committed `stage_cisco_upgrade.yml` gets the *staging* half of
-  this right: its `verify /sha512` rescue sets a failed result and calls
-  `end_host`, so a digest mismatch stops that playbook run for that host
-  outright, not just a flag read later by a summary. But staging and
-  installing are now two separate playbook runs, potentially days apart,
-  and `install_cisco_upgrade.yml` only re-checks image *presence* via
-  `dir` before `install add` — it does not re-run `verify /sha512`. That
-  reopens exactly the gap this paragraph originally described, at the
-  boundary between the two files instead of inside one `block:`: a host
-  whose staged image failed verification can still have a
-  correctly-named file sitting in flash (the push happens before the
-  verify step, so a bad transfer doesn't remove it), and the install
-  playbook's presence check treats that as "staged" and proceeds. Under
-  the phase model, per-host outcome is a row (§5) and the activate phase
-  reads it directly rather than re-deriving it from device state, which
-  is what closes this properly. Until that model exists, the fix is for
-  `install_cisco_upgrade.yml` to re-run `verify /sha512` itself before
-  `install add` (tracked in CLAUDE.md's Ansible playbook notes) — the
-  "still verifies" requirement above binds at whichever point actually
-  gates the install, not only at the point that happens to run first.
+  "Still verifies" means **re-running `verify /sha512`**, and this is the
+  actual pre-activate check, not a `dir` presence test — a file of the
+  right name and size is not the file staging checked, and the gap is
+  measured in days. This is also the third consumption §3.4 promises for
+  the ingest digest, so a downgrade to a presence test would have broken
+  that invariant at the one point it is supposed to bind. There is a test
+  asserting no `install add` is issued when the pre-activate check fails.
+  One normalisation detail was worth getting right and initially wasn't:
+  `assert_ready_to_activate` runs the caller's `sha512` through the same
+  `transfer._normalise_digest()` `stage_image()` already uses, rather
+  than comparing it raw against the device's own lower-cased echo — an
+  uppercase or whitespace-padded digest used to stage successfully and
+  then be refused at activate, with an error whose two halves differed
+  only in case.
 - **Two approvals are not two runs, and the row is where that is
   refused.** The serialization guarantee below is scoped to *execution*:
-  it stops two EE processes overlapping, not two rows being created. Two
-  admins on the approval screen both clicking "approve: reload" write two
-  phase jobs, and the serial queue then runs them one after the other —
-  the fleet reloads twice. `UNIQUE(run_id, phase, attempt)` (§5) is what
-  makes the second click a refusal instead of a queue entry. An approval
-  being a row rather than a keystroke is the reason this works: a
-  keystroke has nothing to collide with.
+  it stops two phase executions overlapping, not two rows being created.
+  Two admins on the approval screen both clicking "approve: reload" write
+  two phase jobs, and the serial queue then runs them one after the other
+  — the fleet reloads twice. `UNIQUE(run_id, phase, attempt)` (§5) is
+  what makes the second click a refusal instead of a queue entry. An
+  approval being a row rather than a keystroke is the reason this works:
+  a keystroke has nothing to collide with.
 - **Cancelling means different things at different phases, and the UI
   says which.** `cancel_requested_at` (§5) is polled by the sibling
   between hosts. Cancelling a `queued` phase stops it before it starts.
   Cancelling pre-check or verify is safe outright: both are read-only.
-  **Stage under the push transport is not quite the same shape as those
-  two, and saying so was an overclaim worth correcting.** It's
-  non-disruptive to the fleet's traffic, but push is the one thing in
-  the system that mutates device configuration (§4.3.1's SCP-server
-  toggle), and the stage concurrency cap (below) means several hosts can
-  be mid-transfer when a cancel lands. So the sibling lets any host
-  already inside the stage block reach its own `rescue:`/`always:` and
-  confirm its restore before honoring the cancel for that host, rather
-  than tearing down the EE process outright — the run still parks
-  promptly, with some hosts staged and some not, which the next stage
-  approval reconciles, but "safe" here means "the fleet's traffic is
-  unaffected and every host's SCP toggle gets put back," not
-  "instantaneous." Under the pull transport stage is read-only with
+  Stage under the push transport is not quite the same shape as those
+  two: it's non-disruptive to the fleet's traffic, but push is the one
+  thing in the system that mutates device configuration (§4.3.1's
+  SCP-server toggle). Since every phase runs its hosts strictly one at a
+  time today (above), a cancel during stage affects at most the single
+  host currently mid-transfer when it lands — the sibling lets that host
+  reach its own `try`/`finally` and confirm its restore before honoring
+  the cancel, rather than killing the sibling process outright. Once
+  concurrent staging exists, several hosts could be mid-transfer at once
+  when a cancel lands, and the same reasoning would need to wait for all
+  of them, not just one. Under the pull transport stage is read-only with
   respect to device configuration and cancels like pre-check does, which
-  is one more line in pull's column. Cancelling an activation mid-wave
-  is *not* safe and is not presented as though it were — the devices
-  already reloaded are on the new version and the rest are not, and the
-  operator is choosing a split fleet over finishing the wave. That is
-  sometimes the right call, which is why the button exists; the
-  confirmation names the consequence rather than asking twice.
+  is one more line in pull's column. Cancelling an activation mid-wave is
+  *not* safe and is not presented as though it were — the devices already
+  reloaded are on the new version and the rest are not, and the operator
+  is choosing a split fleet over finishing the wave. That is sometimes
+  the right call, which is why the button exists; the confirmation names
+  the consequence rather than asking twice.
 - **The serialization lock is held per phase execution, not per run.** A
-  run parked at a gate holds no EE process, so §3.2's one-run-at-a-time
-  rule applies to phases rather than to runs. Otherwise a run awaiting
-  approval overnight would block every other upgrade and every publish.
-  Phase jobs reuse `registry_jobs`' status vocabulary and its startup
-  sweep (§7.3) unchanged; awaiting approval is a state of the parent run,
-  which by definition has no process to sweep.
+  run parked at a gate holds no phase execution running against it, so
+  §3.2's one-execution-at-a-time rule applies to phases rather than to
+  runs. Otherwise a run awaiting approval overnight would block every
+  other upgrade. Phase jobs use the shared status vocabulary and startup
+  sweep (§7.3); awaiting approval is a state of the parent run, which by
+  definition has no process to sweep.
 
-The split moves work rather than eliminating it. The `rescue` and
-`always` blocks currently keep a host's failure local to the run; across
-separate executions that becomes NetHub's per-host tracking, so the code
-migrates from the playbook into the backend. Verification currently
-lives inside activation's `always` block, so activation keeps a minimal
-result-recording step and the verify phase becomes an independent
-re-read, with some duplication between them. And six phases against N
-hosts is considerably more job rows than one run, which §7.4's retention
-numbers have to absorb.
-
-**What's committed today is `stage_cisco_upgrade.yml` and
-`install_cisco_upgrade.yml`** — two hand-run playbooks instead of one,
-previewing the stage/activate split above without implementing any of
-the rest of it: both still run interactively, NetHub dispatches neither,
-per-host results are still `debug` output, and the plan/pre-check/verify/
-cleanup phases aren't separated out at all (pre-check and cleanup are
-inline in the two files that do exist; plan and verify aren't split out
-as their own runs). The two-file boundary also introduces one gap the
-single-file version didn't have — installing no longer re-verifies a
-staged image's digest, it only checks presence — noted above and tracked
-as a playbook fix in CLAUDE.md, not a design change.
+**This is built, hardware-validated, and the one thing not yet exercised
+is a full run driven end to end from the web app.** `facts.py`,
+`connection.py` and `transfer.py` are exercised against a real Catalyst
+9200CX on IOS-XE 17.12.06, push included: enable, transfer, confirmed
+restore, `verify /sha512`, and the skip-if-already-staged path.
+`install.py` closed the remaining gap with a full round trip on the same
+lab switch — 17.12.6 → 17.12.08 → 17.12.6, both directions through
+`stage_image` → `activate` → `wait_for_device` → `verify_upgrade` →
+`cleanup`. Measured timings, worth planning against: staging 471 MB over
+SCP took ~370s (1.28 MB/s); `install add … activate commit` ran
+605–622s and does **not** drop the session partway — it returns `SUCCESS`
+with the session still up and only then reboots; the reload took
+228–238s against a 900s default deadline; `install remove inactive` took
+~5s. Version comparison had to be normalised (`facts.same_version`) once
+a real device reported `17.12.8` for a target declared `17.12.08` — a
+naive string compare would have failed a *successful* upgrade. The
+reload deadline has ample headroom at 228–238s against a 900s default;
+untested is whether a stack or a slower chassis eats into that margin,
+and whether a push over a genuinely constrained WAN link (as opposed to
+the lab's own link) moves the bottleneck somewhere this timing table
+doesn't cover. What remains untested beyond timing is the pull adapter's
+prompt sequence (§4.3.1, §10) and a stage/activate/verify/cleanup
+sequence driven in one sitting starting from a pre-check kicked off
+through the web app rather than through `upgrade_cli.py` or a direct
+call into `nethub/devices/`.
 
 ## 9. Deployment
 
@@ -3089,9 +3132,9 @@ as a playbook fix in CLAUDE.md, not a design change.
   distribution container, which serves the day-0 subtree over plain
   HTTP, with no separate bootstrap container. Under the default push
   transport there is no day-2 daemon at all: the store is local to this
-  host and is NetHub's own (§3.3), and images reach a device by the EE
-  mounting the published subtree read-only and pushing from it (§3.5,
-  §4.3.1). A deployment that selects the pull transport adds one more
+  host and is NetHub's own (§3.3), and images reach a device by the
+  sibling reading the published subtree directly and pushing from it
+  (§3.5, §4.3.1). A deployment that selects the pull transport adds one more
   unit — an SFTP daemon chrooted to that same subtree, serving the
   distribution account (§4.3.1) — which is the only unit in this list
   that exists to be dialled by a device rather than by an operator, and
@@ -3109,16 +3152,21 @@ as a playbook fix in CLAUDE.md, not a design change.
   neither the job queue nor the credential path in §9.1, so it is
   outside that section's trust argument entirely.
 - **The nested-container question is settled in favor of the sibling
-  process**, and it is a security decision rather than an operational
-  one. Mounting the host's rootless Podman API socket into the Flask
-  container would give the process behind the only unauthenticated route
-  in the system (§3.2) the ability to start arbitrary containers on the
-  host. That is a privilege far wider than anything NetHub needs, and it
-  turns any Flask-side RCE into host-level container control. The
-  EE-invocation step therefore runs as a sibling: a separate Quadlet unit
-  that owns the job queue, watches for `queued` rows, and is the only
-  component that talks to Podman. The Flask app never invokes an EE
-  directly.
+  process, and half of the original reasoning for it no longer applies —
+  what survives is enough on its own.** Mounting the host's rootless
+  Podman API socket into the Flask container would have given the
+  process behind the only unauthenticated route in the system (§3.2) the
+  ability to start arbitrary containers on the host, which was the
+  original argument for a separate sibling. There is no such socket to
+  mount any more: device work is plain Python calling Netmiko, not a
+  container NetHub invokes, so "a Flask RCE becomes host-level container
+  control" no longer describes anything real. What survives, and is
+  enough by itself, is §3.2's plainer reason: Flask holds the only
+  unauthenticated route, and a handler that opened a device session would
+  hold it for minutes. So Flask writes a `queued` row and nothing else;
+  `nethub/sibling.py` runs as its own Quadlet unit, watches for `queued`
+  rows, and is the only component that opens a device connection. The
+  Flask app never touches a device directly.
 - That split has to be paid for in error propagation, which is why it's
   settled here rather than left to deployment time. The sibling and the
   Flask app communicate through the database, so the job row *is* the
@@ -3137,10 +3185,12 @@ actually exchange anything, and the document has been relying on two
 statements that cannot both be true: §4.3 says the device credential is
 "never persisted", and §9 says the job row is the only channel between
 Flask and the sibling. The credential arrives at a Flask request handler
-and is needed by an `ansible-runner` call inside the sibling. Either it
-travels through the database — which is persistence — or there is a
+and is needed by a Netmiko connection opened inside the sibling. Either
+it travels through the database — which is persistence — or there is a
 second channel. This section picks the second and bounds it; §9.2
-covers how the channel is built and what keeps it narrow.
+covers how the channel is built and what keeps it narrow. This is built
+today as `nethub/credential_socket.py`, exercised by tests rather than
+only argued here.
 
 **First, this is a same-host question.** Every part of NetHub runs on
 one host as separate Quadlet units. That is a deployment constraint
@@ -3177,10 +3227,10 @@ rather than left to judgment:
   only: the submitter's device password, and nothing else that is not a
   credential.
 
-Nothing that crosses the socket is ever written to the database, the
-`private_data_dir`, or a log. Nothing that belongs in the row is allowed
-onto the socket because the socket is more convenient. A new piece of
-information that is not a secret goes in the row.
+Nothing that crosses the socket is ever written to the database, to
+disk, or to a log. Nothing that belongs in the row is allowed onto the
+socket because the socket is more convenient. A new piece of information
+that is not a secret goes in the row.
 
 **The sibling initiates, and pulls on demand.** The sibling, having
 claimed a `queued` row from the database, connects to Flask and asks for
@@ -3224,7 +3274,7 @@ which silently accepts anything is recognisably not the real one.
 **"For one phase execution" is bounded below by the queue, so the hold
 has a TTL.** The window the credential actually sits in Flask's memory
 runs from approval to the sibling picking the row up, and §3.2 and §7.1
-run one EE execution at a time — a phase approved while another run's
+run one phase execution at a time — a phase approved while another run's
 fifty-host activation wave grinds along can sit `queued` for hours. That
 is the same objection this section raised against the per-run lifetime,
 smaller but not different in kind. So a held credential expires on a
@@ -3249,6 +3299,32 @@ contract is unchanged — per-execution credentials, one kind, nothing
 else — and neither arrangement leaves the sibling holding a standing
 secret for an execution it has not started, which is the property §9.1
 exists to preserve.
+
+**The TTL above needed wiring that a correct-looking implementation can
+still be missing.** `purge_expired()` and `discard()` can exist as
+functions with no caller anywhere in the codebase, which is exactly what
+happened here: the TTL was enforced only inside `release()`, meaning only
+if the sibling eventually asked for that exact job. A held credential
+whose job never actually ran — because the sibling was down, the run got
+cancelled, or the job was abandoned — sat in memory for as long as the
+worker process did, which with one worker and a long-lived unit (§3.2) is
+weeks. `hold()` and `release()` now sweep expired entries on every call,
+and cancelling a run discards the credentials of any of its still-`queued`
+jobs, since a `running` job has already fetched its credential and keying
+the discard by run rather than job would be exactly the mistake this
+section forbids elsewhere. The sweep inside `release()` has to run
+*after* the requested credential is popped, or an expired credential
+reports "no credential held" — the same message a never-approved job
+gets — instead of "expired; re-approve," a worse diagnosis for the
+operator to work from. Two more details close the same class of gap:
+`type(job_id) is not int` is checked explicitly rather than
+`isinstance()`, because `bool` is a subclass of `int` in Python and
+`hash(True) == hash(1)`, so a message carrying `{"job_id": true}` would
+release the credential held under key `1`; and every field that ever
+holds the credential (the store's internal record, `PhaseContext`,
+`transfer.PullTarget`) is declared `field(repr=False)`, a structural
+guard against the day some future `log.debug("ctx=%r", ctx)` writes it to
+journald.
 
 ### 9.2 The socket, and what keeps it narrow
 
@@ -3292,8 +3368,10 @@ Four constraints keep the channel narrow:
   interlock, not an authorization check.** The sibling sets `running`
   and then asks Flask to verify `running`, so the precondition is
   controlled by the requester and constrains a compromised sibling not
-  at all. That is acceptable, since a sibling holding Podman already
-  owns the host. What the check does buy is real: a stray or duplicated
+  at all. That is acceptable, since a compromised sibling already has
+  direct access to every device credential that reaches it — it is the
+  process that opens the Netmiko session the credential authenticates.
+  What the check does buy is real: a stray or duplicated
   request cannot drain credentials for jobs nobody started, and one-shot
   release makes replay worthless. Two details carry weight. The
   in-memory store is keyed by `upgrade_phase_jobs.id`, never by
@@ -3336,6 +3414,16 @@ containers needs `:z` and not `:Z`; and an abstract-namespace socket is
 the wrong choice specifically because it carries no permission bits at
 all.
 
+`nethub/credential_socket.py`'s `systemd_socket()` is exactly this
+adoption call, and it is built to fail toward "don't serve" rather than
+toward "bind something wrong": it returns `None` when the process was
+not socket-activated, and the caller skips serving entirely rather than
+falling back to creating a path with the wrong ownership. Every dev run
+and every test takes that branch — tests construct their own socket
+directly — which is worth knowing when reading the test suite: none of
+it exercises the systemd-activation path itself, only the protocol
+spoken once a connection exists.
+
 **Flask is one worker, and this channel depends on that.** §3.2 argues
 that nothing may stall the one Flask process, because the
 unauthenticated phone-home route has to stay responsive for a device
@@ -3358,16 +3446,23 @@ safe. The exposures that follow, and what each one requires:
 
 - **A core dump writes the heap to disk at exactly the wrong moment.** A
   Flask crash with `systemd-coredump` active deposits the plaintext in
-  `/var/lib/systemd/coredump`. The unit sets `LimitCORE=0`, and the
-  process sets `PR_SET_DUMPABLE` to 0 — which also denies same-uid
+  `/var/lib/systemd/coredump`. The reference Quadlet unit's `[Service]`
+  block now sets `LimitCORE=0`, which covers the deployed path; the
+  process setting `PR_SET_DUMPABLE` to 0 — which would also deny same-uid
   `ptrace` and `/proc/<pid>/mem`, the attack the shared uid would
-  otherwise leave open.
+  otherwise leave open — is not yet done, and neither protection reaches
+  a bare `flask run` or `upgrade_cli.py` run outside the unit.
 - **Debug mode turns an exception into a credential disclosure.**
   Werkzeug's interactive debugger renders frame locals into an HTTP
   response, and the reloader runs two processes. `DEBUG` must be off
-  before the credential path exists. `config.py` currently sets it
-  `True`, which is correct for the bootstrap the repo is in today and is
-  a release blocker for this feature.
+  before the credential path exists, and `config.py` already reads it
+  from an environment variable and defaults it to off — precisely
+  because the local username/password login this alpha added made the
+  same class of disclosure reachable through a submitted password even
+  before the device-credential path exists. It remains a release blocker
+  for the full approval flow's device credentials, same reasoning, wider
+  blast radius: don't flip the default back to `True` or make it easier
+  to turn on than the current env-var opt-in.
 - **A Python `str` cannot be erased.** "Flask drops its copy on handoff"
   is achievable as dereference, not as erasure: the bytes persist in the
   heap until reused, and the form parser has already made copies. Hold
@@ -3384,7 +3479,7 @@ Flask has no credential for the job, the phase fails with
 `failure_stage: credential` and the run parks. It never falls back to
 reading a credential from disk, from the row, or from a previous phase.
 A sibling that restarts mid-run loses the in-flight credential along
-with the EE process, and §7.3's sweep moves the execution to
+with the phase execution, and §7.3's sweep moves the execution to
 `abandoned` — which is the correct outcome, since re-approving is how
 the next attempt gets a credential.
 
@@ -3404,83 +3499,128 @@ the next attempt gets a credential.
   argument is wrong — matching an already-recorded digest is a preimage
   attack, which MD5 still resists — so anyone re-opening this on
   "MD5 is broken" is arguing from the weaker case.
-- **Resolved: `net_put` is usable against IOS-XE at image size, but only
-  under `paramiko`.** Tested against a real device at image size, not
-  just the small text file a different playbook had moved successfully.
-  `libssh` is unusable — the SSH connection broke repeatedly, with
-  nothing actionable in the debug log. `paramiko` works and is what's
-  committed, despite being deprecated upstream with a scheduled removal
-  (§3.3, §4.3.1). The OpenSSH-`scp`-inside-the-EE fallback was
-  considered and rejected rather than built, because it needs the
-  device password on an interface with no secure credential-delivery
-  path built for it yet (§3.3's contract for what that path would need).
-- **Whether the pull transport's prompt sequence is what IOS-XE
-  actually emits.** `tasks/pull_image_sftp.yml` answers a
+- **Resolved: Netmiko's `CiscoIosFileTransfer` is usable against IOS-XE
+  at image size, but only under Paramiko.** Tested against a real
+  Catalyst 9200CX at image size, not just a small text file. This
+  repeats a finding made once already under Ansible — `net_put`'s
+  `libssh` connection type was unusable there for the same reason,
+  breaking the SSH connection repeatedly with nothing actionable in the
+  debug log — and the result carried over the library switch rather than
+  needing to be re-litigated: Paramiko is the common thread, and push is
+  validated at 471 MB with it. Paramiko is deprecated upstream with a
+  scheduled removal, but it's the only thing that has actually worked at
+  image size, so it's what's committed (§4.3.1). Shelling out to OpenSSH
+  `scp` as a subprocess was considered and rejected rather than built,
+  because it needs the device password on an interface with no secure
+  credential-delivery path built for it yet (§4.3.1's contract for what
+  that path would need).
+- **Whether the pull transport's prompt sequence is what IOS-XE actually
+  emits.** `nethub/devices/transfer.py`'s `_pull_sftp` answers a
   `Destination filename` prompt and then a `Password:` prompt, in that
   order, and names only the filesystem as the destination specifically
   to force the first prompt to appear so the pair is deterministic. That
   is what the platform is expected to do, not what has been observed —
-  the same class of unknown `net_put`'s connection type was, and it
-  should be settled the same way, by running it against a real device
-  and recording the answer here. A wrong prompt list does not fail fast:
-  it hangs until the task-level timeout.
+  the same class of unknown the transfer library question above was, and
+  it should be settled the same way, by running it against a real device
+  and recording the answer here. This is the one item from the pre-
+  Netmiko design that outlived the rewrite unresolved. A wrong prompt
+  list does not fail fast: it hangs until the read timeout. Capture the
+  session with Netmiko's `session_log` **off** (hard rule, §4.3.1's
+  reasoning on why the pull adapter must never enable it) and replay it
+  offline rather than logging the live channel.
+- **Whether `_pull_sftp`'s unanchored `read_until_pattern(r"[>#]")` can
+  terminate mid-copy.** The pattern matches the first `>` or `#` anywhere
+  in the stream, and `copy sftp://…` is exactly the kind of long-running
+  device command that can emit a progress indicator before it actually
+  finishes. If IOS-XE's `copy` emits anything containing either character
+  while the transfer is still in progress, the adapter would return
+  early and `verify_sha512` would then hash a partial file rather than
+  failing loudly. This is answerable from the same real-device run the
+  prompt-sequence question above needs, not a separate one.
+- **Whether an IOS-XE upgrade can legitimately regenerate a device's SSH
+  host key.** This decides whether `wait_for_device()`'s reconnect loop
+  is right to leave `connection.HostKeyError` untouched by the
+  not-transient carve-out it already gives `AuthenticationError` (design
+  doc "Device layer" above, and the module notes in `nethub/devices/
+  install.py`). If a legitimate upgrade can rotate the host key, treating
+  a mismatch as non-transient during the exact window a device might do
+  that would turn a successful upgrade into a hard failure the operator
+  has no way to distinguish from an actual on-path attack. If it cannot,
+  the current caution is free to relax. Settled by asking the platform
+  question directly or by observing it across enough real upgrades, not
+  by guessing either way.
+- **Whether the credential socket needs a wall-clock bound in addition to
+  its per-operation ones (§9.2).** `settimeout` on the listening side is
+  per-`recv`/`send` call, not cumulative, so a peer that trickles one byte
+  every few seconds never trips any single read's timeout while
+  occupying the sibling's only dispatch loop for as long as it keeps
+  doing that — on the order of a full day before anything notices.
+  Bounding total elapsed time per connection (not just per operation)
+  closes it; worth doing before this channel is exposed to anything less
+  trusted than a same-host, same-uid peer.
 - **Whether to build a purpose-built transfer script instead of relying
-  on deprecated `paramiko` indefinitely.** The options tried so far are
-  both unsatisfying: `libssh` doesn't work, and `paramiko` works but
-  Ansible plans to remove it. This is now less urgent than it was, and
-  worth restating why: the pull transport (§4.3.1) reaches the same
-  outcome without `net_put` or `paramiko` at all, so a deployment
-  blocked by the deprecation has a supported way out that is a settings
-  change rather than a code change. That is a mitigation for the
-  deadline, not an answer to the question — push remains the default and
-  the default should not be the one riding a removed library. A small, single-purpose Python script that
-  does only the SCP push — sidestepping both `ansible.netcommon.net_put`
-  connection types — might outlive either, but the amount of work that
-  would take (auth, host-key checking against the rendered
-  `known_hosts`, framing the transfer, error handling equivalent to
-  what `net_put`/`rescue:`/`always:` give for free today) hasn't been
-  scoped. Worth revisiting once `paramiko`'s removal has an actual
-  deadline rather than before.
+  on deprecated Paramiko indefinitely.** The options tried so far are
+  both unsatisfying: `libssh` doesn't work under either library binding,
+  and Paramiko works but is deprecated upstream. This is now less urgent
+  than it was, and worth restating why: the pull transport (§4.3.1)
+  reaches the same outcome without Netmiko's file-transfer class or
+  Paramiko at all, so a deployment blocked by the deprecation has a
+  supported way out that is a settings change rather than a code change.
+  That is a mitigation for the deadline, not an answer to the question —
+  push remains the default and the default should not be the one riding
+  a removed library. A small, single-purpose Python script that does
+  only the SCP push, using the socket layer directly instead of a
+  paramiko-dependent transfer class, might outlive either, but the
+  amount of work that would take (auth, host-key checking against the
+  same pinned policy `connection.py` already builds, framing the
+  transfer, error handling equivalent to what the current adapter's
+  `try`/`finally` gives for free today) hasn't been scoped. Worth
+  revisiting once Paramiko's removal has an actual deadline rather than
+  before.
 - **Closing what's left of the restore-on-kill/abandon gap (§4.3.1).**
   The ordinary failure paths are now covered two ways: the stage phase
   confirms its own restore and fails the host if it can't, and the
-  per-host bound that used to risk bypassing that restore (§8) is now a
-  task-level timeout that falls into the same `rescue:`/`always:` rather
-  than a process kill, with cancel handling doing the same. What remains
-  is narrower and genuinely residual: a killed process, an abandoned
-  run, or a crashed EE container outside NetHub's own timeout/cancel
-  logic still doesn't reach `always:`. A general reconciliation pass
-  over every device is not the fix for that residual either — connecting
-  to every device that was ever mid-stage and checking is exactly the
-  per-device current-state view §2 and §7.4 refuse to build. The
-  candidate that doesn't reopen that non-goal is job-scoped rather than
-  device-scoped, and its tracking column already exists (§5):
-  `scp_restore_confirmed` on the stage row in `upgrade_host_phase_results`
-  is null or `false` for exactly the rows that owe a restore — with the
-  §5 caveat that null also means "pull transport, nothing to restore",
-  so any process acting on it must join `image_transport_used` rather
-  than reading the column alone. A deployment running pull does not have
-  this gap at all, which is a mitigation available today but not an
-  answer: push is the default and the default is where the gap lives.
-  What's still open is whether to build an active process against that
-  column
-  — the sibling's startup sweep, or a separate periodic pass, connecting
-  to *those specific hosts* and finishing the restore — or to leave it
-  as a queryable answer an operator checks by hand. Worth deciding once
-  push is trusted (the `net_put` question above); the column exists
-  either way, so this is a decision about automation, not about whether
-  the state is tracked.
-- **Where NetHub's rendered `known_hosts` actually takes effect (§4.3,
-  §9.2).** §4.3 requires the fail-closed host-key check on the
-  `network_cli` session, and the connection plugins do not all read the
-  file from the same place — some hardcode `~/.ssh/known_hosts` rather
-  than honouring a path inside the `private_data_dir`. Which file gates
-  the session has to be established by testing rather than assumed, or
-  the pin §4.3 leans on may not be the one in force. This now also gates
-  the push itself — and, if `net_put` turns out to open a second
-  connection under the same identity rather than multiplexing through
-  the persistent session (§4.3.1), the question applies to *both*
-  connections independently, not to one shared answer.
+  per-host bound that used to risk bypassing that restore (§8) is now
+  Netmiko's own read timeout on the transfer call, which falls into the
+  same `try`/`finally` rather than a process kill, with cancel handling
+  doing the same. What remains is narrower and genuinely residual: a
+  killed process, an abandoned run, or a crashed sibling outside
+  NetHub's own timeout/cancel logic still doesn't reach `finally:`. A
+  general reconciliation pass over every device is not the fix for that
+  residual either — connecting to every device that was ever mid-stage
+  and checking is exactly the per-device current-state view §2 and §7.4
+  refuse to build. The candidate that doesn't reopen that non-goal is
+  job-scoped rather than device-scoped, and its tracking column already
+  exists (§5): `scp_restore_confirmed` on the stage row in
+  `upgrade_host_phase_results` is null or `false` for exactly the rows
+  that owe a restore — with the §5 caveat that null also means "pull
+  transport, nothing to restore", so any process acting on it must join
+  `image_transport_used` rather than reading the column alone. A
+  deployment running pull does not have this gap at all, which is a
+  mitigation available today but not an answer: push is the default and
+  the default is where the gap lives. What's still open is whether to
+  build an active process against that column — the sibling's startup
+  sweep, or a separate periodic pass, connecting to *those specific
+  hosts* and finishing the restore — or to leave it as a queryable
+  answer an operator checks by hand. The column exists either way, so
+  this is a decision about automation, not about whether the state is
+  tracked.
+- **Resolved: NetHub's host-key pin takes effect at exactly one place,
+  because there is exactly one place a connection can be opened from
+  (§4.3, §9.2).** This used to be genuinely open under Ansible — its
+  connection plugins didn't all read a rendered `known_hosts` from the
+  same place, and some hardcoded `~/.ssh/known_hosts` regardless of what
+  was rendered into a job's working directory. Under Netmiko the
+  question dissolves rather than gets answered on its own terms: there
+  is no rendered `known_hosts` file at all, and the paramiko client every
+  connection uses is NetHub's own, built by `connection.py`'s
+  `_build_ssh_client()` override with the pinned policy object attached
+  directly. §4.3.1's second SSH session for the SCP put goes through the
+  same override (`SCPConn.establish_scp_conn` is built from it), so the
+  question of whether the pin covers a second connection independently
+  is answered by construction too, for both directions the file could
+  travel: there is one connection-opening code path in the tree, and
+  every session — primary or transfer — goes through it.
 - **Whether day-2 images should ever be pullable over HTTP as well as
   SFTP.** Pull currently requires an SFTP daemon and a credential, and
   the credential is the expensive part of it (§4.3.1): it is the thing a
@@ -3530,18 +3670,22 @@ the next attempt gets a credential.
   the cost of a second rootless Podman stack and more awkward sharing of
   the volumes both need. Worth deciding before the socket is built,
   since it is cheap now and a migration later.
-- **Whether an append-only hash chain over `artifacts` is worth building
-  on top of the signed-projection fix (§7.2).** §7.2 now extends the
-  existing signed-commit pattern to `device_host_keys` and
-  security-relevant `settings`, which was the higher-value gap (a Flask
-  compromise forging a host-key pin or widening the target CIDR ahead of
-  a credential release, versus forging an image digest). What's left
-  open is narrower: whether `artifacts.sha512` itself needs a stronger
-  mechanism — an append-only hash chain over its writes, or a digest
-  countersigned by the sibling at publish — beyond the sibling's
-  pre-dispatch re-check the extension above already gives it. Worth
-  deciding deliberately once the extension is built, not before, since
-  it may turn out to be enough on its own.
+- **Whether to rebuild any tamper-evidence mechanism at all for
+  `artifacts.sha512`, `device_host_keys`, and the security-relevant
+  `settings` keys once they exist (§7.2).** The earlier git-commit-
+  signing mechanism this design once had is gone along with the
+  rendered registry file it protected (§5, §7.1, §7.2), and nothing has
+  replaced it — this is a real regression, not a stale open question
+  left over from before. The options are the same ones §7.2's old text
+  considered: an append-only hash chain over `artifacts` writes, a
+  digest or projection countersigned by the sibling (the one component
+  that could plausibly hold a key Flask does not), or a lighter
+  pre-dispatch re-check the sibling performs against whichever store
+  ends up being authoritative. Deciding this needs `settings` to exist
+  first, since two of the three rows this section is about
+  (`device_host_keys` exists today; the transport-repointing scenario
+  needs `settings`) don't both exist yet — but the `artifacts` half is
+  buildable now and shouldn't wait on the other two.
 - **The two day-0 numbers in §3.2 are asserted, not measured.** A
   two-second p99 and a fifteen-minute device backoff are what the
   architecture is calibrated against, and neither has been checked

@@ -254,7 +254,7 @@ def wait_for_device(
             # failure_stage='credential' rather than 'reload' (WS-4.1).
             raise
         # HostKeyError is deliberately NOT carved out here yet, unlike
-        # AuthenticationError above -- see WS-7.3 in HANDOFF.md. Whether an
+        # AuthenticationError above -- see design-document.md §10. Whether an
         # IOS-XE upgrade can legitimately regenerate a device's host key is an
         # open hardware question; until it is answered, re-raising here could
         # turn a successful upgrade into a hard failure instead of a

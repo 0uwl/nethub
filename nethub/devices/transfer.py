@@ -39,7 +39,8 @@ Transport = Literal["push_scp", "pull_sftp"]
 _DIGEST_RE = re.compile(r"=\s*([0-9a-fA-F]{128})\b")
 
 #: Names that reach a CLI command are checked as text. There is no module
-#: argument handling between us and the device (netmiko.md, "what gets harder").
+#: argument handling between us and the device, unlike the Ansible modules
+#: this replaced.
 _IMAGE_NAME_RE = re.compile(r"[\w.+-]+")
 _REMOTE_PATH_RE = re.compile(r"[\w:./-]+")
 _HOSTNAME_RE = re.compile(r"[\w.:-]+")

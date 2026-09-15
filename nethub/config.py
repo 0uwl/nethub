@@ -24,7 +24,7 @@ if SECRET_KEY is None:
 # Refusing an *absent* key is not enough: the reference Quadlet unit used to
 # ship a working placeholder, so a deployment copied from it started normally
 # with a signing key published in a public repository. There is no server-side
-# `sessions` row in this alpha (§4.5, see alpha.md), so the cookie signature is
+# `sessions` row in this alpha (§4.5, see CLAUDE.md), so the cookie signature is
 # the only thing authenticating anyone -- a known key is a forged admin session
 # with no password and no login event. A placeholder is an unset setting wearing
 # a value, and it fails closed for the same reason DEVICE_TARGET_CIDRS does.
@@ -54,7 +54,7 @@ if len(SECRET_KEY) < SECRET_KEY_MIN_LENGTH:
 # than the primary control. Secure defaults ON: the Quadlet unit publishes
 # plain HTTP on 8080, so a deployment with no TLS terminator in front would
 # otherwise send the cookie in cleartext on the ops LAN, and there is no
-# server-side sessions row to revoke it against (§4.5, see alpha.md) -- it
+# server-side sessions row to revoke it against (§4.5, see CLAUDE.md) -- it
 # stays valid until SECRET_KEY rotates. Set SESSION_COOKIE_INSECURE=1 for
 # local HTTP development only.
 SESSION_COOKIE_SAMESITE = 'Strict'

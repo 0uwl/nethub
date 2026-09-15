@@ -151,8 +151,8 @@ def load_user(user_id):
 # target. Design doc §5 for the columns, §7.3 for the three state machines and
 # who writes each edge, §8.1 for the phase model itself.
 #
-# Two deviations from §5's column lists, both because the EE is gone
-# (netmiko.md): there is no `private_data_dir` -- nothing renders a directory
+# Two deviations from §5's column lists, both because the Ansible-era
+# execution environment is gone: there is no `private_data_dir` -- nothing renders a directory
 # for an execution to read -- and `playbook_log_path` is `log_path`, since
 # what it points at is our own transcript rather than a playbook's.
 # ---------------------------------------------------------------------------

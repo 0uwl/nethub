@@ -2,9 +2,9 @@
 
 Build step 8. The playbooks this replaced were deliberately standalone: an
 operator could run them by hand against a fleet with NetHub switched off
-entirely. Folding device work into `nethub/devices/` took that away, and
-`netmiko.md` records the loss as accepted rather than unnoticed. This restores
-it, at the smallest scope that is honest.
+entirely. Folding device work into `nethub/devices/` took that away -- an
+accepted loss, not an unnoticed one. This restores it, at the smallest scope
+that is honest.
 
 It needs **no Flask app, no sibling, no credential socket and no job rows** --
 `nethub/devices/` never depended on any of them, which is why this is a few

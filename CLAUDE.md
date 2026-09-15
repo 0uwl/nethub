@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**The Ansible-to-Netmiko migration is most of the way done.** `netmiko.md`
-is the handoff document: a numbered build order, of which **steps 1–6 are
-complete** — the migration is finished. Its supersession table is now a record of edits
-already applied to this file rather than a list of pending ones — read the
-hard rules below directly. The device layer is validated end-to-end against
-real hardware (two live upgrades, plus a live pre-check driven through the
-Flask app); step 6 deleted `ansible/` entirely, so there is only one layer in
-the tree now. The one thing not yet done on the day-2 path is a full
-app-driven run past pre-check — stage/activate/verify/cleanup are each
-hardware-validated through the device layer, but not yet in one run started
-from the UI.
+**The Ansible-to-Netmiko migration is finished.** Device work is ordinary
+Python driving Netmiko in `nethub/devices/`; `ansible/` is gone entirely,
+along with every trace of `ansible-runner`, the EE, and the rendered
+inventory it used. The device layer is validated end-to-end against real
+hardware (two live upgrades, plus a live pre-check driven through the
+Flask app), so there is only one layer in the tree now, and it has been
+exercised, not just written. The one thing not yet done on the day-2 path
+is a full app-driven run past pre-check — stage/activate/verify/cleanup
+are each hardware-validated through the device layer, but not yet in one
+run started from the UI. The migration's own handoff document
+(`netmiko.md`) is gone too, once its build order and reasoning had all
+either landed in code or been folded into this file and
+`design-document.md` — read the hard rules below directly rather than
+looking for a supersession table.
 
 NetHub is in early bootstrap. The Flask app lives in the `nethub/`
 package, built as an application factory (`nethub.create_app()`) rather
@@ -30,9 +33,12 @@ whatever version `requirements.txt` actually resolves). It implements a
 first slice of the Software Lifecycle module: local username/password auth
 (everyone who can log in is an admin — no roles, no OIDC), admin-driven user
 creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
-`alpha.md` is that slice's plan and records its deliberate deviations from
-`design-document.md` — no `registry_jobs`/git-committed registry, and sessions
-are Flask-Login's signed cookie rather than a `sessions` row (§4.5).
+This file is now the sole record of that slice's deliberate deviations from
+`design-document.md` — no OIDC, no roles, and sessions are Flask-Login's
+signed cookie rather than a `sessions` row (§4.5) — superseding the earlier
+`alpha.md`/`HANDOFF.md`, both deleted once their content moved here and into
+`design-document.md` §10, since a completed planning/remediation doc left in
+the tree is exactly the stale-and-conflicting risk this file exists to avoid.
 
 **The login path is hardened but the mechanism has a schema cost worth
 knowing.** `nethub/auth.py` verifies a password on *every* attempt — an
@@ -253,7 +259,7 @@ The `ADMIN_USERNAME`/`ADMIN_PASSWORD`/credential priority order in
 var beats generated-and-printed — but does **not** carry over
 Drawbridge's forced-password-reset-on-first-login behavior for the
 env/generated tiers. That's not an oversight: this alpha's `User` model
-has no such field and no reset flow to force into (see `alpha.md`), so
+has no such field and no reset flow to force into, so
 replicating the label without the mechanism behind it would just be a
 UI claim nothing enforces. Don't add a `must_reset_password` column
 without building the flow that reads it.
@@ -876,8 +882,8 @@ seems to require one, the design is what needs revisiting, not the rule.
 
 ## Device layer (`nethub/devices/`)
 
-Ordinary Python driving Netmiko. This replaced `ansible/`, which build step
-6 deleted (`netmiko.md`). The five modules:
+Ordinary Python driving Netmiko. This replaced `ansible/`, which the
+migration deleted outright. The five modules:
 
 - `facts.py` — `show version`, `dir` and `show privilege`, parsed with
   ntc-templates where a template exists.
@@ -907,8 +913,9 @@ open item.
 **`install.py` is fully validated too, including the reload.** A round trip
 was run on the lab switch — 17.12.6 → 17.12.08 → 17.12.6, both directions
 through `stage_image` → `activate` → `wait_for_device` → `verify_upgrade` →
-`cleanup`. That also closes `netmiko.md` build step 1, which had asked for
-the reconnect loop to be spiked against real hardware and never was.
+`cleanup`. That also validates the reconnect loop against real hardware for
+the first time — a spike the original migration plan called for and never
+carried out before the code was written.
 
 Timings, consistent across both runs and worth planning against:
 
@@ -1088,7 +1095,7 @@ procedure, and five things in it are load-bearing:
   and a device that comes back with AAA unreachable and falls back to a local
   database the submitter isn't in would trip a fleet-wide TACACS+/RADIUS
   lockout. `connection.HostKeyError` is deliberately **not** carved out the
-  same way yet — see design doc §10 / `HANDOFF.md` WS-7.3: whether an IOS-XE
+  same way yet — see design doc §10: whether an IOS-XE
   upgrade can legitimately regenerate a device's host key is an open hardware
   question, and re-raising here on an unverified assumption could turn a
   successful upgrade into a hard failure instead of a transient reconnect.
@@ -1490,8 +1497,7 @@ requested by `current_user`, and has not already backed a confirmation
 gap** — the same person can still scan and then confirm, since alpha has no
 roles — it only proves a confirmation corresponds to a key NetHub itself
 observed at some specific prior moment rather than to whatever a form
-claims. `alpha.md` records the residual gap; the real fix is role-based
-access control.
+claims. The real fix is role-based access control.
 
 **`confirm_hostkey`/`delete_hostkey` write a `device_host_key_audit` row
 (WS-6.4).** Neither used to leave any record of who acted or what the pin
@@ -1518,8 +1524,8 @@ path the Quadlet mount produces has to stay under it, and the failure is an
 Build step 8, and it exists to pay back a cost the migration knowingly
 incurred: the playbooks it replaced were deliberately standalone, so an
 operator could run them by hand against a fleet with nothing else running.
-Folding device work into `nethub/devices/` took that away, and `netmiko.md`
-recorded the loss as accepted rather than unnoticed.
+Folding device work into `nethub/devices/` took that away — an accepted
+loss, not an unnoticed one.
 
 It needs **no Flask app, no sibling, no credential socket and no job rows**,
 because `nethub/devices/` never depended on any of them. That is why this is a
