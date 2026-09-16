@@ -299,3 +299,84 @@ class TestReprsHideTheCredential:
         target = PullTarget("dist.example.net", "jsmith", PASSWORD)
         assert PASSWORD not in repr(target)
         assert "dist.example.net" in repr(target)
+
+
+class TestSocketHandover:
+    """Adopting the descriptor a `.socket` unit handed over.
+
+    This is the branch that was inert until the units existed: with no
+    `.socket` unit anywhere in the deployment, `systemd_socket()` returned None
+    on every run and the credential channel was never served -- so none of it
+    had ever been exercised against a real handover. The interesting case is
+    the gunicorn one, where the pid check systemd's own protocol uses cannot
+    apply: the descriptor is read in a forked worker, so it never matches by
+    construction (see HANDOVER_FDS_ENV).
+    """
+
+    @staticmethod
+    def _listening_pair(tmp_path):
+        """A real listening AF_UNIX socket at a path short enough to bind."""
+        import socket as _socket
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.bind(str(tmp_path / "s.sock"))
+        sock.listen(1)
+        return sock
+
+    def test_adopts_the_handover_fd_without_a_pid_check(self, tmp_path, monkeypatch):
+        listening = self._listening_pair(tmp_path)
+        monkeypatch.delenv("LISTEN_PID", raising=False)
+        monkeypatch.delenv("LISTEN_FDS", raising=False)
+        monkeypatch.setenv(CS.HANDOVER_FDS_ENV, "1")
+        monkeypatch.setattr(CS, "SD_LISTEN_FDS_START", listening.fileno())
+
+        adopted = CS.systemd_socket()
+        assert adopted is not None
+        assert adopted.family == socket.AF_UNIX
+        adopted.detach()
+        listening.close()
+
+    def test_systemd_pid_check_still_rejects_another_process(self, monkeypatch):
+        """The original protocol is unchanged where it does apply."""
+        monkeypatch.setenv("LISTEN_PID", str(os.getpid() + 1))
+        monkeypatch.setenv("LISTEN_FDS", "1")
+        assert CS.systemd_socket() is None
+
+    def test_nothing_set_serves_nothing(self, monkeypatch):
+        """Every dev run and every test takes this branch."""
+        for var in ("LISTEN_PID", "LISTEN_FDS", CS.HANDOVER_FDS_ENV):
+            monkeypatch.delenv(var, raising=False)
+        assert CS.systemd_socket() is None
+
+    def test_a_non_socket_descriptor_is_declined_not_adopted(self, tmp_path, monkeypatch):
+        """Standing in for the pid check that cannot survive the fork.
+
+        A process that inherited the environment but not the descriptor must
+        decline rather than accept secrets on whatever fd 3 happens to be --
+        under gunicorn that is a live possibility, since the arbiter opens its
+        own listener during startup.
+        """
+        plain = tmp_path / "not-a-socket"
+        plain.write_text("")
+        handle = os.open(plain, os.O_RDONLY)
+        try:
+            monkeypatch.delenv("LISTEN_PID", raising=False)
+            monkeypatch.delenv("LISTEN_FDS", raising=False)
+            monkeypatch.setenv(CS.HANDOVER_FDS_ENV, "1")
+            monkeypatch.setattr(CS, "SD_LISTEN_FDS_START", handle)
+            assert CS.systemd_socket() is None
+            # Declined, not closed: the descriptor belongs to something else.
+            assert os.fstat(handle).st_size == 0
+        finally:
+            os.close(handle)
+
+    def test_a_connected_socket_is_declined(self, tmp_path, monkeypatch):
+        """Not listening is not a handover -- SO_ACCEPTCONN is the test."""
+        import socket as _socket
+        left, _right = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        monkeypatch.delenv("LISTEN_PID", raising=False)
+        monkeypatch.delenv("LISTEN_FDS", raising=False)
+        monkeypatch.setenv(CS.HANDOVER_FDS_ENV, "1")
+        monkeypatch.setattr(CS, "SD_LISTEN_FDS_START", left.fileno())
+        assert CS.systemd_socket() is None
+        left.close()
+        _right.close()

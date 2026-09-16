@@ -285,6 +285,24 @@ def fetch_credential(connect_socket, job_id: int) -> tuple[str, str]:
 #: systemd hands inherited descriptors over starting at fd 3.
 SD_LISTEN_FDS_START = 3
 
+#: The same count, under a name gunicorn does not recognise.
+#:
+#: gunicorn's arbiter calls `gunicorn.systemd.listen_fds()` at startup and, if
+#: `LISTEN_PID` matches its own pid, *clears the configured `bind` and serves
+#: HTTP on the inherited descriptors instead* (arbiter.py). Handing this socket
+#: to the container the obvious way therefore produces two failures at once:
+#: gunicorn speaks HTTP on the credential socket, and NetHub never binds its
+#: port at all. `listen_fds()` also unsets both variables, so by the time
+#: `create_app()` runs in the forked worker there is nothing left to read.
+#: Verified by running it, not by reading arbiter.py: gunicorn logged
+#: `Listening at: unix:/run/.../g.sock` and nothing was on the HTTP port.
+#:
+#: So the image's entrypoint (`entrypoint.sh`) re-exports the count under this
+#: name and unsets systemd's own before exec'ing gunicorn. The descriptor
+#: itself is untouched -- it is inherited across both the exec and the
+#: arbiter's fork, which is what puts it in the worker where the store lives.
+HANDOVER_FDS_ENV = "NETHUB_LISTEN_FDS"
+
 
 def systemd_socket() -> socket.socket | None:
     """The listening socket a systemd `.socket` unit handed over, or None.
@@ -293,6 +311,15 @@ def systemd_socket() -> socket.socket | None:
     socket-activated is deliberate: the caller skips serving rather than
     falling back to creating a socket itself, so a misconfigured unit fails
     visibly instead of quietly opening a path with the wrong ownership.
+
+    Two handovers are accepted. `LISTEN_PID`/`LISTEN_FDS` is systemd's own, and
+    is checked against our pid exactly as `sd_listen_fds` does. `NETHUB_LISTEN_FDS`
+    is the entrypoint's re-export (see `HANDOVER_FDS_ENV`), and *cannot* carry
+    that check: it is read in a gunicorn worker, and the whole point is that the
+    descriptor was inherited across a fork, so the pid never matches by
+    construction. The check is replaced rather than dropped -- the descriptor
+    itself is interrogated below, which is a narrower question than "did the
+    right process inherit this environment".
     """
     listen_pid = os.environ.get("LISTEN_PID")
     if listen_pid is not None and listen_pid != str(os.getpid()):
@@ -302,10 +329,44 @@ def systemd_socket() -> socket.socket | None:
     except ValueError:
         return None
     if count < 1:
+        try:
+            count = int(os.environ.get(HANDOVER_FDS_ENV, "0") or 0)
+        except ValueError:
+            return None
+        if count < 1:
+            return None
+    return _adopt_listening_fd(SD_LISTEN_FDS_START)
+
+
+def _adopt_listening_fd(fd: int) -> socket.socket | None:
+    """Adopt `fd` only if it really is a listening AF_UNIX socket.
+
+    Standing in for the `LISTEN_PID` check that cannot apply across gunicorn's
+    fork, and answering a better question than that check did: not "was this
+    environment meant for me" but "is this descriptor the thing I am about to
+    accept secrets on". A process that inherited the environment but not the
+    descriptor now declines instead of adopting whatever fd 3 happens to be --
+    which under gunicorn is a live possibility rather than a hypothetical, since
+    the arbiter opens its own listener during startup.
+
+    Returns None rather than raising, and never closes the descriptor: if this
+    is not our socket it belongs to something else, and closing it would break
+    that instead.
+    """
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, fileno=fd)
+    except OSError:
+        return None  # not a socket at all
+    try:
+        if sock.family != socket.AF_UNIX:
+            raise OSError("not an AF_UNIX socket")
+        if not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+            raise OSError("socket is not listening")
+    except OSError:
+        sock.detach()  # hand the descriptor back untouched
         return None
     # Already listening -- systemd did that. Adopt the descriptor as-is.
-    return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM,
-                         fileno=SD_LISTEN_FDS_START)
+    return sock
 
 
 def connect_to(path: str):

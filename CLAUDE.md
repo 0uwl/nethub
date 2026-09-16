@@ -71,8 +71,12 @@ actually exists before assuming it's implemented.
 NetHub containerizes as a single-process image (`Containerfile` —
 `python:3.12-slim`, gunicorn, one worker) plus a dev image
 (`Containerfile.dev` — Flask's own dev server with reload, run via
-`dev.sh` against a bind-mounted repo for live edits) and a reference
-Podman Quadlet unit at `quadlet/nethub.container`. See "Container" below
+`dev.sh` against a bind-mounted repo for live edits). **A deployment is
+three units, not one**: `quadlet/nethub.container` (the UI),
+`quadlet/nethub-sibling.container` (all device work — the same image at a
+different entrypoint), and `quadlet/nethub-credential.socket` (§9.1's
+channel between them, a plain systemd unit because Quadlet has no `.socket`
+generator, so it installs to a different directory). See "Container" below
 for the full environment-variable list and the systemd-credential
 mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 
@@ -118,8 +122,13 @@ yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML f
                                     # key is a YAML 1.1 boolean.
 
 python -m nethub.sibling           # the dispatcher; reads NETHUB_CREDENTIAL_SOCKET
-                                    # and NETHUB_SEARCH_DIR. Runs as its own unit, never
-                                    # inside the Flask process.
+                                    # and NETHUB_SEARCH_DIR (exits immediately naming both
+                                    # if either is unset -- and needs SECRET_KEY too, since
+                                    # it loads the same config.py). Runs as its own unit
+                                    # (quadlet/nethub-sibling.container), never inside the
+                                    # Flask process. NOTHING IS DISPATCHED WITHOUT IT:
+                                    # scans and phase jobs sit at `queued` forever, with no
+                                    # staleness story -- sweep() only reclaims `running`.
 
 python -m nethub.upgrade_cli --scan <host>          # the manual escape hatch: print a
 python -m nethub.upgrade_cli --host <host> --user <name> \
@@ -204,6 +213,26 @@ by actually running the built image read-only, not by inspection — if
 gunicorn's default behavior changes again, re-check by running the
 container rather than trusting this note.
 
+`entrypoint.sh` is baked in as the image's ENTRYPOINT and exists for one
+reason: to stop gunicorn's arbiter from mistaking the credential socket for
+an HTTP listener. It is a pass-through for anything not socket-activated
+(`dev.sh`, a plain `podman run`, the sibling unit, every test). The
+mechanism and the failure it prevents are written out under "Dispatch"
+below — read that before changing either the ENTRYPOINT line or
+`systemd_socket()`.
+
+**Running `nethub.container` alone gets you a UI that accepts work and
+performs none of it.** Flask writes a `queued` row and stops there by design
+(§9), so with no sibling unit a host-key scan and an upgrade both hang at
+"Still working" indefinitely — and nothing surfaces it, because `sweep()`
+only reclaims `running` rows and the scan result page renders `queued` and
+`running` identically. If something never starts, check that unit first.
+Start order matters once: systemd refuses to start the socket while
+`nethub.service` is already running, so start the socket first (or just
+start `nethub`, whose `Requires=` pulls it in). All three units, the
+`Sockets=` hand-over, and a `systemctl restart` of each were verified
+against a real `podman build`/`podman run` on podman 5.4.1.
+
 `quadlet/nethub.container` is the reference Podman Quadlet unit (see
 Drawbridge's own `quadlet/drawbridge.container` for the sibling
 project's version of the same pattern). Verified end-to-end against a
@@ -215,11 +244,41 @@ set the deleted `REGISTRIES_ROOT` and never set `ARTIFACT_STORE`, so the
 store defaulted onto the read-only image layer and the artifacts page
 500'd on load. It now sets `ARTIFACT_STORE=/app/artifacts` with a volume
 behind it, carries commented `DEVICE_TARGET_CIDRS`/`IMAGE_TRANSPORT`
-lines, and adds `LimitCORE=0` plus
-`NoNewPrivileges=`/`ProtectProc=`/`RestrictSUIDSGID=` to `[Service]`.
-**None of that has been re-verified against a real `podman run`** — treat
-the end-to-end claim as applying to the older shape only. Two things
-worth knowing if this file gets edited:
+lines, and adds `LimitCORE=0` plus `ProtectProc=invisible` to `[Service]`.
+Those two *are* now verified against a real `podman run` under the unit's
+own property set, and `LimitCORE=0` was confirmed to reach the container
+process itself (`/proc/self/limits` reads `Max core file size 0`) rather
+than stopping at the podman client. The rest of the post-step-7 shape
+— `ARTIFACT_STORE` and its volume, the commented settings lines — has
+still not been re-verified end-to-end. Three things worth knowing if this
+file gets edited:
+
+- **`NoNewPrivileges=` and `RestrictSUIDSGID=` must not be added to
+  `[Service]`, and both were tried.** Everything in `[Service]` sandboxes
+  the **podman client process on the host**, not the container — the
+  container's hardening is `ReadOnly=`, the user namespace and the image's
+  unprivileged UID, none of which these reach. What they do reach is the
+  setuid-root binaries rootless Podman's own startup depends on, and each
+  fails differently:
+  - `RestrictSUIDSGID=true` seccomp-denies any `chmod` carrying
+    `S_ISUID`/`S_ISGID`. Where the overlay store reports `Supports
+    shifting: false` (`podman info`), `UserNS=keep-id` cannot use a native
+    idmapped mount, so Podman materialises a *chowned copy* of every image
+    layer — and restoring the setuid bit on that layer's own setuid files
+    (`/usr/bin/chfn`, `/usr/bin/chsh`, shipped in `python:3.12-slim` via
+    `passwd`) is denied. The unit dies before the container exists, with
+    `storage-chown-by-maps: chmod usr/bin/chfn: operation not permitted`.
+  - `NoNewPrivileges=true` stops `execve` granting privilege from the
+    setuid bit, so `newuidmap`/`newgidmap` run unprivileged and cannot
+    write `uid_map`. **This one is latent, which is why it is the more
+    dangerous of the two**: once a rootless pause process exists Podman
+    joins its namespace and never re-runs `newuidmap`, so the unit starts
+    fine until the next reboot or `podman system migrate`, then fails with
+    an error naming neither systemd nor the unit file.
+
+  A store that supports shifting would sidestep the first; the second
+  survives it regardless. Reasoning is written out in the unit file too,
+  since that is where someone would reach for the directives.
 
 - **`LoadCredential=`/`SetCredential=` belong in `[Service]`, not
   `[Container]`.** They're plain systemd unit directives; Quadlet passes
@@ -749,7 +808,11 @@ seems to require one, the design is what needs revisiting, not the rule.
   blast radius. Same class: `LimitCORE=0` **is** now set in the Quadlet
   unit's `[Service]`, which covers the deployed path — otherwise a crash
   writes the heap, live credential included, to
-  `/var/lib/systemd/coredump`. Still not addressed: a non-dumpable process
+  `/var/lib/systemd/coredump`. Confirmed to propagate: the container
+  process's own `/proc/self/limits` reads `Max core file size 0`, so this
+  is not merely capping the podman client (unlike the two `[Service]`
+  hardening directives the Container section records as removed). Still
+  not addressed: a non-dumpable process
   (`PR_SET_DUMPABLE`), and neither applies to a bare `flask run` or to
   `upgrade_cli.py`.
 - **Everything runs on one host, in separate Quadlet units, under one
@@ -1256,9 +1319,30 @@ executions it has not started, and could be flooded. Four things about
 - **Nothing in it calls `bind()`.** `systemd_socket()` adopts the descriptor
   a `.socket` unit handed over, and returns `None` when the process was not
   socket-activated — the caller then skips serving rather than creating a
-  path with the wrong ownership. Every dev run and every test takes that
-  branch; the tests make their own socket, which is why none of this is
-  exercised in-process by `create_app`.
+  path with the wrong ownership. `quadlet/nethub-credential.socket` is that
+  unit, and the path is now exercised end-to-end rather than only argued: a
+  real `podman run` under it answers a request on the socket. A dev run, a
+  plain `podman run` and most tests still take the `None` branch.
+- **The descriptor reaches Flask under a *renamed* pair of variables, and
+  that is not stylistic.** gunicorn's arbiter reads `LISTEN_FDS`/`LISTEN_PID`
+  itself and, when the pid matches, **clears the configured `bind` and serves
+  HTTP on whatever systemd handed over** — so passing this socket in the
+  obvious way breaks NetHub twice: gunicorn speaks HTTP on the credential
+  socket, and nothing listens on `NETHUB_PORT` at all. It also unsets both
+  variables, so the forked worker — where `create_app()` and the store
+  actually live — would find nothing left to read. The image's
+  `entrypoint.sh` therefore re-exports the count as `NETHUB_LISTEN_FDS`
+  (`credential_socket.HANDOVER_FDS_ENV`) and unsets systemd's own before
+  exec'ing gunicorn; the descriptor itself is untouched and survives the exec
+  and the fork. Observed, not inferred: gunicorn logged `Listening at:
+  unix:/…/credential.sock` with nothing on the HTTP port.
+- **The `LISTEN_PID` check cannot apply to that handover, so the descriptor
+  is interrogated instead.** It is read in a forked worker, so the pid never
+  matches by construction. `_adopt_listening_fd` accepts fd 3 only if it is
+  really a listening `AF_UNIX` socket (`SO_ACCEPTCONN`), declines otherwise,
+  and never closes a descriptor that isn't ours — a narrower question than
+  "was this environment meant for me", and a live one under gunicorn, whose
+  arbiter opens its own listener during startup.
 - **There is no `SO_PEERCRED` check and there should not be one.** Under one
   rootless user a uid check tells Flask only "the peer shares my uid", which
   anything a Flask compromise spawns also satisfies. The mount is the

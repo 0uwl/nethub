@@ -12,9 +12,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 export NETHUB_PORT="${NETHUB_PORT:-8080}"
-export SECRET_KEY="${SECRET_KEY:-dev-only-insecure-secret-key-do-not-deploy}"
+export SECRET_KEY="${SECRET_KEY:?Please define SECRET_KEY}"
 export ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 export ADMIN_PASSWORD="${ADMIN_PASSWORD:-dev-admin}"
+export DEVICE_TARGET_CIDRS="${DEVICE_TARGET_CIDRS:?Please define DEVICE_TARGET_CIDRS}"
 
 # config.py defaults SESSION_COOKIE_SECURE on, which is right for a deployment
 # but wrong here: this serves plain HTTP. Browsers do treat http://localhost as
@@ -49,4 +50,5 @@ podman run --rm --name "$CONTAINER" \
     -e DATABASE_PATH \
     -e ARTIFACT_STORE \
     -e SESSION_COOKIE_INSECURE \
+    -e DEVICE_TARGET_CIDRS \
     "$IMAGE" --port "$NETHUB_PORT"
