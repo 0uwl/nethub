@@ -3418,11 +3418,24 @@ all.
 adoption call, and it is built to fail toward "don't serve" rather than
 toward "bind something wrong": it returns `None` when the process was
 not socket-activated, and the caller skips serving entirely rather than
-falling back to creating a path with the wrong ownership. Every dev run
-and every test takes that branch — tests construct their own socket
-directly — which is worth knowing when reading the test suite: none of
-it exercises the systemd-activation path itself, only the protocol
-spoken once a connection exists.
+falling back to creating a path with the wrong ownership. A dev run, a
+plain `podman run` and most tests take that branch — they construct
+their own socket directly — but the activation path itself is no longer
+unexercised: `quadlet/nethub-credential.socket` is the unit, and it has
+been run.
+
+**One implementation detail of the hand-over is forced by gunicorn and
+belongs here, because it constrains the design rather than the code.**
+The app server reads `LISTEN_FDS`/`LISTEN_PID` itself, and when the pid
+matches it discards its configured bind and serves HTTP on whatever
+systemd handed it — so the socket must reach Flask under a name the app
+server does not recognise, and the image's entrypoint renames it. That
+also costs the `LISTEN_PID` check, which cannot survive the arbiter's
+fork into the worker where the store lives; the descriptor is
+interrogated instead (is this a listening `AF_UNIX` socket), which
+answers a narrower question than the pid ever did. Any future change of
+app server has to re-answer this: a server that consumes activation
+descriptors silently takes the secret channel with it.
 
 **Flask is one worker, and this channel depends on that.** §3.2 argues
 that nothing may stall the one Flask process, because the

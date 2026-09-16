@@ -1,0 +1,131 @@
+# The dispatch sibling (design doc §7.3, §9; CLAUDE.md "Dispatch").
+#
+# Install alongside quadlet/nethub.container:
+#   cp quadlet/nethub-sibling.container ~/.config/containers/systemd/
+#   systemctl --user daemon-reload
+#   systemctl --user start nethub-sibling
+#
+# WITHOUT THIS UNIT NOTHING IS EVER DISPATCHED. Flask writes exactly one job
+# edge -- the `queued` row -- and every edge after that belongs to this
+# process. With no sibling running, a submitted upgrade and a host-key scan
+# both sit at `queued` forever, and neither has a staleness story: sweep()
+# only reclaims `running` rows, and the scan result page renders `queued` and
+# `running` identically as "Still working". The symptom is a screen that never
+# advances and a log that says nothing, so check this unit first.
+#
+# This is a SEPARATE UNIT running the SAME IMAGE, and both halves of that are
+# deliberate. Never merge it into nethub.container as a second process, and
+# never put the two in a shared Pod=: distinct PID namespaces are what prevent
+# same-uid ptrace and /proc/<pid>/mem reads between the process holding the
+# only unauthenticated route and the process holding a live device credential.
+# One image because nethub/devices/ is ordinary Python in this repo with no
+# Flask dependency -- the sibling just starts at a different entrypoint.
+
+[Unit]
+Description=NetHub dispatch sibling (phase jobs and host-key scans)
+After=network-online.target
+Wants=network-online.target
+
+# The socket unit owns %t/nethub, so it must run before this container
+# bind-mounts that directory -- otherwise podman creates the directory itself,
+# with a mode nobody chose. Not a dependency on Flask being *up*: the sibling
+# only opens the socket when a phase actually needs a credential (connect_to()
+# returns a closure and connects lazily), and host-key scans never open it at
+# all, so the sibling stays useful across a Flask restart.
+Requires=nethub-credential.socket
+After=nethub-credential.socket
+
+[Container]
+Image=localhost/nethub:latest
+ContainerName=nethub-sibling
+
+# `python -m nethub.sibling`, replacing the image's gunicorn entrypoint. The
+# entrypoint shim is skipped on purpose: it exists to hide systemd's socket-
+# activation variables from gunicorn's arbiter, and this unit is handed no
+# socket -- it connects to one by path.
+Entrypoint=python
+Exec=-m nethub.sibling
+
+# Required for the volumes below to be writable -- see nethub.container's own
+# note. Rootless Podman's default user namespace does not map the image's
+# fixed UID 1000 to the invoking user, even when their host UID is also 1000.
+UserNS=keep-id:uid=1000,gid=1000
+
+# The same SQLite file Flask writes, which is why both units must stay on one
+# host under one user: SQLite's locking is unreliable on network filesystems,
+# so distributing these two means §7 rebuilt around a different database.
+Volume=%h/.local/share/nethub/data:/app/data:Z
+Volume=%h/.local/share/nethub/artifacts:/app/artifacts:Z
+
+# The credential socket. Lowercase :z (shared), not :Z (private): systemd
+# created this socket and the label has to stay usable by more than this
+# container. Mounting the directory rather than the socket file itself means
+# a socket unit restart -- which replaces the inode -- does not leave this
+# container holding a mount of a file that no longer exists.
+Volume=%t/nethub:/run/nethub:z
+
+Environment=DATABASE_PATH=/app/data/database.db
+Environment=ARTIFACT_STORE=/app/artifacts
+
+# The two the sibling's main() requires by name; it exits immediately, with a
+# message naming both, if either is unset. NETHUB_SEARCH_DIR is the published
+# subtree both transports read the image bytes from (§3.3 -- one source,
+# whichever direction the bytes move), so it is ARTIFACT_STORE, not a second
+# copy of anything.
+Environment=NETHUB_SEARCH_DIR=/app/artifacts
+Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
+
+# --- Required, and easy to be surprised by ---
+# The sibling signs no cookies and serves no requests, but it loads the same
+# nethub/config.py, which raises on an absent, placeholder, or under-32-char
+# SECRET_KEY at import. So this unit needs the *same* value as nethub.container
+# -- supply it the same way, and prefer the credential over the env var.
+# Uncomment one:
+#Environment=SECRET_KEY=
+# ...or the LoadCredential= line in [Service] below.
+
+# --- Optional ---
+# Which direction day-2 image bytes move. This must MATCH nethub.container:
+# Flask records image_transport_used on the run, the sibling is what actually
+# moves the bytes, and nothing reconciles the two. Leave both unset to take
+# the push_scp default.
+#Environment=IMAGE_TRANSPORT=push_scp
+
+# DEVICE_TARGET_CIDRS is deliberately absent: it constrains what may be
+# *submitted*, which is Flask's side. Setting it here would imply the sibling
+# re-checks the address, and it does not -- the run's own rows are what it
+# acts on (§3.5).
+
+# Writes nothing outside /app/data and /tmp. No /run tmpfs: /run/nethub is a
+# real mount and a tmpfs over its parent would shadow it.
+ReadOnly=true
+Tmpfs=/tmp
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+# A core dump would write this process's heap to /var/lib/systemd/coredump --
+# and unlike Flask, whose exposure is a credential held from approval until
+# dispatch, this process holds the live device password for the whole of a
+# phase execution, which for a stage phase is ~15 minutes per host. Confirmed
+# to reach the container process itself (/proc/self/limits reads
+# "Max core file size 0"), not merely the podman client.
+LimitCORE=0
+
+# /proc of other processes is not this container's business -- the same
+# narrowing the separate PID namespaces exist to provide.
+ProtectProc=invisible
+
+# NoNewPrivileges= and RestrictSUIDSGID= must NOT be added here. Everything in
+# [Service] sandboxes the podman client on the host, not the container, and
+# both break rootless Podman's setuid-dependent startup -- RestrictSUIDSGID
+# immediately (chown-by-maps on the image's own setuid files),
+# NoNewPrivileges latently, at the next reboot, with an error naming neither
+# systemd nor this file. nethub.container's comments carry the full reasoning.
+
+# Same mechanism as nethub.container's: a credential beats the env var above.
+#LoadCredential=secret_key:/path/to/secret-key-file
+
+[Install]
+WantedBy=default.target
