@@ -2,9 +2,8 @@
 {% block title %}Scan a host key{% endblock %}
 {% block content %}
 <div class="page-header"><h1>Scan a host key</h1></div>
-<p>This opens an SSH connection far enough to read the device's host key and no
-further &mdash; no device credential is sent. Compare the fingerprint against the
-device itself before confirming; NetHub cannot do that for you.</p>
+<p>This opens an SSH connection to read the device's host key, no device credential is sent. 
+Compare the fingerprint against the device itself before confirming to ensure this is the device you intend to run against</p>
 <form method="post" class="form-inline">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
   <label class="sr-only" for="address">Device address</label>

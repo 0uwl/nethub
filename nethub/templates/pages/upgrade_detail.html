@@ -1,12 +1,12 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Run {{ run.id }}{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Run {{ run.id }} &mdash; {{ run.state }}</h1></div>
+<div class="page-header"><h1>Run {{ run.id }} - {{ run.state }}</h1></div>
 
 <dl class="dl-horizontal">
   <dt>Submitted by</dt><dd>{{ users.get(run.submitted_by, '?') }} on {{ run.created_at }}</dd>
   <dt>Device username</dt><dd>{{ run.device_username_used }}
-      {% if run.shared_account_mode %}<em>(shared account mode &mdash; not per-human)</em>{% endif %}</dd>
+      {% if run.shared_account_mode %}<em>(shared account mode)</em>{% endif %}</dd>
   <dt>Transport</dt><dd>{{ run.image_transport_used }}</dd>
   <dt>Request digest</dt><dd><code>{{ run.request_sha512[:32] }}&hellip;</code></dd>
   {% if run.cancel_requested_at %}
@@ -20,10 +20,10 @@
   {% if run.awaiting_phase == 'activate' %}
   <p><strong>This reloads every host below and drops traffic.</strong></p>
   {% elif run.awaiting_phase == 'cleanup' %}
-  <p>Cleanup frees flash but removes the packages a rollback would need.</p>
+  <p>Cleanup frees up storage space but removes the packages that a rollback would need.</p>
   {% endif %}
-  <p>Each targeted address, and who confirmed its host key, is listed below &mdash;
-  check that before releasing your credential against it.</p>
+  <p>Each targeted address, and who confirmed its host key, is listed below.
+  Check that before releasing your credential against it.</p>
   {#
     Artifact delete, host-key delete and cancel all confirmed; this form --
     the only one that reboots production network hardware -- did not. The
@@ -100,7 +100,7 @@
       <td>{{ users.get(j.approved_by, '') if j.approved_by else '' }}</td>
       <td>{{ j.started_at or '' }}</td>
       <td>{{ j.heartbeat_at or '' }}</td>
-      <td>{{ j.failure_stage or '' }}{% if j.error_summary %} &mdash; {{ j.error_summary }}{% endif %}</td>
+      <td>{{ j.failure_stage or '' }}{% if j.error_summary %} - {{ j.error_summary }}{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -119,16 +119,15 @@
       <td>{{ r.phase }}</td>
       <td>{{ r.attempt }}</td>
       <td>{{ r.status }}</td>
-      <td>{{ r.failure_stage or '' }}{% if r.error_summary %} &mdash; {{ r.error_summary }}{% endif %}</td>
-      <td>{% if r.scp_restore_confirmed is none %}&mdash;{% else %}{{ r.scp_restore_confirmed }}{% endif %}</td>
+      <td>{{ r.failure_stage or '' }}{% if r.error_summary %} - {{ r.error_summary }}{% endif %}</td>
+      <td>{% if r.scp_restore_confirmed is none %}-{% else %}{{ r.scp_restore_confirmed }}{% endif %}</td>
       <td>{{ r.finished_at or '' }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran &mdash; under
-<code>pull_sftp</code> nothing on the device is reconfigured at all. It never means
-&ldquo;a change may be outstanding&rdquo;; read it together with the run's transport.</p>
+<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran. Under
+<code>pull_sftp</code> nothing on the device is reconfigured at all</p>
 {% endif %}
 {% endblock %}

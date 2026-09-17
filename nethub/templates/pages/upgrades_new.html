@@ -11,7 +11,7 @@ afterwards waits for an approval, and each approval collects the credential agai
     <select id="bundle" name="bundle" class="form-control">
       {% for a in available %}
       <option value="{{ a.bundle_key }}" {% if form.bundle == a.bundle_key %}selected{% endif %}>
-        {{ a.bundle_key }} &mdash; {{ a.version }} ({{ a.filename }})
+        {{ a.bundle_key }} - {{ a.version }} ({{ a.filename }})
       </option>
       {% endfor %}
     </select>
@@ -20,7 +20,7 @@ afterwards waits for an approval, and each approval collects the credential agai
     {% endif %}
   </div>
   <div class="form-group">
-    <label for="hosts">Hosts &mdash; one <code>hostname, address</code> per line</label>
+    <label for="hosts">Hosts. One <code>hostname, address</code> per line</label>
     <textarea id="hosts" name="hosts" class="form-control" rows="6"
               placeholder="sw01, 192.0.2.10">{{ form.hosts }}</textarea>
     <p class="help-block">Addresses must be IP literals inside a configured target CIDR,
@@ -30,8 +30,7 @@ afterwards waits for an approval, and each approval collects the credential agai
     <label for="device_password">Your device password</label>
     <input type="password" id="device_password" name="device_password" class="form-control" required
            autocomplete="off"/>
-    <p class="help-block">Held in memory for this phase execution only, and released
-    to the runner once. It is never written to the database.</p>
+    <p class="help-block">Used for pre-check execution only</p>
   </div>
   <button type="submit" class="btn btn-primary">Submit run</button>
 </form>
