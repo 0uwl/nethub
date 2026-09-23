@@ -4,7 +4,7 @@
 <div class="page-header"><h1>Scanning <code>{{ scan.ansible_host }}</code></h1></div>
 
 {% if scan.status in ('queued', 'running') %}
-<p>Still working &mdash; this usually finishes in well under 30 seconds.</p>
+<p>Still working...this usually finishes in well under 30 seconds.</p>
 <p><a href="{{ url_for('hostkeys.scan_result', scan_id=scan.id) }}" class="btn btn-default">
   Reload to check</a></p>
 
@@ -15,12 +15,12 @@
 {% if scan.consumed_at %}
 <p><em>This scan has already been used to confirm a pin.</em></p>
 {% elif scan.requested_by != current_user.id %}
-<p><em>Scanned by someone else &mdash; they need to confirm it.</em></p>
+<p><em>Scanned by someone else, they need to confirm it.</em></p>
 {% else %}
 <form method="post" action="{{ url_for('hostkeys.confirm_hostkey') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
   <input type="hidden" name="scan_id" value="{{ scan.id }}"/>
-  <button type="submit" class="btn btn-primary">This matches the device &mdash; confirm it</button>
+  <button type="submit" class="btn btn-primary">Confirm this matches the actual device</button>
 </form>
 {% endif %}
 

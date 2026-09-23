@@ -2,8 +2,7 @@
 {% block title %}Publish an image{% endblock %}
 {% block content %}
 <div class="page-header"><h1>Publish an image</h1></div>
-<p>The checksum you type is what NetHub verifies the upload against &mdash; it is
-the claim being checked, so it is never what gets recorded. A mismatch rejects
+<p>The checksum you type is verified against the actualy uploaded file. A mismatch rejects
 the upload and nothing enters the store.</p>
 <form method="post" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>

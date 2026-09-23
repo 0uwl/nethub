@@ -12,11 +12,8 @@
 
 <h3>Device username</h3>
 
-<p>The name NetHub logs into <em>devices</em> with on your behalf &mdash; separate
-from the NetHub login above. It is read from your account server-side and can
-never be supplied by a request, because the device&rsquo;s own AAA accounting and
-the run record have to name the same human for the audit trail to mean
-anything.</p>
+<p>The name that NetHub logs into <em>devices</em> with on your behalf, separate 
+from your NetHub user account above</p>
 
 <p><strong>You cannot submit an upgrade run until this is set.</strong></p>
 
@@ -28,8 +25,7 @@ anything.</p>
            name="device_username" value="{{ current_user.device_username or '' }}"
            placeholder="e.g. jsmith" autofocus>
     <p class="help-block">Leave empty and save to clear it. Clearing it stops you
-    submitting new runs; it does not affect runs already in flight, which
-    snapshotted the name at submit.</p>
+    submitting new runs; it does not affect runs already in flight</p>
   </div>
   <button type="submit" class="btn btn-primary">Save device username</button>
 </form>

@@ -17,7 +17,7 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
       <td><code>{{ k.fingerprint_sha256 }}</code></td>
       <td>{{ k.first_seen_at }}</td>
       <td>{% if k.is_confirmed %}{{ users.get(k.confirmed_by, '?') }} on {{ k.confirmed_at }}
-          {% else %}<em>not confirmed &mdash; unusable</em>{% endif %}</td>
+          {% else %}<em>not confirmed, unusable</em>{% endif %}</td>
       <td>
         <a href="{{ url_for('hostkeys.hostkey_history', address=k.ansible_host) }}">History</a>
         <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}"
