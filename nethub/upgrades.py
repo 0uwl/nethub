@@ -304,6 +304,18 @@ def submit(*, user, bundle, hosts_raw, transport, cidrs,
             flash_dir=flash_dir,
             state='pending',
         ))
+    try:
+        # Flushed explicitly so the race below surfaces here rather than in
+        # whatever autoflush happens to come next.
+        db.session.flush()
+    except IntegrityError:
+        # The artifact was deleted between `resolve_bundle` above and this
+        # insert, and the host rows' foreign key refuses to point at it.
+        # `artifacts.delete` is one conditional statement, so this is the only
+        # ordering in which that race reaches here.
+        db.session.rollback()
+        resolve_bundle(bundle, platform=platform)  # raises the usual refusal
+        raise
 
     job = UpgradePhaseJob(
         run_id=run.id, phase='precheck', attempt=1, status='queued',

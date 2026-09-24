@@ -379,7 +379,8 @@ two subsystems.
 
 The hash is computed once and consumed three times. Ingest computes the
 SHA-512; it is then read by (a) day-0 payload verification, (b) the
-rendered registry entry, and (c) the device's own `verify /sha512` step
+snapshot a run takes onto `upgrade_run_hosts` at submit, and (c) the
+device's own `verify /sha512` step
 during a day-2 upgrade. No component recomputes it.
 
 SHA-512 is the single algorithm system-wide, day-0 included, and the
@@ -1646,10 +1647,11 @@ than a placeholder, given one Flask process (§3.2), one job runner, and
 one writer at a time (§7.1). It does need three non-default pragmas set
 on every connection, because SQLite's defaults are wrong for a service
 written to from a request handler and a job worker at once:
-`journal_mode=WAL`, `busy_timeout` (a few seconds, so a concurrent
-reader waits instead of raising), and `foreign_keys=ON`, which is off by
+`journal_mode=WAL`, `busy_timeout` (5 s, so a second writer waits for
+the lock instead of raising), and `foreign_keys=ON`, which is off by
 default and would otherwise silently turn every reference below into a
-suggestion.
+suggestion. All three are set in `extensions._configure_sqlite`, with a
+test asserting each.
 
 - `artifacts` table, the single ingest record behind both days (§3.4):
   `id`, `kind` (script/config/image), `platform`, `bundle_key`,
@@ -1794,7 +1796,11 @@ described there are `upgrade_phase_jobs`-only now.
   `artifact_id`, `bundle_key`, `filename`, `sha512`, `version`,
   `file_size`, `flash_dir`, `config_backup_path`, `reported_version_pre`,
   `reported_version_post`, `state`, `last_phase`, `error_summary`, with
-  `PRIMARY KEY (run_id, hostname)`. One row per targeted device, using
+  `PRIMARY KEY (run_id, hostname)`. `artifact_id` is a foreign key with
+  `ON DELETE SET NULL`: a finished run keeps its snapshot columns and
+  loses only the link if the artifact is later deleted, and
+  `artifacts.delete()` refuses while a run in `pre_checking`,
+  `awaiting_approval` or `running` references it. One row per targeted device, using
   the same foreign-key-plus-snapshot arrangement `upgrade_runs` uses for
   its own request-level snapshot. Per-host state living here rather than
   scattered across ad hoc bookkeeping is what makes the phase model's
@@ -2303,8 +2309,10 @@ deliberately separate action from anything a run's own submit or
 approval does. Artifacts and publishing (`GET /artifacts`,
 `GET`/`POST /artifacts/new` for the streaming upload — which is
 publishing itself, synchronously, per §6 above — `POST
-/artifacts/<id>/delete`, `POST /artifacts/check` for the on-demand drift
-check §5's `check_store()` describes). Upgrade runs (`GET /upgrades`,
+/artifacts/<id>/delete`, refused while a live run needs the artifact).
+The drift check §5's `check_store()` describes is a CLI command,
+`flask --app nethub check-store`, not a route: it hashes every image,
+and long work does not belong in a request handler. Upgrade runs (`GET /upgrades`,
 `GET`/`POST /upgrades/new`, `GET /upgrades/<id>`,
 `POST /upgrades/<id>/approve` carrying the phase and the device
 credential, `POST /upgrades/<id>/decline-cleanup`,
@@ -2718,7 +2726,11 @@ system, which requires numbers rather than an adjective:
   points at, is never collected regardless of age. That's a hard
   constraint rather than a policy knob. Collecting a published artifact
   would break day-2 dispatch resolving it, and collecting a referenced
-  one would leave the audit trail pointing at nothing.
+  one would leave the audit trail pointing at nothing. This rule is for
+  the automated purge (not built). An admin's manual delete is allowed
+  once no live run references the row; finished runs keep their own
+  snapshot of filename, digest, version and size, and their
+  `artifact_id` becomes null.
 - **Artifact bytes**: a separate axis, because the two were conflated
   and one of them is measured in hundreds of megabytes. The rule above
   is right for a row and wrong for a blob: a three-year-old superseded

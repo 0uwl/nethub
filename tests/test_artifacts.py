@@ -197,6 +197,76 @@ class TestDelete:
             assert Artifact.query.count() == 0
             assert not os.path.exists(path)
 
+    # WS-2.2: the snapshot keeps the filename and digest, not the bytes, so a
+    # delete under a live run failed it later at stage or activate.
+
+    def run_using(self, artifact, state):
+        from nethub.models import UpgradeRun, UpgradeRunHost, User
+        user = User(username=f"u-{state}")
+        user.set_password("hunter2")
+        db.session.add(user)
+        db.session.flush()
+        run = UpgradeRun(submitted_by=user.id, device_username_used="jsmith",
+                         image_transport_used="push_scp",
+                         request_document="{}", request_sha512="a" * 128, state=state)
+        db.session.add(run)
+        db.session.flush()
+        db.session.add(UpgradeRunHost(
+            run_id=run.id, hostname="sw01", ansible_host="192.0.2.10",
+            artifact_id=artifact.id, filename=artifact.filename,
+            sha512=artifact.sha512, version=artifact.version,
+            file_size=artifact.file_size))
+        db.session.commit()
+        return run
+
+    @pytest.mark.parametrize("state", artifacts.ACTIVE_RUN_STATES)
+    def test_a_live_run_blocks_the_delete(self, app, store, state):
+        with app.app_context():
+            a = ingest(store)
+            run = self.run_using(a, state)
+            with pytest.raises(artifacts.ArtifactError, match=f"#{run.id}"):
+                artifacts.delete(a)
+            assert Artifact.query.count() == 1
+            assert os.path.exists(a.storage_path)
+
+    @pytest.mark.parametrize("state", ["completed", "failed", "cancelled", "expired"])
+    def test_a_finished_run_keeps_its_snapshot_and_loses_the_link(self, app, store, state):
+        from nethub.models import UpgradeRunHost
+        with app.app_context():
+            a = ingest(store)
+            run = self.run_using(a, state)
+            artifacts.delete(a)
+            host = UpgradeRunHost.query.filter_by(run_id=run.id).one()
+            assert host.artifact_id is None
+            assert (host.filename, host.sha512) == (IMAGE, DIGEST)
+
+    def test_the_link_is_a_real_foreign_key(self, app, store):
+        """A host row cannot name an artifact that does not exist, which is
+        what fails a submit that races a delete."""
+        from nethub.models import UpgradeRunHost
+        with app.app_context():
+            a = ingest(store)
+            run = self.run_using(a, "completed")
+            db.session.add(UpgradeRunHost(
+                run_id=run.id, hostname="sw02", ansible_host="192.0.2.11",
+                artifact_id=a.id + 1000, filename="x", sha512="a" * 128, version="1"))
+            with pytest.raises(IntegrityError):
+                db.session.commit()
+            db.session.rollback()
+
+    def test_the_route_turns_the_refusal_into_a_message(self, app, client, store, make_user):
+        make_user("admin2", "correct-horse-battery")
+        client.post("/login", data={"username": "admin2", "password": "correct-horse-battery"})
+        with app.app_context():
+            a = ingest(store)
+            self.run_using(a, "running")
+            artifact_id = a.id
+        resp = client.post(f"/artifacts/{artifact_id}/delete", follow_redirects=True)
+        assert resp.status_code == 200
+        assert b"still needed by run" in resp.data
+        with app.app_context():
+            assert db.session.get(Artifact, artifact_id) is not None
+
 
 # --- The ingest race (WS-5.3) ------------------------------------------------
 #
@@ -285,3 +355,30 @@ def test_the_happy_path_still_removes_its_temp_file(store, app):
     assert [n for n in os.listdir(store) if n.startswith(".incoming-")] == []
     # One link only: the temp was unlinked, not left as a second name.
     assert os.stat(os.path.join(store, IMAGE)).st_nlink == 1
+
+
+class TestCheckStoreCommand:
+    """WS-2.3: hashing every image is minutes of work, so it is a command on
+    the host, not a button that holds a request open."""
+
+    def test_a_clean_store_exits_zero(self, app, store):
+        with app.app_context():
+            ingest(store)
+        result = app.test_cli_runner().invoke(args=["check-store"])
+        assert result.exit_code == 0
+        assert "matches its recorded SHA-512" in result.output
+
+    def test_altered_bytes_exit_non_zero_and_name_the_artifact(self, app, store):
+        with app.app_context():
+            path = ingest(store).storage_path
+        with open(path, "ab") as handle:
+            handle.write(b"tampered")
+        result = app.test_cli_runner().invoke(args=["check-store"])
+        assert result.exit_code == 1
+        assert "iosxe-17-12-06" in result.output
+
+    def test_there_is_no_web_route_any_more(self, app, client, make_user):
+        make_user("admin2", "correct-horse-battery")
+        client.post("/login", data={"username": "admin2", "password": "correct-horse-battery"})
+        assert client.post("/artifacts/check").status_code == 404
+        assert b"flask --app nethub check-store" in client.get("/artifacts").data

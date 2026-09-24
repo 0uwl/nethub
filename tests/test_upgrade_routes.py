@@ -813,3 +813,29 @@ class TestApproverChecks:
                 upgrades.approve(run=run, phase='stage',
                                  user=db.session.get(User, user))
             assert db.session.get(UpgradeRun, run.id).state == 'awaiting_approval'
+
+
+class TestSubmitRacingADelete:
+    def test_a_submit_whose_artifact_vanishes_is_a_refusal_not_a_500(
+        self, app, user, confirmed, monkeypatch
+    ):
+        """WS-2.2: the artifact is deleted between resolving the bundle and
+        inserting the host rows. The foreign key refuses the insert, and the
+        submitter gets the ordinary "not registered" message."""
+        real = upgrades.resolve_bundle
+        calls = []
+
+        def resolve_then_delete(bundle, platform='iosxe'):
+            artifact = real(bundle, platform=platform)
+            if not calls:
+                calls.append(1)
+                # Another request's delete: its own connection, committed.
+                with db.engine.begin() as other:
+                    other.execute(db.text('DELETE FROM artifacts'))
+            return artifact
+
+        monkeypatch.setattr(upgrades, 'resolve_bundle', resolve_then_delete)
+        with app.app_context():
+            with pytest.raises(upgrades.RequestError, match='No published image'):
+                submit(user)
+            assert UpgradeRun.query.count() == 0

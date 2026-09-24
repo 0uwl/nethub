@@ -30,17 +30,24 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 
 from .extensions import db
-from .models import Artifact
+from .models import Artifact, UpgradeRun, UpgradeRunHost
 
 _SHA512_RE = re.compile(r'^[0-9a-f]{128}$')
 #: What a bundle key may contain. It reaches no shell and no CLI, but it is
 #: user-chosen and used to look rows up, so keep it boring.
 _BUNDLE_KEY_RE = re.compile(r'^[\w.+-]{1,80}$')
 _CHUNK = 1 << 20
+
+#: Run states in which a run may still stage or activate the image it
+#: snapshotted. The snapshot keeps the filename and digest, not the bytes, so
+#: deleting the artifact under one of these fails the run at stage or activate.
+ACTIVE_RUN_STATES = ('pre_checking', 'awaiting_approval', 'running')
 
 
 class ArtifactError(Exception):
@@ -188,16 +195,48 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
 
 
 def delete(artifact: Artifact) -> None:
-    """Hard removal of the row and its bytes.
+    """Hard removal of the row and its bytes, unless a live run needs them.
 
-    Deliberately the same no-supersede stance the YAML store had: there is no
-    `state` transition here and no audit row, because alpha has neither a
-    promotion flow to reverse nor a job table on the publish side to record it.
-    Don't add `superseded_by_id` handling without the flow that reads it.
+    Refused while any run in `ACTIVE_RUN_STATES` references the artifact.
+    The check and the delete are one statement, the same shape as the
+    sibling's claim: a separate check could pass, then a submit could commit
+    a run against this artifact before the delete lands. The other ordering
+    (submit read the artifact, delete commits, submit inserts its host rows)
+    fails the submit on the foreign key.
+
+    Runs that are finished keep their snapshot and lose only the link:
+    `upgrade_run_hosts.artifact_id` is `ON DELETE SET NULL`.
+
+    Still no supersede and no audit row: there is no promotion flow to
+    reverse. Don't add `superseded_by_id` handling without the flow that
+    reads it.
     """
-    path = artifact.storage_path
-    db.session.delete(artifact)
+    artifact_id, path = artifact.id, artifact.storage_path
+    in_use = exists().where(
+        UpgradeRunHost.artifact_id == artifact_id,
+        UpgradeRunHost.run_id == UpgradeRun.id,
+        UpgradeRun.state.in_(ACTIVE_RUN_STATES),
+    )
+    deleted = db.session.execute(
+        sql_delete(Artifact).where(Artifact.id == artifact_id, ~in_use)
+    ).rowcount
+    if deleted == 0:
+        db.session.rollback()
+        runs = sorted({
+            host.run_id for host in UpgradeRunHost.query.join(UpgradeRun).filter(
+                UpgradeRunHost.artifact_id == artifact_id,
+                UpgradeRun.state.in_(ACTIVE_RUN_STATES),
+            )
+        })
+        if not runs:
+            return  # already gone
+        raise ArtifactError(
+            f'"{artifact.bundle_key}" is still needed by run(s) '
+            f'{", ".join(f"#{r}" for r in runs)}. Finish or cancel them first.'
+        )
     db.session.commit()
+    if artifact in db.session:
+        db.session.expunge(artifact)  # its row is gone; don't let it refresh
     if path and os.path.isfile(path):
         os.remove(path)
 

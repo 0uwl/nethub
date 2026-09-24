@@ -1,10 +1,11 @@
-"""Artifact routes: the ingest UI and the store's drift check.
+"""Artifact routes: the ingest UI, plus the `check-store` CLI command.
 
 Thin over `nethub/artifacts.py`. This replaced `registry_routes.py` at build
 step 7; there is no longer a file to adopt or a pointer row to manage, so the
 two-blueprint split that layer needed (`registries` for files, `registry` for
 their entries) collapses into one.
 """
+import click
 from flask import (
     Blueprint,
     current_app,
@@ -66,18 +67,28 @@ def delete_artifact(artifact_id):
     artifact = db.session.get(Artifact, artifact_id)
     if artifact is not None:
         key = artifact.bundle_key
-        artifact_store.delete(artifact)
-        flash(f'Deleted "{key}" and its image file.', 'success')
+        try:
+            artifact_store.delete(artifact)
+            flash(f'Deleted "{key}" and its image file.', 'success')
+        except artifact_store.ArtifactError as exc:
+            flash(str(exc))
     return redirect(url_for('artifacts.list_artifacts'))
 
 
-@artifacts_bp.route('/artifacts/check', methods=['POST'])
-@login_required
-def check_artifacts():
-    """Not run on page load: it hashes every image in the store."""
-    issues = artifact_store.check_store(artifact_store.store_dir(current_app.config))
-    for issue in issues:
-        flash(issue)
-    if not issues:
-        flash('Every artifact matches its recorded SHA-512.', 'success')
-    return redirect(url_for('artifacts.list_artifacts'))
+def register_cli(app):
+    @app.cli.command('check-store')
+    def check_store():
+        """Report artifacts whose bytes are missing or no longer match their
+        recorded SHA-512. Exits 1 if there are any.
+
+        A command rather than a button: it hashes every image in the store,
+        which is minutes of work at image sizes, and long work does not belong
+        in a request handler.
+        """
+        with app.app_context():
+            issues = artifact_store.check_store(artifact_store.store_dir(app.config))
+        for issue in issues:
+            click.echo(issue, err=True)
+        if issues:
+            raise SystemExit(1)
+        click.echo('Every artifact matches its recorded SHA-512.')

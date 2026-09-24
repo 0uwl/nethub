@@ -371,9 +371,14 @@ class UpgradeRunHost(db.Model):
     hostname = db.Column(db.String(255), primary_key=True)
     ansible_host = db.Column(db.String(64), nullable=False)
 
-    #: No artifacts table until build step 7, so this is deliberately a bare
-    #: integer rather than a foreign key. Don't read it as one.
-    artifact_id = db.Column(db.Integer)
+    #: The artifact this host's snapshot was taken from. `SET NULL` rather
+    #: than `RESTRICT`: a finished run keeps its own copy of everything it
+    #: needed (the columns below), so deleting the artifact afterwards costs
+    #: the run only this link. `artifacts.delete()` refuses while a run that
+    #: can still stage or activate references the row. The key also makes a
+    #: submit that races a delete fail at insert instead of pointing at a row
+    #: that is gone.
+    artifact_id = db.Column(db.Integer, db.ForeignKey('artifacts.id', ondelete='SET NULL'))
     bundle_key = db.Column(db.String(80))
     filename = db.Column(db.String(255), nullable=False)
     sha512 = db.Column(db.String(128), nullable=False)
