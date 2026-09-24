@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_
 
 from nethub.credential_socket import CredentialError, fetch_credential
-from nethub.devices import connection, install, phases, transfer
+from nethub.devices import connection, install, phases
 from nethub.extensions import db
 from nethub.models import APPROVABLE, HostKeyScan, UpgradePhaseJob, UpgradeRun
 
@@ -72,7 +72,6 @@ class Sibling:
     runner_instance_id: str = ''
     now: Callable[[], datetime] = _utcnow
     gate_ttl: timedelta = DEFAULT_GATE_TTL
-    pull_target: transfer.PullTarget | None = None
     reload_wait: install.ReloadWait = install.DEFAULT_RELOAD_WAIT
     #: Handed to every `PhaseContext`; None means `phases.default_connect`.
     #: Only the end-to-end test sets it, to put a fake device behind a real run.
@@ -411,7 +410,6 @@ class Sibling:
             device_username=username,
             device_password=password,
             search_dir=self.search_dir,
-            pull_target=self.pull_target,
             reload_wait=self.reload_wait,
             connect=self.connect,
         )
@@ -528,8 +526,8 @@ def main(poll_interval: float = 5.0) -> None:
     """Sweep once, then work the queue until killed.
 
     `NETHUB_CREDENTIAL_SOCKET` is the path the mount puts the socket at, and
-    `NETHUB_SEARCH_DIR` is the published subtree both transports read from
-    (§3.3 -- one source, whichever direction the bytes move).
+    `NETHUB_SEARCH_DIR` is the published subtree the push reads from (§3.3 --
+    NetHub is the one source of the bytes).
     """
     import os
     import time

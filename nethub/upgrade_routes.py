@@ -256,9 +256,7 @@ def new_run():
                 user=current_user,
                 bundle=form['bundle'],
                 hosts_raw=form['hosts'],
-                transport=current_app.config['IMAGE_TRANSPORT'],
                 cidrs=current_app.config['DEVICE_TARGET_CIDRS'],
-                shared_account_mode=current_app.config['SHARED_ACCOUNT_MODE'],
                 commit=False,
             )
             # Pre-check has no gate but still opens a session, so the

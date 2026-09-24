@@ -112,7 +112,7 @@ class TestConstraints:
                 ingest(store, file_storage=upload(filename="other.bin"))
 
     def test_two_artifacts_cannot_share_a_live_filename(self, app, store):
-        """Both transports address the source by filename, so a shared name
+        """The push addresses the source by filename, so a shared name
         means one artifact's bytes silently overwrite another's."""
         with app.app_context():
             ingest(store)
@@ -207,7 +207,6 @@ class TestDelete:
         db.session.add(user)
         db.session.flush()
         run = UpgradeRun(submitted_by=user.id, device_username_used="jsmith",
-                         image_transport_used="push_scp",
                          request_document="{}", request_sha512="a" * 128, state=state)
         db.session.add(run)
         db.session.flush()

@@ -75,9 +75,8 @@ Environment=ARTIFACT_STORE=/app/artifacts
 
 # The two the sibling's main() requires by name; it exits immediately, with a
 # message naming both, if either is unset. NETHUB_SEARCH_DIR is the published
-# subtree both transports read the image bytes from (§3.3 -- one source,
-# whichever direction the bytes move), so it is ARTIFACT_STORE, not a second
-# copy of anything.
+# subtree the SCP push reads the image bytes from (§3.3 -- NetHub is the one
+# source), so it is ARTIFACT_STORE, not a second copy of anything.
 Environment=NETHUB_SEARCH_DIR=/app/artifacts
 Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
 
@@ -85,13 +84,6 @@ Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
 # loads only nethub/shared_config.py, never the web tier's config.py. Don't
 # add the key here: it forges an admin session, and this process has no use
 # for it.
-
-# --- Optional ---
-# Which direction day-2 image bytes move. This must MATCH nethub.container:
-# Flask records image_transport_used on the run, the sibling is what actually
-# moves the bytes, and nothing reconciles the two. Leave both unset to take
-# the push_scp default.
-#Environment=IMAGE_TRANSPORT=push_scp
 
 # DEVICE_TARGET_CIDRS is deliberately absent: it constrains what may be
 # *submitted*, which is Flask's side. Setting it here would imply the sibling

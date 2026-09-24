@@ -53,8 +53,8 @@ PublishPort=8080:8080
 
 # --- Required ---
 # /app/data holds the SQLite database. /app/artifacts is ARTIFACT_STORE --
-# NetHub's own flat directory of uploaded image bytes, which both transports
-# address by filename. Unlike the REGISTRIES_ROOT it replaced at build step 7,
+# NetHub's own flat directory of uploaded image bytes, which the SCP push
+# addresses by filename. Unlike the REGISTRIES_ROOT it replaced at build step 7,
 # this is not somewhere an admin mounts *their* files for NetHub to point at:
 # NetHub owns it, and it is usually a much larger volume than /app/data (a
 # single IOS-XE image is ~450 MB and nothing is superseded or pruned yet).
@@ -104,14 +104,6 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # That is deliberate -- an unset security setting is not "allow all" -- but it
 # does mean a fresh deployment cannot run an upgrade until you set it.
 #Environment=DEVICE_TARGET_CIDRS=10.0.0.0/8,192.168.0.0/16
-
-# --- Optional ---
-# Which direction the image moves: push_scp (default) or pull_sftp. This is a
-# deployment-level decision and never a per-request one, because choosing the
-# transport chooses whose credential gets spent. Do not switch to pull_sftp
-# without reading CLAUDE.md's transport rule first -- pull needs an inbound
-# SFTP daemon on this host, and IOS-XE does not verify its host key.
-#Environment=IMAGE_TRANSPORT=push_scp
 
 # --- Optional ---
 # Port Gunicorn binds to inside the container. Update the left side of

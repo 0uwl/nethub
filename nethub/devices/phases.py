@@ -86,9 +86,9 @@ class PhaseContext:
     phase execution* only (design doc §9.1 -- not the life of the run, which
     can park at a gate for days), and never copied to a row or a log.
 
-    `search_dir` and `pull_target` come from deployment settings rather than
-    from the run, but are read once at dispatch so a settings change mid-run
-    cannot re-point an execution halfway through.
+    `search_dir` comes from deployment settings rather than from the run, but
+    is read once at dispatch so a settings change mid-run cannot re-point an
+    execution halfway through.
     """
 
     device_username: str
@@ -97,7 +97,6 @@ class PhaseContext:
     #: likely accidental leak in the codebase.
     device_password: str = field(repr=False)
     search_dir: str
-    pull_target: transfer.PullTarget | None = None
     reload_wait: install.ReloadWait = install.DEFAULT_RELOAD_WAIT
     #: Injectable so tests need no device and the sibling can pass its own.
     connect: Callable[..., object] | None = None
@@ -226,16 +225,13 @@ def phase_precheck(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome
 
 
 def phase_stage(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
-    run = host.run
     outcome = transfer.stage_image(
         conn,
         image=host.filename,
         sha512=host.sha512,
         search_dir=ctx.search_dir,
-        transport=run.image_transport_used,
         file_size=host.file_size,
         file_system=host.flash_dir,
-        pull_target=ctx.pull_target,
     )
     return HostOutcome(
         host.hostname, outcome.status,

@@ -65,7 +65,7 @@ function name.
 | 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | merged |
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | merged |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | merged |
-| 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | todo |
+| 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | in review |
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | todo |
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | todo |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | todo |

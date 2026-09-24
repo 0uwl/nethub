@@ -27,7 +27,7 @@ def dir_output(files, free=3723296768, total=4967505920):
 
 
 class FakeDevice:
-    """Enough of a Netmiko connection for the transport logic."""
+    """Enough of a Netmiko connection for the staging logic."""
 
     def __init__(
         self, *, files=None, scp_enabled=False, digest=DIGEST, restorable=True, free=10**10
@@ -41,7 +41,6 @@ class FakeDevice:
         self.free = free
         self.commands = []
         self.config_sets = []
-        self.written = []
 
     def send_command(self, command, **kwargs):
         self.commands.append(command)
@@ -63,13 +62,6 @@ class FakeDevice:
                 self.scp_enabled = True
             elif line == f"no {T._SCP_ENABLE}" and self.restorable:
                 self.scp_enabled = False
-
-    # -- pull path --
-    def write_channel(self, data):
-        self.written.append(data)
-
-    def read_until_pattern(self, pattern, **kwargs):
-        return ""
 
 
 @pytest.fixture
@@ -131,7 +123,7 @@ class TestPushBracket:
 
         out = T.stage_image(
             device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-            transport="push_scp", file_size=size,
+            file_size=size,
         )
 
         assert out.status == "image_copied"
@@ -148,7 +140,7 @@ class TestPushBracket:
 
         out = T.stage_image(
             device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-            transport="push_scp", file_size=size,
+            file_size=size,
         )
 
         assert out.scp_restore_confirmed is True
@@ -162,7 +154,7 @@ class TestPushBracket:
         with pytest.raises(T.ScpRestoreError) as excinfo:
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
 
         assert excinfo.value.status == "scp_not_restored"
@@ -181,7 +173,7 @@ class TestPushBracket:
         with pytest.raises(T.ScpRestoreError) as excinfo:
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         # The push failure is kept rather than lost.
         assert isinstance(excinfo.value.__context__, T.TransferError)
@@ -200,7 +192,7 @@ class TestPushBracket:
         with pytest.raises(T.TransferError) as excinfo:
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         assert excinfo.value.status == "not_copied"
         assert not isinstance(excinfo.value, T.ScpRestoreError)
@@ -223,7 +215,7 @@ class TestPushBracket:
         with pytest.raises(connection.HostKeyError):
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         assert device.scp_enabled is False, "still restored even though the push was re-raised"
 
@@ -243,7 +235,7 @@ class TestPushBracket:
         with pytest.raises(T.TransferError) as excinfo:
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         assert excinfo.value.summary == f"SCP push of {IMAGE} failed"
         assert "hunter2" not in excinfo.value.summary
@@ -274,7 +266,7 @@ class TestSkipIfStaged:
 
         out = T.stage_image(
             device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-            transport="push_scp", file_size=size,
+            file_size=size,
         )
 
         assert out.status == "already_staged"
@@ -289,7 +281,7 @@ class TestSkipIfStaged:
         with pytest.raises(T.VerificationError):
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         assert len(no_scp_put) == 1, "it re-pushed rather than trusting the name"
 
@@ -309,63 +301,13 @@ class TestSource:
             T.resolve_source(str(tmp_path), IMAGE)
 
 
-class TestPull:
-    def test_password_never_reaches_the_command_line(self, image_on_disk):
-        search_dir, size = image_on_disk
-        device = FakeDevice()
-        target = T.PullTarget("dist.example.net", "nethub", "s3cret")
-
-        out = T.stage_image(
-            device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-            transport="pull_sftp", file_size=size, pull_target=target,
-        )
-
-        command = device.written[0]
-        assert command.startswith("copy sftp://nethub@dist.example.net")
-        assert "s3cret" not in command
-        assert ":" not in command.split("@")[0].removeprefix("copy sftp://")
-        assert device.written[1] == IMAGE + "\n"
-        assert device.written[2] == "s3cret\n"
-        assert out.status == "image_copied"
-
-    def test_pull_reconfigures_nothing(self, image_on_disk):
-        search_dir, size = image_on_disk
-        device = FakeDevice()
-        out = T.stage_image(
-            device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-            transport="pull_sftp", file_size=size,
-            pull_target=T.PullTarget("dist.example.net", "nethub", "s3cret"),
-        )
-        assert device.config_sets == []
-        assert out.scp_restore_confirmed is None, "null means no bracket ran, not 'failed'"
-
-    def test_pull_without_a_target_is_refused(self, image_on_disk):
-        search_dir, size = image_on_disk
-        with pytest.raises(T.TransferError, match="needs a distribution host"):
-            T.stage_image(
-                FakeDevice(), image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="pull_sftp", file_size=size,
-            )
-
-
 class TestGuards:
-    def test_unknown_transport_is_refused_before_anything_happens(self, image_on_disk):
-        search_dir, size = image_on_disk
-        device = FakeDevice()
-        with pytest.raises(T.TransferError, match="push_scp"):
-            T.stage_image(
-                device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="scp", file_size=size,
-            )
-        assert device.commands == []
-
     @pytest.mark.parametrize("name", ["a b.bin", "a;reload.bin", "../a.bin", "a|b.bin", ""])
     def test_image_names_that_reach_the_cli_are_checked(self, name, image_on_disk):
         search_dir, _ = image_on_disk
         with pytest.raises(T.TransferError, match="invalid image name"):
             T.stage_image(
                 FakeDevice(), image=name, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp",
             )
 
     def test_a_non_sha512_digest_is_refused(self, image_on_disk):
@@ -373,7 +315,7 @@ class TestGuards:
         with pytest.raises(T.TransferError, match="not a SHA-512 digest"):
             T.stage_image(
                 FakeDevice(), image=IMAGE, sha512="deadbeef", search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
 
     def test_insufficient_free_space_stops_before_the_transfer(self, image_on_disk, no_scp_put):
@@ -382,7 +324,7 @@ class TestGuards:
         with pytest.raises(T.TransferError, match="bytes free"):
             T.stage_image(
                 device, image=IMAGE, sha512=DIGEST, search_dir=str(search_dir),
-                transport="push_scp", file_size=size,
+                file_size=size,
             )
         assert no_scp_put == []
         assert device.config_sets == []

@@ -6,7 +6,7 @@
 {% if runs %}
 <div class="table-responsive">
 <table class="table table-striped">
-  <thead><tr><th>#</th><th>State</th><th>Waiting at</th><th>Submitted by</th><th>Device user</th><th>Transport</th><th>Created</th></tr></thead>
+  <thead><tr><th>#</th><th>State</th><th>Waiting at</th><th>Submitted by</th><th>Device user</th><th>Created</th></tr></thead>
   <tbody>
   {% for r in runs %}
     <tr>
@@ -14,8 +14,7 @@
       <td>{{ r.state }}</td>
       <td>{{ r.awaiting_phase or '' }}</td>
       <td>{{ users.get(r.submitted_by, '?') }}</td>
-      <td>{{ r.device_username_used }}{% if r.shared_account_mode %} <em>(shared)</em>{% endif %}</td>
-      <td>{{ r.image_transport_used }}</td>
+      <td>{{ r.device_username_used }}</td>
       <td>{{ r.created_at }}</td>
     </tr>
   {% endfor %}

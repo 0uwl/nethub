@@ -37,7 +37,6 @@ def make_run(app, make_user):
             run = UpgradeRun(
                 submitted_by=user.id,
                 device_username_used='jsmith',
-                image_transport_used='push_scp',
                 request_document='{}',
                 request_sha512='0' * 128,
                 state=state,

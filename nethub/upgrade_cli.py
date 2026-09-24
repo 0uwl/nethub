@@ -133,7 +133,6 @@ def main(argv=None) -> int:
     parser.add_argument('--sha512', help='expected SHA-512 of the image')
     parser.add_argument('--version', help='version the device should report afterwards')
     parser.add_argument('--file-system', default='flash:')
-    parser.add_argument('--transport', default='push_scp', choices=transfer.Transport.__args__)
     parser.add_argument('--phases', default='precheck',
                         help=f'comma-separated, or "all". One of: {", ".join(PHASES)}')
     parser.add_argument('--yes', action='store_true',
@@ -200,7 +199,7 @@ def main(argv=None) -> int:
             elif phase == 'stage':
                 outcome = transfer.stage_image(
                     conn, image=image, sha512=args.sha512, search_dir=search_dir,
-                    transport=args.transport, file_system=args.file_system)
+                    file_system=args.file_system)
                 _say(f'  {outcome.status}; scp_restore_confirmed='
                      f'{outcome.scp_restore_confirmed}')
             elif phase == 'activate':

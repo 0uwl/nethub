@@ -29,7 +29,6 @@ DIGEST = "a" * 128
 
 def make_run(user_id, **kw):
     kw.setdefault("device_username_used", "jsmith")
-    kw.setdefault("image_transport_used", "push_scp")
     kw.setdefault("request_document", '{"hosts": []}')
     kw.setdefault("request_sha512", DIGEST)
     run = UpgradeRun(submitted_by=user_id, **kw)
@@ -185,10 +184,6 @@ class TestVocabularies:
     def test_an_unknown_run_state_is_refused(self, app, user):
         with app.app_context(), pytest.raises((IntegrityError, LookupError, ValueError)):
             make_run(user, state="halfway")
-
-    def test_an_unknown_transport_is_refused(self, app, user):
-        with app.app_context(), pytest.raises((IntegrityError, LookupError, ValueError)):
-            make_run(user, image_transport_used="tftp")
 
     def test_precheck_may_have_no_approver_but_other_phases_record_one(self, app, user):
         """Pre-check runs on submit with no gate (§8.1)."""

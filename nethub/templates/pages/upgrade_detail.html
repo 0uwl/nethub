@@ -5,9 +5,7 @@
 
 <dl class="dl-horizontal">
   <dt>Submitted by</dt><dd>{{ users.get(run.submitted_by, '?') }} on {{ run.created_at }}</dd>
-  <dt>Device username</dt><dd>{{ run.device_username_used }}
-      {% if run.shared_account_mode %}<em>(shared account mode)</em>{% endif %}</dd>
-  <dt>Transport</dt><dd>{{ run.image_transport_used }}</dd>
+  <dt>Device username</dt><dd>{{ run.device_username_used }}</dd>
   <dt>Request digest</dt><dd><code>{{ run.request_sha512[:32] }}&hellip;</code></dd>
   {% if run.cancel_requested_at %}
   <dt>Cancel requested</dt><dd>{{ run.cancel_requested_at }} by {{ users.get(run.cancel_requested_by, '?') }}</dd>
@@ -127,7 +125,6 @@
   </tbody>
 </table>
 </div>
-<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran. Under
-<code>pull_sftp</code> nothing on the device is reconfigured at all</p>
+<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran.</p>
 {% endif %}
 {% endblock %}
