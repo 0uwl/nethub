@@ -54,8 +54,14 @@ UserNS=keep-id:uid=1000,gid=1000
 # The same SQLite file Flask writes, which is why both units must stay on one
 # host under one user: SQLite's locking is unreliable on network filesystems,
 # so distributing these two means §7 rebuilt around a different database.
-Volume=%h/.local/share/nethub/data:/app/data:Z
-Volume=%h/.local/share/nethub/artifacts:/app/artifacts:Z
+# Lowercase :z (shared label), not :Z (private). nethub.container mounts
+# these same two directories, and :Z gives each container its own private
+# MCS label: on an SELinux-enforcing host whichever container starts
+# second relabels the directory and locks the first out of the database.
+# UNVERIFIED on an enforcing host (none was available when this changed);
+# harmless where SELinux is disabled.
+Volume=%h/.local/share/nethub/data:/app/data:z
+Volume=%h/.local/share/nethub/artifacts:/app/artifacts:z
 
 # The credential socket. Lowercase :z (shared), not :Z (private): systemd
 # created this socket and the label has to stay usable by more than this
@@ -75,14 +81,10 @@ Environment=ARTIFACT_STORE=/app/artifacts
 Environment=NETHUB_SEARCH_DIR=/app/artifacts
 Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
 
-# --- Required, and easy to be surprised by ---
-# The sibling signs no cookies and serves no requests, but it loads the same
-# nethub/config.py, which raises on an absent, placeholder, or under-32-char
-# SECRET_KEY at import. So this unit needs the *same* value as nethub.container
-# -- supply it the same way, and prefer the credential over the env var.
-# Uncomment one:
-#Environment=SECRET_KEY=
-# ...or the LoadCredential= line in [Service] below.
+# No SECRET_KEY. The sibling signs no cookies and serves no requests, and it
+# loads only nethub/shared_config.py, never the web tier's config.py. Don't
+# add the key here: it forges an admin session, and this process has no use
+# for it.
 
 # --- Optional ---
 # Which direction day-2 image bytes move. This must MATCH nethub.container:
@@ -123,9 +125,6 @@ ProtectProc=invisible
 # immediately (chown-by-maps on the image's own setuid files),
 # NoNewPrivileges latently, at the next reboot, with an error naming neither
 # systemd nor this file. nethub.container's comments carry the full reasoning.
-
-# Same mechanism as nethub.container's: a credential beats the env var above.
-#LoadCredential=secret_key:/path/to/secret-key-file
 
 [Install]
 WantedBy=default.target

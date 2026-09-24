@@ -3160,6 +3160,15 @@ call into `nethub/devices/`.
   subtree of one-shot symlinks Flask writes and reaps, and authorization
   for day-0 lives in the phone-home handler. Everything runs on one host,
   in separate units, under one rootless Podman user.
+- **The Flask and sibling units share two volumes and nothing secret.**
+  Both mount the database directory and the artifact store, with the
+  shared SELinux label (`:z`): the private label (`:Z`) gives each
+  container its own, so on an enforcing host the second unit to start
+  relabels the directory and locks the first out of the database. They
+  share configuration only for those (`nethub/shared_config.py`). The
+  session-signing `SECRET_KEY` lives in the web tier's `config.py`, which
+  the sibling never imports, so the sibling unit holds no key that could
+  forge an admin session.
 - **DHCP integration is the deliberate exception**: it runs natively as
   its own service rather than as a unit, because it binds a privileged
   broadcast-facing port on the provisioning VLAN and is the one

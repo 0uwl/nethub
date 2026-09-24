@@ -131,8 +131,8 @@ yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML f
 
 python -m nethub.sibling           # the dispatcher; reads NETHUB_CREDENTIAL_SOCKET
                                     # and NETHUB_SEARCH_DIR (exits immediately naming both
-                                    # if either is unset -- and needs SECRET_KEY too, since
-                                    # it loads the same config.py). Runs as its own unit
+                                    # if either is unset). Needs no SECRET_KEY: it loads
+                                    # only shared_config.py, never config.py. Runs as its own unit
                                     # (quadlet/nethub-sibling.container), never inside the
                                     # Flask process. NOTHING IS DISPATCHED WITHOUT IT:
                                     # scans and phase jobs sit at `queued` forever, with no
@@ -258,7 +258,7 @@ own property set, and `LimitCORE=0` was confirmed to reach the container
 process itself (`/proc/self/limits` reads `Max core file size 0`) rather
 than stopping at the podman client. The rest of the post-step-7 shape
 — `ARTIFACT_STORE` and its volume, the commented settings lines — has
-still not been re-verified end-to-end. Three things worth knowing if this
+still not been re-verified end-to-end. Four things worth knowing if this
 file gets edited:
 
 - **`NoNewPrivileges=` and `RestrictSUIDSGID=` must not be added to
@@ -297,6 +297,11 @@ file gets edited:
   version-dependent and not something to assert confidently without
   checking the Podman version in the field — the unit file's own
   comments say so; don't strengthen that claim without re-verifying it.
+- **The data and artifact volumes are `:z`, not `:Z`, in both units.** Both
+  units mount the same two directories; `:Z` gives each container a private
+  SELinux label, so on an enforcing host the second unit to start relabels
+  the directory and locks the first out of the database. Unverified on an
+  enforcing host (none was available); the unit comments say so.
 - **`UserNS=keep-id:uid=1000,gid=1000` is required for the volumes to be
   writable, not optional hardening.** Confirmed by testing: the
   container's bind mounts fail with `unable to open database file`
@@ -308,7 +313,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SECRET_KEY` | none — required | Flask/Flask-Login session-signing key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. **`config.py` also refuses a known placeholder or anything under 32 characters**, not just an absent value: alpha has no server-side `sessions` row (§4.5), so the cookie signature is the only thing authenticating a user and a published key is a forged admin session. The reference unit ships the line commented out rather than filled in, for the same reason. |
+| `SECRET_KEY` | none — required (web unit only) | Flask/Flask-Login session-signing key. Web-only: it lives in `config.py`, which only `create_app()` loads; the sibling loads `shared_config.py` and its unit carries no key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. **`config.py` also refuses a known placeholder or anything under 32 characters**, not just an absent value: alpha has no server-side `sessions` row (§4.5), so the cookie signature is the only thing authenticating a user and a published key is a forged admin session. The reference unit ships the line commented out rather than filled in, for the same reason. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
 | `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |
@@ -1526,7 +1531,7 @@ a digest — a submitted pair would name any bytes against any checksum and
 bypass the table that owns both.
 
 Four deployment settings §5 puts in a `settings` table are env vars in
-`config.py`, because alpha has neither that table nor its audit:
+`shared_config.py`, because alpha has neither that table nor its audit:
 `ARTIFACT_STORE`, `IMAGE_TRANSPORT`, `DEVICE_TARGET_CIDRS`,
 `SHARED_ACCOUNT_MODE`. **An empty
 `DEVICE_TARGET_CIDRS` refuses every submit** rather than allowing any address
@@ -1673,7 +1678,10 @@ become is a way around the host-key pin:
   break-glass CLI); what it does not do is let a mismatch through quietly.
 - It reads a confirmed pin from the database when one is reachable, and
   treats an unreachable database as ordinary — NetHub being down is the
-  reason the tool exists.
+  reason the tool exists. It reads through `sibling._database_app()`, which
+  loads only `shared_config.py`, so this works without `SECRET_KEY` set
+  (before WS-3 the read failed silently without it and the tool fell back to
+  requiring `--fingerprint`).
 
 **The confirmations are §8.1's gates collapsed onto a terminal**, because
 there is no second person to ask. Every phase in `MUTATING`

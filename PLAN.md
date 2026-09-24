@@ -62,8 +62,8 @@ function name.
 |---|---|---|---|---|
 | 0 | `docs/claude-md-corrections` | Remove false claims from `CLAUDE.md` | none | merged |
 | 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | merged |
-| 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | in review |
-| 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | todo |
+| 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | merged |
+| 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | in review |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | todo |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | todo |
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | todo |
@@ -541,3 +541,6 @@ a one-line description and the workstream it was found in.
   closer. It reads as a device connection problem. Add an `internal` value
   when WS-6 brings migrations, since a new enum value changes the column's
   CHECK constraint. Found in WS-1.
+- `design-document.md` §4.4 (around "And `config.py` currently sets `DEBUG =
+  True`") is false: `DEBUG` defaults off and is read from an env var. Fix in
+  WS-13. Found in WS-3.

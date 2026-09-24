@@ -8,8 +8,8 @@
 #   cp quadlet/nethub.container quadlet/nethub-sibling.container \
 #        ~/.config/containers/systemd/
 #   cp quadlet/nethub-credential.socket ~/.config/systemd/user/
-#   # fill in SECRET_KEY and ADMIN_PASSWORD (or LoadCredential=) below, and
-#   # the matching SECRET_KEY in nethub-sibling.container
+#   # fill in SECRET_KEY and ADMIN_PASSWORD (or LoadCredential=) below; the
+#   # sibling unit needs no SECRET_KEY
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now nethub-credential.socket
 #   systemctl --user start nethub nethub-sibling
@@ -65,10 +65,15 @@ PublishPort=8080:8080
 # an unguarded os.makedirs(), so leaving it unset makes the artifacts page 500
 # on every load.
 #
-# %h expands to the invoking user's home directory. :Z relabels for SELinux
-# hosts; harmless if SELinux is disabled.
-Volume=%h/.local/share/nethub/data:/app/data:Z
-Volume=%h/.local/share/nethub/artifacts:/app/artifacts:Z
+# %h expands to the invoking user's home directory.
+# Lowercase :z (shared label), not :Z (private). nethub-sibling.container
+# mounts these same two directories, and :Z gives each container its own
+# private MCS label: on an SELinux-enforcing host whichever container starts
+# second relabels the directory and locks the first out of the database.
+# UNVERIFIED on an enforcing host (none was available when this changed);
+# harmless where SELinux is disabled.
+Volume=%h/.local/share/nethub/data:/app/data:z
+Volume=%h/.local/share/nethub/artifacts:/app/artifacts:z
 Environment=DATABASE_PATH=/app/data/database.db
 Environment=ARTIFACT_STORE=/app/artifacts
 
