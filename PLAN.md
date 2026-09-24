@@ -61,8 +61,8 @@ function name.
 | WS | Branch | Summary | Depends on | Status |
 |---|---|---|---|---|
 | 0 | `docs/claude-md-corrections` | Remove false claims from `CLAUDE.md` | none | merged |
-| 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | in review |
-| 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | todo |
+| 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | merged |
+| 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | in review |
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | todo |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | todo |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | todo |
@@ -536,14 +536,6 @@ the code, and this file is gone.
 Add items here that are outside the current workstream. Each needs a file,
 a one-line description and the workstream it was found in.
 
-- `design-document.md` §3.4 still says the SHA-512 is read by "the rendered
-  registry entry"; there is no rendered registry. The consumer is the
-  `upgrade_run_hosts` snapshot. Fix in WS-13 (or WS-2 if touching §3.4).
-  Found in WS-0.
-- `nethub/models.py` `UpgradeRunHost.artifact_id` comment says "no artifacts
-  table until build step 7". The table exists; the column is still a bare
-  integer. WS-2 should decide whether it becomes a real foreign key as part
-  of the artifact delete guard. Found in WS-0.
 - `nethub/sibling.py` `recover_own()` records an unexpected error in our own
   code as `failure_stage='connect'`, because the vocabulary has nothing
   closer. It reads as a device connection problem. Add an `internal` value

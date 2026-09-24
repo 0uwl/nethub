@@ -104,6 +104,8 @@ flask --app nethub run            # runs the dev server (DEBUG defaults off; --d
 
 flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
+flask --app nethub check-store     # hash every stored image against its row; prints
+                                    # what is missing or altered, exits 1 if anything is
 
 pytest                             # runs tests/ -- see tests/conftest.py for the
                                     # app/client fixtures (temp DB + artifact store per test)
@@ -1198,10 +1200,15 @@ The schema is in `nethub/models.py` — `device_host_keys`, `upgrade_runs`,
 `upgrade_run_hosts`, `upgrade_phase_jobs`, `upgrade_host_phase_results`, with
 §7.3's vocabularies as module constants. Two deviations from §5, both because
 the EE is gone: there is no `private_data_dir`, and `playbook_log_path` is
-`log_path`. `upgrade_run_hosts.artifact_id` is a bare integer, not a foreign
-key: it was declared before the `artifacts` table existed (build step 7)
-and never converted, so nothing at the database level stops an artifact a
-run still needs from being deleted (PLAN.md WS-2).
+`log_path`. `upgrade_run_hosts.artifact_id` is a foreign key with
+`ON DELETE SET NULL`, not `RESTRICT`: a finished run keeps its snapshot
+columns, so deleting the artifact later costs it only the link. What stops a
+run that still needs the bytes is `artifacts.delete()`, which refuses while a
+run in `pre_checking`/`awaiting_approval`/`running` references the row. The
+check and the delete are one conditional `DELETE` (the claim pattern again),
+and a submit that read the artifact before a delete committed fails on the
+foreign key at insert; `upgrades.submit` turns that into the ordinary "not
+registered" refusal.
 
 **Two more tables joined the schema for WS-6.2b/6.3/6.4, and neither is a
 job table in §7.3's sense.** `host_key_scans` is a scan dispatched to the
@@ -1227,7 +1234,9 @@ a scan is not a job, and an audit row is not a pin.
   per-app, so the test fixtures get it too. A database that enforces less
   than production passes tests production would fail. There is a test
   asserting the pragma is on, because every other FK test passes vacuously
-  without it.
+  without it. The same hook sets `journal_mode=WAL` (two processes write one
+  file; WAL lets readers run past a writer) and `busy_timeout=5000`, each
+  with its own test.
 - **`Enum(create_constraint=...)` has defaulted to False since SQLAlchemy
   1.4.** Found by reading the emitted DDL, not by trusting the declaration:
   every vocabulary was a plain `VARCHAR` with no `CHECK`. `_enum()` passes
@@ -1323,8 +1332,8 @@ compares; don't add a comparison without routing it through one of them.
 **The sibling's claim is the conditional update itself.** `UPDATE ... WHERE
 id=? AND status='queued'` with the rowcount as the answer: a read-then-write
 lets two readers both see `queued` and both claim it, and nothing enforces
-that only one sibling runs (§9.1). (SQLite is not in WAL mode yet, despite
-design doc §5 requiring it; PLAN.md WS-2 fixes that.) `runner_instance_id` is a UUID minted per start and never a PID.
+that only one sibling runs (§9.1). `runner_instance_id` is a UUID minted per
+start and never a PID.
 
 **The credential socket: Flask serves, the sibling connects.** Not the
 reverse — a deposit endpoint would leave the sibling holding secrets for
@@ -1491,15 +1500,17 @@ a corrupted store failed upgrades, it did not install wrong bytes.
 **`state`, `superseded_by_id` and `bytes_state` exist but only `published`
 and `present` are ever written.** There is no promotion step to reach
 `staged` through and no supersede flow — the same no-supersede stance the
-YAML store had, and delete is still a hard removal of row and bytes. The
+YAML store had, and delete is still a hard removal of row and bytes (refused
+while a live run references the artifact; see "Dispatch" above). The
 columns are there because the partial indexes are defined over them and §7.4's
 retention story references them. Don't add `superseded_by_id` handling without
 the flow that reads it.
 
 **`check_store()` keeps the drift check's one rule**: re-derive what is cheap
 and always recoverable (a stale `file_size`), flag what is not (a missing file,
-or a digest that no longer matches). It never guesses at a wrong checksum, and
-it is a button rather than a page load because it hashes every image.
+or a digest that no longer matches). It never guesses at a wrong checksum. It
+is the `flask --app nethub check-store` command, not a web route, because it
+hashes every image and that is minutes of work in a request handler.
 
 ## Upgrade routes (`nethub/upgrade_routes.py`, `nethub/upgrades.py`)
 

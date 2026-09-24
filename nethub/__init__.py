@@ -23,6 +23,7 @@ def create_app():
 
     from . import models  # noqa: F401 -- registers the user_loader; needed before first request
     from .artifact_routes import artifacts_bp
+    from .artifact_routes import register_cli as register_artifact_cli
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
     from .upgrade_routes import hostkeys_bp, upgrade_bp
@@ -32,6 +33,7 @@ def create_app():
     app.register_blueprint(upgrade_bp)
     app.register_blueprint(hostkeys_bp)
     register_cli(app)
+    register_artifact_cli(app)
 
     with app.app_context():
         db.create_all()

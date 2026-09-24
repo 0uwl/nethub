@@ -72,6 +72,22 @@ class TestForeignKeys:
             enabled = db.session.execute(db.text("PRAGMA foreign_keys")).scalar()
             assert enabled == 1
 
+
+class TestConcurrencyPragmas:
+    """WS-2.1: design doc §5 required both of these and neither was set."""
+
+    def test_the_database_is_in_wal_mode(self, app):
+        """Two processes write one file; WAL lets readers run past a writer."""
+        with app.app_context():
+            mode = db.session.execute(db.text("PRAGMA journal_mode")).scalar()
+            assert mode == "wal"
+
+    def test_a_writer_waits_for_the_lock_instead_of_failing(self, app):
+        from nethub.extensions import BUSY_TIMEOUT_MS
+        with app.app_context():
+            timeout = db.session.execute(db.text("PRAGMA busy_timeout")).scalar()
+            assert timeout == BUSY_TIMEOUT_MS == 5000
+
     def test_a_result_needs_a_phase_job_that_exists(self, app, user):
         """Nothing may record a host result for an execution nobody approved."""
         with app.app_context():
