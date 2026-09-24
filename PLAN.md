@@ -475,9 +475,18 @@ needs the real heartbeat.
    nethub-sibling running?" (today this fails silently).
 6. **Queue depth at the gate.** The approve form says how many jobs are queued
    ahead.
+7. **Missing device username, before the form is filled.** `upgrades.submit`
+   and `upgrades.approve` refuse a user with no `device_username`, but only
+   after the form is posted (the first-boot `admin` user always starts
+   without one). When `current_user.device_username` is unset, the new-run
+   page and the approve form on the run page show a notice linking to
+   `/profile` in place of the password field and submit button. The server-side
+   refusal stays: this only moves the message earlier. With no JavaScript
+   (item 1), this is a template condition, not a disabled button.
 
-**Done when:** `tests/test_templates.py` covers the new states and the page
-loads with no external or inline script.
+**Done when:** `tests/test_templates.py` covers the new states (including a
+user with and without a device username on both forms) and the page loads
+with no external or inline script.
 
 ### WS-12: CI hardening
 
