@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nethub import sibling as S
-from nethub.credential_socket import CredentialError
+from nethub import verify_running_for
 from nethub.devices import connection, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
@@ -281,19 +281,12 @@ class TestEndToEndOverTheSocket:
             db.session.commit()
             job_id, run_id = job.id, run
 
-            def verify_running(jid):
-                # Its own app context: this runs on the serving thread, and
-                # Flask-SQLAlchemy's session is thread-local. Production does
-                # the same in nethub/__init__.py's _serve_credential_socket --
-                # without it every request fails with a generic refusal.
-                with app.app_context():
-                    fresh = db.session.get(UpgradePhaseJob, jid)
-                    if fresh is None or fresh.status != "running":
-                        raise CredentialError("no running execution with that id")
-                    return fresh.approved_by
-
+            # The production interlock, not a copy of it. It opens its own app
+            # context because it runs on the serving thread and
+            # Flask-SQLAlchemy's session is thread-local -- without that, every
+            # request fails with a generic refusal.
             thread = threading.Thread(
-                target=CS.serve, args=(listening, store, verify_running),
+                target=CS.serve, args=(listening, store, verify_running_for(app)),
                 kwargs={"stop": stop}, daemon=True)
             thread.start()
             try:
@@ -341,12 +334,8 @@ class TestEndToEndOverTheSocket:
             db.session.commit()
             job_id = job.id
 
-            def verify_running(jid):
-                with app.app_context():
-                    return db.session.get(UpgradePhaseJob, jid).approved_by
-
             thread = threading.Thread(
-                target=CS.serve, args=(listening, store, verify_running),
+                target=CS.serve, args=(listening, store, verify_running_for(app)),
                 kwargs={"stop": stop}, daemon=True)
             thread.start()
             try:

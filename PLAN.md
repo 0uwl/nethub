@@ -63,8 +63,8 @@ function name.
 | 0 | `docs/claude-md-corrections` | Remove false claims from `CLAUDE.md` | none | merged |
 | 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | merged |
 | 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | merged |
-| 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | in review |
-| 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | todo |
+| 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | merged |
+| 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | in review |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | todo |
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | todo |
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | todo |
@@ -318,6 +318,12 @@ the sibling's public key.
   opens it, and checks `job_id` and `approved_by` against the row (this
   replaces `verify_running`) and `expires_at`. Any mismatch fails the phase
   with `failure_stage='credential'`.
+- Cover `verify` too. The sibling queues it itself after `activate`, with
+  no approval, so sealing only on submit and approve leaves it with no
+  credential: the bug WS-4 found (see "Found while working"). Either seal a
+  second credential for the verify job when `activate` is approved, or give
+  `verify` its own gate. If the bug is fixed before WS-7, keep that fix's
+  behaviour.
 - Clear the column on every path to a terminal state and on cancel. The
   terminal-status trigger forbids updates after a terminal state, so clear
   before or in the same update.
@@ -544,3 +550,12 @@ a one-line description and the workstream it was found in.
 - `design-document.md` §4.4 (around "And `config.py` currently sets `DEBUG =
   True`") is false: `DEBUG` defaults off and is read from an env var. Fix in
   WS-13. Found in WS-3.
+- **Every run fails at `verify`, right after the switch is upgraded.**
+  `nethub/sibling.py` `_advance_run` queues `verify` itself after `activate`
+  with no approval, but a credential is only held at submit (pre-check) and
+  at `upgrade_routes.approve`. The sibling finds none and fails `verify`
+  with `failure_stage='credential'`; no run reaches the cleanup gate. The
+  device layer was validated by hand, so no app-driven run has ever got
+  this far. Found by the WS-4 end-to-end test, which marks the two
+  clean-run tests `xfail(strict=True)`: remove the marker with the fix.
+  Needs a small fix branch or WS-7 (see WS-7's design). Found in WS-4.

@@ -74,6 +74,9 @@ class Sibling:
     gate_ttl: timedelta = DEFAULT_GATE_TTL
     pull_target: transfer.PullTarget | None = None
     reload_wait: install.ReloadWait = install.DEFAULT_RELOAD_WAIT
+    #: Handed to every `PhaseContext`; None means `phases.default_connect`.
+    #: Only the end-to-end test sets it, to put a fake device behind a real run.
+    connect: Callable | None = None
 
     def __post_init__(self):
         self.runner_instance_id = self.runner_instance_id or str(uuid.uuid4())
@@ -403,6 +406,7 @@ class Sibling:
             search_dir=self.search_dir,
             pull_target=self.pull_target,
             reload_wait=self.reload_wait,
+            connect=self.connect,
         )
         try:
             status = phases.execute_phase(job, ctx, now=self.now)

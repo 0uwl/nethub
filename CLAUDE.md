@@ -16,10 +16,12 @@ along with every trace of `ansible-runner`, the EE, and the rendered
 inventory it used. The device layer is validated end-to-end against real
 hardware (two live upgrades, plus a live pre-check driven through the
 Flask app), so there is only one layer in the tree now, and it has been
-exercised, not just written. The one thing not yet done on the day-2 path
-is a full app-driven run past pre-check — stage/activate/verify/cleanup
-are each hardware-validated through the device layer, but not yet in one
-run started from the UI. The migration's own handoff document
+exercised, not just written. **An app-driven run cannot complete today:**
+`tests/test_end_to_end.py` drives one through the UI against a fake switch
+and it fails at `verify`, right after the switch was upgraded, because the
+sibling queues `verify` with no approval and so no credential is ever held
+for it (PLAN.md, "Found while working"). The two clean-run tests there are
+`xfail(strict=True)`; take the marker off with the fix. The migration's own handoff document
 (`netmiko.md`) is gone too, once its build order and reasoning had all
 either landed in code or been folded into this file and
 `design-document.md` — read the hard rules below directly rather than
@@ -160,6 +162,16 @@ Flash categories are asserted both ways: a success must not render
 the default category is deliberately an error, because the remaining
 uncategorised calls are refusals and downgrading them to a neutral notice
 would mis-style real failures.
+
+**`tests/test_end_to_end.py` drives whole runs**: the UI through Flask's test
+client, the real `Sibling` on the app `main()` builds, the real credential
+store over a socket pair, and the real device layer, with only the switch
+faked (`FakeSwitch`, answering from `tests/captures/`). Only its
+`credential_channel` fixture knows how a credential crosses from Flask to the
+sibling, so WS-7 swaps that fixture and keeps the scenarios. Two test seams
+exist for it and nothing else: `Sibling.connect` (a fake device behind a real
+run) and `nethub.verify_running_for(app)` (the production interlock, so tests
+serve the store with it rather than a copy).
 
 Tests cover `nethub/{config,credentials,models,bootstrap,auth,artifacts,artifact_routes,upgrade_routes}.py`
 end-to-end through Flask's test client (login flow and lockout, CSRF disabled in
