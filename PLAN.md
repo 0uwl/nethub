@@ -34,7 +34,16 @@ function name.
 ## How to work this plan
 
 - One workstream per branch. Branch off a freshly fetched `main` using the
-  branch name given. Work one workstream at a time.
+  branch name given. Work one workstream at a time. If your session was
+  assigned a different branch name, ask the maintainer which to use rather
+  than picking one silently.
+- Do not trust the status table for what has merged. Each branch sets its
+  own row to "in review", and `main` keeps saying that after the merge until
+  a later branch changes it. Check `git log --oneline origin/main` for the
+  merge of each branch your workstream depends on. When starting a
+  workstream, set any row that `main` shows as merged to "merged".
+- Before starting, read "Found while working" at the bottom of this file for
+  items tagged with your workstream. They are part of its scope.
 - Before and after every change, run the baseline:
   `python -m pytest -q`, `ruff check .` (ruff **0.16.7**, the CI pin; check
   `ruff --version` first), and `python -m yamllint .`. The test count must

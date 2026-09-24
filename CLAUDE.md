@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Active plan: read `PLAN.md` before starting any work.** It is the agreed
 direction from the 2026-09-23 review, split into workstreams that each get
 their own branch. Where it conflicts with this file, `PLAN.md` wins: several
-hard rules below are scheduled to change, and parts of this file are known to
-be wrong (listed under the plan's WS-0).
+hard rules below are scheduled to change, and each workstream in `PLAN.md`
+names the rules it changes.
 
 ## Project status
 
