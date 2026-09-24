@@ -12,10 +12,12 @@ from .extensions import csrf, db, login_manager
 def create_app():
     # Imported here, not at module scope: config.py raises without SECRET_KEY,
     # and importing nethub.devices shouldn't require Flask's settings.
-    from . import config as config_module
+    from . import config as web_config
+    from . import shared_config
 
     app = Flask(__name__)
-    app.config.from_object(config_module)
+    app.config.from_object(shared_config)
+    app.config.from_object(web_config)
 
     db.init_app(app)
     login_manager.init_app(app)

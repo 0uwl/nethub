@@ -681,3 +681,65 @@ class TestGateExpiry:
             monkeypatch.undo()
             db.session.expire_all()
             assert db.session.get(UpgradeRun, run).state == "running"
+
+
+class TestNoSecretKey:
+    """WS-3.2: the sibling signs nothing and must start without SECRET_KEY.
+
+    Run in a subprocess: `config.py` validates the key at import, and in this
+    process it has long since been imported with one set, so an in-process
+    test would pass whether or not the sibling still imported it.
+    """
+
+    def run(self, code, tmp_path):
+        import os
+        import subprocess
+        import sys
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SECRET_KEY", "CREDENTIALS_DIRECTORY",
+                            "NETHUB_CREDENTIAL_SOCKET", "NETHUB_SEARCH_DIR")}
+        env["DATABASE_PATH"] = str(tmp_path / "sibling.db")
+        return subprocess.run([sys.executable, "-c", code], env=env, cwd=os.getcwd(),
+                              capture_output=True, text=True, timeout=60, check=False)
+
+    def test_the_database_app_loads_without_a_key(self, tmp_path):
+        result = self.run(
+            "from nethub.sibling import _database_app\n"
+            "app = _database_app()\n"
+            "print(app.config['SECRET_KEY'], app.config['SQLALCHEMY_DATABASE_URI'])\n",
+            tmp_path)
+        assert result.returncode == 0, result.stderr
+        key, uri = result.stdout.split()
+        assert key == "None"
+        assert uri.endswith("sibling.db")
+
+    def test_the_sibling_starts_without_a_key(self, tmp_path):
+        """PLAN.md WS-3's done-when: `python -m nethub.sibling` starts. It
+        gets as far as its sweep and start-up log line, then is stopped."""
+        import os
+        import subprocess
+        import sys
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SECRET_KEY", "CREDENTIALS_DIRECTORY")}
+        env.update(DATABASE_PATH=str(tmp_path / "sibling.db"),
+                   NETHUB_CREDENTIAL_SOCKET=str(tmp_path / "absent.sock"),
+                   NETHUB_SEARCH_DIR=str(tmp_path))
+        # The web tier creates the schema; the sibling expects it to exist.
+        subprocess.run(
+            [sys.executable, "-c", "from nethub import create_app; create_app()"],
+            env={**env, "SECRET_KEY": "k" * 64}, cwd=os.getcwd(),
+            capture_output=True, timeout=60, check=True)
+        proc = subprocess.Popen([sys.executable, "-m", "nethub.sibling"], env=env,
+                                cwd=os.getcwd(), stderr=subprocess.PIPE, text=True)
+        try:
+            line = proc.stderr.readline()
+            assert "started; swept 0 abandoned row(s)" in line, (
+                line + proc.stderr.read() if proc.poll() is not None else line)
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def test_the_web_tier_still_refuses_to_start_without_one(self, tmp_path):
+        result = self.run("from nethub import create_app; create_app()", tmp_path)
+        assert result.returncode != 0
+        assert "SECRET_KEY" in result.stderr

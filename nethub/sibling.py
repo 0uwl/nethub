@@ -467,16 +467,19 @@ def _database_app():
     """A Flask app for nothing but SQLAlchemy's context.
 
     Deliberately *not* `create_app()`: that registers routes and runs the
-    first-boot admin bootstrap, and the sibling must do neither. It shares the
-    configuration and the engine, and nothing else -- the two processes are
-    separate units in separate PID namespaces on purpose (§9).
+    first-boot admin bootstrap, and the sibling must do neither. It loads
+    `shared_config` only, never the web tier's `config.py`, so it needs no
+    `SECRET_KEY`: the sibling signs nothing, and should not hold the key that
+    forges an admin session. The two processes share the database settings
+    and nothing else -- separate units in separate PID namespaces on
+    purpose (§9).
     """
     from flask import Flask
 
-    from . import config as config_module
+    from . import shared_config
 
     app = Flask(__name__)
-    app.config.from_object(config_module)
+    app.config.from_object(shared_config)
     db.init_app(app)
     return app
 
