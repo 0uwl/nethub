@@ -30,8 +30,7 @@ IMAGE = "cat9k_lite_iosxe.17.12.06.SPA.bin"
 
 @pytest.fixture
 def app(app):
-    app.config.update(DEVICE_TARGET_CIDRS=["192.0.2.0/24"],
-                      IMAGE_TRANSPORT="push_scp", SHARED_ACCOUNT_MODE=False)
+    app.config.update(DEVICE_TARGET_CIDRS=["192.0.2.0/24"])
     return app
 
 
@@ -65,7 +64,6 @@ def submit(user_id, hosts="sw01, 192.0.2.10", bundle="iosxe-17-12-06", cidrs=Non
         user=db.session.get(User, user_id),
         bundle=bundle,
         hosts_raw=hosts,
-        transport="push_scp",
         cidrs=["192.0.2.0/24"] if cidrs is None else cidrs,
     )
 

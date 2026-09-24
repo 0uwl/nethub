@@ -24,9 +24,8 @@ playbooks, so it moved here with the code that enforces it.
 | `hosts[].flash_dir` | Optional. `flash:` / `bootflash:`. |
 
 Anything else is rejected. Connection vars, credentials and registry entries
-are NetHub's to write -- `image_transport` especially, because choosing the
-transport chooses whose credential gets spent (§4.3.1). Beyond this set the
-answer is a pull request against the code, not a runtime upload.
+are NetHub's to write. Beyond this set the answer is a pull request against
+the code, not a runtime upload.
 
 **Two deliberate narrowings against that table, both worth knowing:** this
 implementation takes *one* bundle for the whole run rather than one per host,
@@ -254,8 +253,7 @@ def _require_device_username(user):
         )
 
 
-def submit(*, user, bundle, hosts_raw, transport, cidrs,
-           shared_account_mode=False, flash_dir='flash:', platform='iosxe',
+def submit(*, user, bundle, hosts_raw, cidrs, flash_dir='flash:', platform='iosxe',
            commit=True):
     """Compile a request into a run, its host rows, and a queued pre-check.
 
@@ -279,8 +277,6 @@ def submit(*, user, bundle, hosts_raw, transport, cidrs,
     run = UpgradeRun(
         submitted_by=user.id,
         device_username_used=user.device_username,
-        shared_account_mode=bool(shared_account_mode),
-        image_transport_used=transport,
         request_document=build_document(bundle, targets),
         request_sha512='',
         state='pre_checking',

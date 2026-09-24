@@ -80,12 +80,10 @@ effectiveness at provisioning and upgrading their inventory.
 - **Not a distributed content-delivery system.** NetHub is the sole
   source of day-2 image bytes (§3.3, §3.4); there is no support for
   image mirrors sited near remote fleets, so every byte of an upgrade
-  crosses whatever link separates the NetHub host from the device —
-  which direction it crosses in is configurable (§4.3.1), which end
-  originates it is not. This is a deliberate narrowing rather than an
-  omission: owning the store outright is what makes the transport an
-  operational choice instead of a provenance question, since both
-  adapters read a subtree NetHub administers. It is also a real
+  crosses whatever link separates the NetHub host from the device.
+  This is a deliberate narrowing rather than an omission: owning the
+  store outright means the push (§4.3.1) reads a subtree NetHub
+  administers, so provenance is never a question. It is also a real
   limitation for multi-site deployments, and §10 records where it would
   come back.
 - Not multi-vendor on day one. See Vendor Scope.
@@ -102,16 +100,12 @@ NetHub owning the store (§3.3) it is a local file operation, and a file is
 a file.
 
 Things a second platform inherits, worth checking early: §4.3.1's push
-transport assumes the device can run a temporary file-transfer server
-that NetHub can enable, push to, and disable again from the same
-authenticated session it already holds; its pull transport assumes a
-file-transfer client that can be driven from the CLI and prompted for a
-password on that same session; and §4.3 assumes a level-15-equivalent
-authorization exists at login. None of the three is universal, and a
-platform that supports only one of the two transports is a supported
-outcome — `image_transport` is deployment-level, but a platform that
-cannot honour the configured value must fail at pre-check rather than
-silently doing the other thing.
+assumes the device can run a temporary file-transfer server that NetHub
+can enable, push to, and disable again from the same authenticated
+session it already holds; and §4.3 assumes a level-15-equivalent
+authorization exists at login. Neither is universal. A platform that can
+only fetch its own image would need the device-side pull transport §10
+records as possible future work.
 
 ## 3. Architecture
 
@@ -217,15 +211,12 @@ trusted to ask:
   decision). No separate dedicated bootstrap container as it was in
   Drawbridge. What the HTTP daemon serves and what NetHub decides are
   two different things — see "the day-0 fetch sequence" below.
-- **Day-2**: images move between the store and an already-enrolled
-  device in whichever direction the deployment's `image_transport`
-  setting selects (§4.3.1). By default NetHub **pushes** over SCP —
-  Netmiko's `CiscoIosFileTransfer`, Paramiko underneath — under the same
-  device credential the run already holds — no second credential is
-  minted or held. A deployment whose devices may open outbound
-  connections can instead have the device **pull** over SFTP from a
-  distribution daemon, which costs a listening service and a
-  distribution credential and is priced in §4.3.1.
+- **Day-2**: NetHub **pushes** images from the store to an
+  already-enrolled device over SCP (§4.3.1) — Netmiko's
+  `CiscoIosFileTransfer`, Paramiko underneath — under the same device
+  credential the run already holds. No second credential is minted or
+  held. Push is the only day-2 transport; a device-side pull is recorded
+  in §10 as possible future work.
 
 **NetHub is the sole source of the bytes, and that is not modular.**
 Earlier revisions let the image *source* be either a local bundled
@@ -233,20 +224,11 @@ container or an existing remote host, chosen by configuration. That
 flexibility looked cheaper than it was: a source NetHub does not
 administer is one it cannot guarantee holds the artifact NetHub actually
 published. Owning the store outright turns that into ordinary
-implementation, and it is what makes the transport a free choice rather
-than a trust question — both adapters read the same published subtree on
-the same host NetHub administers, so selecting pull changes who dials
-whom and changes nothing about provenance.
-
-Which is worth separating explicitly, because the two were conflated
-before: **the source is fixed, the direction is configurable.** Under
-push the sibling reads the published subtree read-only (§3.5) and pushes
-straight from it over the connection the run already holds, and
-"distribution host" names only the box the bytes are read from. Under
-pull the same subtree is additionally exposed by an SFTP daemon and
-"distribution host" names a service the device dials — a daemon and a
-credential that push does not need, both specified in §4.3.1. Neither
-mode admits a second store.
+implementation, and it means the transfer is never a trust question:
+the sibling reads the published subtree read-only (§3.5) and pushes
+straight from it over the connection the run already holds. "Distribution
+host" names only the box the bytes are read from. There is no second
+store and no day-2 daemon a device dials.
 
 The cost is stated rather than hidden. A deployment with branch sites
 cannot put a copy of the image near its devices; every push crosses
@@ -267,16 +249,13 @@ bypassable by anyone who can guess a filename. The point of the shared
 store is to make the day-0/day-2 split cheap; a shared docroot would
 make that split meaningless.
 
-The pull transport does not weaken that. It exposes the day-2 subtree
-over **SFTP**, to authenticated clients only, chrooted to that subtree
-(§4.3.1) — which is a different daemon, a different protocol and a
-credentialed one. What must not happen is the shortcut of serving day-2
-images from the day-0 HTTP docroot to save running a second service:
-that would put the image store behind a guessable filename on an
-unauthenticated read path, which is precisely the arrangement this
-paragraph exists to forbid. If serving images over HTTP is ever
-revisited it needs the `mint/` capability-path treatment day-0 configs
-get, not a shared docroot (§10).
+What must not happen, if a device-side pull is ever built (§10), is the
+shortcut of serving day-2 images from the day-0 HTTP docroot to save
+running a second service: that would put the image store behind a
+guessable filename on an unauthenticated read path, which is precisely
+the arrangement this paragraph exists to forbid. If serving images over
+HTTP is ever revisited it needs the `mint/` capability-path treatment
+day-0 configs get, not a shared docroot.
 
 **A static daemon cannot enforce day-0's controls, so it is never asked
 to.** §3.4 requires that day-0 resolve what to serve from an allowlisted
@@ -365,9 +344,8 @@ only at the very last step. Everything is a single pipeline:
 ingest (upload → hash → size → store → record)
    │
    ├─ egress A (day-0): device pulls, HTTP, allowlist-gated, device-initiated
-   └─ egress B (day-2): admin-initiated, dispatched to the sibling, credentialed, one of
-        ├─ push (default): NetHub → device, SCP
-        └─ pull:           device → NetHub, SFTP
+   └─ egress B (day-2): admin-initiated, dispatched to the sibling, credentialed,
+                        NetHub pushes → device over SCP
 ```
 
 There is one artifact record. A day-0 config, the ZTP script itself, and
@@ -427,11 +405,12 @@ they give an attacker who supplies an image to an operator a working
 path — hand over a benign build prepared to collide with a malicious
 one, let NetHub ingest and record the benign one, substitute later. Two
 places in this design have nothing standing behind the digest if that
-succeeds. Under the pull transport the device does not verify the
-distribution host at all (§4.3.1), and day-0 names payload hash
-verification as one of three compensations for its deliberate use of
-plain HTTP (§4). Large binaries with unused space are good collision
-carriers. The reopening condition is unchanged by any of this: a second
+succeeds. Day-0 names payload hash verification as one of three
+compensations for its deliberate use of plain HTTP (§4), and a
+device-side pull transport, if one is ever built (§10), would leave the
+digest as the only control against a redirected session, because the
+device does not verify the host it fetches from. Large binaries with
+unused space are good collision carriers. The reopening condition is unchanged by any of this: a second
 platform that only supports MD5, which would be an *added* algorithm
 and the column this section refuses, argued on its own terms.
 
@@ -503,19 +482,14 @@ phase's inputs are.
 The image bytes themselves never enter that snapshotted state, and that
 falls out of the same rule rather than being an exception to it: what
 NetHub snapshots onto `upgrade_run_hosts` is the *reference* — filename,
-digest, size — not the file. Under push (§4.3.1) the sibling does handle
-the bytes: `stage_image()` reads the file directly off the published
-subtree and streams it to the device over the second SSH session Netmiko
-opens for the transfer, rather than the file being copied anywhere else
-first. Under pull the sibling never touches them — the distribution
-daemon serves them and the device receives them — so that mode is the one
-this paragraph was originally written for. Either way the invariant this
-section actually needs holds: nothing the credential socket or the
-snapshotted row set carries is ever the multi-hundred-megabyte image
-itself, only a reference to where it already sits on the one mount both
-transports read. What changed is only that "the phase never touches the
-bytes" is now true of one transport and not the other, rather than being
-a property of the design.
+digest, size — not the file. The sibling does handle the bytes during
+the push (§4.3.1): `stage_image()` reads the file directly off the
+published subtree and streams it to the device over the second SSH
+session Netmiko opens for the transfer, rather than the file being
+copied anywhere else first. The invariant this section actually needs
+still holds: nothing the credential socket or the snapshotted row set
+carries is ever the multi-hundred-megabyte image itself, only a
+reference to where it already sits on the one mount the push reads.
 
 ## 4. Security Model
 
@@ -812,12 +786,10 @@ token redeemed from a source other than the one it was issued to. §6.1
 is corrected to say so explicitly, since it is the sentence an
 implementer reads to decide which routes need this treatment.
 
-Day-2 image delivery deliberately stays credentialed, unlike day-0, and
-stays credentialed in **both** transport directions (§4.3.1). Under push
-the image rides the Netmiko session already authenticated with the
-submitter's own device credential; under pull the device authenticates
-to the distribution daemon. Neither is the plain HTTP used for the day-0
-script fetch (§3.3). The two days are in different trust situations, so
+Day-2 image delivery deliberately stays credentialed, unlike day-0
+(§4.3.1): the push rides an SSH session authenticated with the
+submitter's own device credential, never the plain HTTP used for the
+day-0 script fetch (§3.3). The two days are in different trust situations, so
 this is not an inconsistency. A day-0 device has no credentials to offer
 regardless of transport, so plain HTTP costs nothing extra there. A
 day-2 device is already enrolled, and a credential is what gates who may
@@ -827,13 +799,11 @@ verification does not replace: hash verification confirms the bytes
 weren't tampered with, and says nothing about who was allowed to move
 them in the first place.
 
-Whether a *second*, distribution-specific credential needs pricing
-separately is now a per-deployment answer rather than a settled no. Push
+There is no second, distribution-specific credential to price. Push
 collapses it into the one credential §4.3 and §4.3.1 already cover, and
 its residual cost lives elsewhere — in the device configuration change
-that makes the push possible. Pull reintroduces a distribution
-credential, bounded to two possible sources and kept out of the
-`settings` table; §4.3.1 prices it.
+that makes the push possible. A device-side pull (§10) would bring a
+distribution credential back.
 
 ### 4.3 Admin identity, and who the device sees
 
@@ -958,9 +928,9 @@ Two operational consequences follow:
   after the fact. Even with that closed, without host-key verification
   an operator can name a machine they control and be handed a
   colleague's AAA credential, or an on-path attacker on the management
-  network can take it. §4.3.1 concludes that the old *distribution*
-  password's exposure was structural and mitigated it with lifetime;
-  this one is not structural and does not get that excuse. NetHub pins
+  network can take it. An earlier pull design treated its minted
+  *distribution* password's exposure as structural and mitigated it with
+  lifetime; this one is not structural and does not get that excuse. NetHub pins
   the fingerprint from `device_host_keys` (§5) as a `paramiko` host-key
   policy object built fresh for each connection — there is no rendered
   `known_hosts` file for a connection plugin to read from a different
@@ -1024,76 +994,46 @@ Two operational consequences follow:
   `ip ssh source-interface` assertion is gone: it was a pull-era
   requirement for the device's SFTP *client*, and push has confirmed it
   does not gate the device's SCP *server* — the two are unrelated
-  services on the device. It is relevant again for a deployment that
-  selects the pull transport, where the device is an SSH client once
-  more, but as a device-side prerequisite an operator satisfies rather
-  than as an assertion NetHub makes (§4.3.1). NetHub does not otherwise write configuration
+  services on the device. NetHub does not otherwise write configuration
   outside the upgrade itself, and asserts privilege 15 at pre-check
   rather than discovering it mid-wave. One exception is deliberate and
-  bracketed rather than standing, and it belongs to the push transport
-  alone: the stage phase enables the device's own SCP server for the
+  bracketed rather than standing: the stage phase enables the device's
+  own SCP server for the
   duration of the push and restores whatever it found — enabled or not —
   in a `finally:` block, confirmed by re-reading the running-config
   rather than trusted from the adapter's exit status (§4.3.1). That
   confirmation is why "does not write configuration outside the upgrade
   itself" still holds: the toggle is scoped to one phase execution on one
-  host, not a standing device change. Under pull the exception does not
-  arise at all.
-- **Whether a distribution account exists is a deployment choice, and
-  the default is that it does not.** Under push there is no second
-  account to keep shared and no second password to rotate: the transfer
-  rides the same Netmiko session already authenticated with the
-  submitter's own device credential. Under pull there is a distribution
-  daemon and therefore a distribution identity, which is either the
-  submitter's own credential again or one dedicated read-only account
-  supplied as a systemd credential — never a shared *device* login, and
-  never a row in `settings`. §4.3.1 prices both; the point here is that
-  this bullet's old absolute form was a property of one transport rather
-  than of the security model.
+  host, not a standing device change.
+- **There is no distribution account.** There is no second account to
+  keep shared and no second password to rotate: the transfer runs under
+  the submitter's own device credential, over a second session to the
+  same pinned address (§4.3.1).
 
-#### 4.3.1 How the image reaches the device, and what each direction costs
+#### 4.3.1 How the image reaches the device
 
-The image can travel in either direction, and which one a deployment
-uses is a setting (`image_transport`, §5) rather than a property of the
-design. **Push** — NetHub writes the image to the device over SCP — is
-the default. **Pull** — the device fetches the image from a distribution
-host over SFTP — is the alternative. Both adapters read from the same
-store NetHub owns (§3.3), both end in the same `verify /sha512` against
-the digest computed once at ingest (§3.4), and `nethub/devices/
-transfer.py`'s `stage_image()` selects between them by dispatching to a
-push or a pull adapter function based on the deployment's
-`image_transport` setting. Everything on either side of the transfer is
-shared, which is what keeps this a choice of adapter rather than two
-upgrade paths to maintain.
+NetHub pushes the image to the device over SCP. That is the only day-2
+transport: `nethub/devices/transfer.py`'s `stage_image()` reads the file
+from the store NetHub owns (§3.3), pushes it, and ends in a `verify
+/sha512` against the digest computed once at ingest (§3.4).
 
-Making it a setting is not indecision. The two directions fail in
-different places, and which failure a deployment can absorb is a fact
-about that deployment's network and its change policy — not something
-this document can settle once for everyone. What follows prices each
-direction, because the choice is now an operator's to make and an
-operator cannot make it from a section that argues for one.
-
-**The history matters, because the default was reversed once already.**
+**The history matters, because the direction was reversed once already.**
 An earlier revision of this design had the device fetch its own image
 over SFTP, authenticating to a distribution account NetHub minted a
-password for on every phase execution. **That design assumed the device could
-open an outbound connection to NetHub, and a nontrivial fraction of real
-deployments block exactly that.** Outbound SSH from a network device is
-a common perimeter rule — it is the same jump-host concern that motivates
+password for on every phase execution. **That design assumed the device
+could open an outbound connection to NetHub, and a nontrivial fraction of
+real deployments block exactly that.** Outbound SSH from a network device
+is a common perimeter rule — the same jump-host concern that motivates
 restricting SSH egress from servers generally, applied to infrastructure
 that is even more attractive to pivot through. Where that rule is in
-force, pull does not degrade, it does not work: there is no fallback and
-no partial credit, only a device that can never reach the distribution
-host regardless of anything NetHub does on its own side. That is why
-push is the default, and why selecting pull is something a deployment
-should do only after confirming its devices can actually reach the
-distribution host. It is not a reason to withhold pull, which is what
-the previous revision of this section concluded: a deployment that
-permits the egress is not helped by NetHub pretending it does not exist,
-and the costs below are costs, not disqualifications.
+force, pull does not degrade, it does not work. A later revision kept
+pull as a deployment-selectable alternative beside push, but nothing ever
+configured its distribution host or credential and it was never run
+against hardware, so it was deleted rather than carried. §10 records
+what bringing it back would need.
 
-**Push inverts the connection, and where it is available that inversion
-pays for itself immediately.** Every device in a run already has an
+**Push inverts the connection, and that inversion pays for itself
+immediately.** Every device in a run already has an
 inbound, admin-initiated Netmiko session open for pre-check, activate,
 verify and cleanup, authenticated with the submitter's own device
 credential (§4.3). The stage phase pushes under **that same identity**,
@@ -1118,23 +1058,17 @@ concurrent sessions per user, which a second simultaneous connection
 under the same identity could trip. That risk is unchanged by which
 library carries the second session, and is tracked in §10.
 
-Under push, nothing new is minted regardless: there is no distribution
-account, no distribution password, no per-phase credential lifecycle
-beyond the one §4.3 and §9.1 already define for the device credential
-itself. Everything
-§4.3.1 used to specify about the old model — a minted password's
-lifetime, its purpose-built low-privilege account, the SSH/SFTP daemon
-serving it, the `ForceCommand internal-sftp` chroot hardening it needed —
-is simply absent when push is the configured transport, because there is
-no second credential to specify any of it for. Under pull those
-requirements return, in the reduced form the pull half of this section
-specifies; the point is that a deployment on push pays none of them, not
-that they were wrong.
+Nothing new is minted: there is no distribution account, no distribution
+password, no per-phase credential lifecycle beyond the one §4.3 and §9.1
+already define for the device credential itself. Everything this section
+used to specify about the old pull model — a minted password's lifetime,
+its purpose-built low-privilege account, the SSH/SFTP daemon serving it,
+the `ForceCommand internal-sftp` chroot hardening it needed — is absent,
+because there is no second credential to specify any of it for.
 
 **What push costs instead is a device configuration change, and
-`transfer.py`'s push adapter is explicit about the price.** Pulling left
-the device untouched; pushing requires the device's own SCP server to be
-listening, which means NetHub has to enable it, use it, and turn it back
+`transfer.py`'s push adapter is explicit about the price.** Pushing
+requires the device's own SCP server to be listening, which means NetHub has to enable it, use it, and turn it back
 off. The push adapter does this narrowly and defensively, and this
 sequence is validated end-to-end against a real Catalyst 9200CX, not
 just written to spec:
@@ -1152,7 +1086,7 @@ just written to spec:
   the pushed bytes on the device by asking it for its own `verify
   /sha512` digest and comparing in Python rather than substring-testing
   the device's echoed output — §3.4's third consumption of the ingest
-  digest, unchanged by which direction the bytes travelled.
+  digest.
 - It restores the prior state in a `finally:` block that runs whether the
   push succeeded, failed, or raised partway, and it does not trust the
   restore call's return value: it reads the running-config back and
@@ -1234,9 +1168,7 @@ records that the swap needs re-testing at image size rather than
 assuming a smaller transfer generalises). IOS-XE has no SFTP server —
 Cisco documents the SFTP client as always enabled and the server as
 unsupported, consistently across trains — so under push, SCP is the only
-wire protocol available regardless of which library carries it;
-switching to SFTP the way pull could, or falling back to the device
-fetching its own image, is not an option in this direction either.
+wire protocol available regardless of which library carries it.
 
 **Shelling out to OpenSSH `scp` as a subprocess was considered as the
 documented fallback and rejected, not merely deferred.** The reason is
@@ -1279,7 +1211,7 @@ The earlier rejection worried that push would relocate every image's
 crypto into NetHub's own process on the host §3.2 protects from
 stalling. The transfer runs inside the sibling's own process, exactly
 where every other device-touching phase already runs (§8, §9) — never in
-Flask, either direction. Only *which side of the wire* performs the SSH
+Flask. Only *which side of the wire* performs the SSH
 work changed; where that work happens did not.
 
 Two consequences carry over from the credential model unchanged, because
@@ -1292,140 +1224,11 @@ push did not touch them:
   does.
 - **Only the phase that moves bytes touches the device's transfer
   service.** Under §8.1's split, stage is the phase that toggles and uses
-  the SCP server; pre-check, activate, verify and cleanup never do. Under
-  pull no phase toggles anything, which is that property's stronger
-  form. A run
+  the SCP server; pre-check, activate, verify and cleanup never do. A run
   parked at the reload gate from Monday to Saturday holds no device
   credential in memory (§9.1) and has made no standing change to any
   device — the same property §8.1 claims for the sibling's phase
   execution itself.
-
-**Pull, and what it buys.** Under `image_transport = pull_sftp` the
-stage phase issues one `copy sftp://…` on the device's own CLI over the
-existing Netmiko session, answers the two prompts it raises on that same
-channel, and then runs the same `verify /sha512` push runs. The gains are
-the exact mirror of push's costs. **This adapter's prompt sequence
-remains unverified against a real device** (§10) — it is the one item
-from the pre-Netmiko design that outlived the rewrite unresolved, and
-naming only the filesystem as the destination is deliberate: it forces
-the `Destination filename` prompt to appear so the pair of prompts arrives
-in a known order. A wrong prompt list does not fail fast; it hangs until
-the read timeout:
-
-- **Nothing on the device is reconfigured.** The enable/restore bracket
-  above does not exist under pull, and neither does the residual
-  kill/abandon gap that bracket cannot close. `scp_restore_confirmed` is
-  null on a pull-transport stage row because there was never anything to
-  restore — the column keeps its meaning, and "null" keeps meaning "no
-  confirmed restore", which is why the distinction has to be read
-  together with the row's transport rather than alone. For an
-  organisation whose change policy treats any running-config write as a
-  change requiring its own approval, this bullet is the entire argument.
-- **It depends on neither Netmiko's file-transfer class nor Paramiko.**
-  The transfer is performed by the device's own SFTP client and driven by
-  one CLI command, so the Paramiko deprecation tracked in §10 and the
-  `libssh` failure that forced Paramiko in the first place do not reach
-  it. A deployment that finds push unreliable now has somewhere to go
-  that is not "wait for a purpose-built transfer script".
-- **It uses whatever outbound management path the device already
-  has**, including a source-interface or VRF it is already configured
-  for. The `ip ssh source-interface` check the pre-check dropped when
-  push became the default was a pull-era requirement, and it is relevant
-  again here — not as an assertion `phase_precheck` makes (there is no
-  pre-check assertion infrastructure to hang it on today), but as a
-  prerequisite an operator selecting pull has to satisfy on the device
-  side.
-
-**What pull costs, priced the same way.**
-
-- **A daemon the device dials comes back.** §3.3's "day-2 no longer has
-  a daemon a device connects to" holds only under push. Pull requires an
-  SFTP service on the distribution host, listening where every targeted
-  device can reach it, serving the published subtree, with the
-  `ForceCommand internal-sftp` chroot hardening the original pull design
-  specified and for the same reason. That is inbound network surface on
-  the NetHub host which push does not have, and it is the cost that
-  should weigh heaviest on the decision.
-- **A distribution credential exists again.** This is the part of the
-  change that had to be argued rather than waved through, and it is
-  bounded below.
-- **The device does not verify the distribution host's key.** This is
-  the sharpest asymmetry between the two directions and it has no
-  mitigation, only a compensating control. Under push, NetHub validates
-  the device against a pinned `device_host_keys` row and fails closed
-  (§4.3). Under pull the connection runs the other way, and the
-  verifying party would have to be the IOS-XE SSH client, which does not
-  perform host-key verification of the server it connects to. An
-  attacker who can redirect that session to a host they control is
-  therefore not detected by the transport. What detects them is the
-  digest: `verify /sha512` compares against the SHA-512 rendered from
-  the `artifacts` table (§3.4), which the attacker cannot influence, so
-  substituted bytes fail verification and the host fails staging.
-  Confidentiality of the transferred bytes is not protected, but an
-  IOS-XE image is a vendor binary rather than a secret — unlike a day-0
-  config, which is why §3.3 reasons about the two differently.
-- **That same redirection collects the distribution credential.** The
-  device answers a password prompt to whatever it actually connected to.
-  This is the argument for the credential being either the submitter's
-  own — already presented to every device in the run under §4.3's model,
-  so no new secret is placed at risk — or a dedicated account whose only
-  privilege is read-only access to one directory. It is also, and more
-  sharply than any other line in this section, the argument for a
-  submitter never choosing the transport (§3.5, §2's non-goals): a
-  request that could select pull could select whose credential gets
-  spent.
-
-**Where the pull credential comes from, and why it is not a settings
-row.** `distribution_credential_source` (§5) takes two values:
-
-- `same_as_device` — the submitter's own device credential, the one
-  §9.1 already collects at the approval gate and holds in memory for the
-  life of the phase execution. Nothing new is stored and nothing new is
-  minted, and §4.3's two-sided attribution property survives intact:
-  the same human authenticates to the device and to the distribution
-  host. The precondition is that the distribution host authenticates
-  against the same directory the devices do, which a deployment with
-  centralized AAA can generally arrange and one without generally
-  cannot — the same precondition §4.3 already states for the
-  attribution claim itself.
-- `dedicated` — one deployment-wide account on the distribution host,
-  read-only over the published subtree. Its password is **a systemd
-  credential injected into the sibling's unit, never a row in
-  `settings`.** §5 already rules that secrets stay out of that table,
-  and supplies the OIDC client secret and the shared-account password
-  exactly this way; the reason transfers without modification. A
-  settings page that holds passwords is a plaintext secret store
-  readable by every admin, and this password would be the most useful
-  one in it.
-
-Either way the credential reaches the phase execution the way the device
-credential already does: held as a plain Python attribute on
-`PhaseContext` (`transfer.py`'s `PullTarget` carries it, `field(repr=False)`
-so it never renders into a traceback or a stray `log.debug`), destroyed
-when the phase ends, never written to the database and never rendered
-into anything retained. Under `same_as_device` it crosses §9.1's socket,
-because it is a per-execution secret Flask collected at a gate. Under
-`dedicated` it does not cross the socket at all — the sibling reads its
-own unit's credential directly and Flask never holds it. The second case
-is a smaller surface than the socket, not a wider one, and neither
-widens what the socket is permitted to carry: it is still per-execution
-credentials and nothing else.
-
-**The password is answered at a prompt, never embedded in the URL.** A
-`copy sftp://user:pass@host/…` form would place the credential in the
-device's command history and in its AAA command accounting — the same
-record §4.3 leans on for attribution, which would then contain a
-password, turning the audit property into a disclosure. So the pull
-adapter issues the command with no credential in it and answers the
-device's own `Password:` prompt on the channel. It also refuses to put
-exception text into its own error messages, because a channel read can
-quote back whatever was written to that channel — the same reasoning
-§7.3 states for `error_summary` generally, arriving here through a
-different mechanism. Netmiko's `session_log` must not be enabled on a
-pull-transport phase for the identical reason: it would capture the raw
-channel bytes, prompt and password both, to a file. That is a constraint
-on how the sibling drives this one adapter, recorded here because nothing
-else in this document would record it.
 
 **Ansible Vault was considered while this design still used Ansible, and
 the reasoning against it carries over unchanged now that it doesn't.**
@@ -1436,19 +1239,6 @@ protected a copy that was already the least exposed one, with a vault
 password that has to reach the same process by the same means, which is
 two secrets where one would do and restores exactly the key-disposal
 problem removed when the old minted distribution password went away.
-The secret that genuinely needs protecting at rest is the `dedicated`
-account's password, and that one was never a candidate for vaulting: it
-is a systemd credential, the mechanism this deployment already uses for
-the shared-account password (§4.4, §5). Adding a secret store to hold a
-copy of it would be strictly worse than using the one it already has.
-
-**One thing pull does not change, stated because it would be easy to
-assume it does.** The authorization gate is identical: an
-unauthenticated party still cannot cause an image to move anywhere, in
-either direction. That requires an authenticated submitter, an approved
-gate, and a valid credential, exactly as every other phase does. Pull
-moves where the bytes are read from and who dials whom; it does not move
-who is allowed to ask.
 
 
 ### 4.4 Local accounts, for teams without an IdP
@@ -1530,8 +1320,7 @@ demotion then changes nothing. This is an ordinary confused deputy, and
 it is not a reason to drop local accounts, which exist for teams with no
 IdP at all. It is a reason for `local_accounts_enabled` to be a
 deployment-level setting that an org running OIDC can turn off,
-following shared account mode's explicit-opt-in shape rather than being
-implied. And it is why §5 grows an audit table for user administration:
+explicitly rather than implied by anything else. And it is why §5 grows an audit table for user administration:
 in a system whose stated purpose is an audit trail, "who created this
 account, who changed this role, who issued this token" should not be the
 one question with no record behind it.
@@ -1548,18 +1337,18 @@ row can't authenticate anything until that first reset completes.
 Per-user device credentials assume a per-human identity — local or
 OIDC, either satisfies it — but they still assume each engineer
 authenticates to devices under their own name. A team on one shared
-device account can't produce that, and forcing them to fake per-user
-device logins just to use NetHub is worse than admitting the gap
-outright. **Shared account mode** is an explicit, deployment-level
-setting (`SHARED_ACCOUNT_MODE`; not a per-user fallback, and not implied
-by choosing the local auth backend) that fixes the device username to one
-admin-configured value for every upgrade run in that deployment, instead
-of reading `users.device_username`. It costs exactly what §4.3's
-two-sided attribution argument warned against for a shared service
-account: every device-side change attributed to one name,
-answerable only from NetHub's own audit trail rather than corroborated
-by the device's own AAA/syslog. That's a decision an admin makes once
-and visibly, not a default a missing IdP quietly falls back to.
+device account can't produce that. **Every run uses the submitter's own
+`users.device_username`**, and NetHub has no mode that substitutes one
+shared name. An explicit, deployment-level shared account mode was
+designed and partly stubbed (a hardcoded-off flag and a column
+snapshotting it on every run), but it never had a username setting or
+anything that read it, so it was deleted; §10 records it as possible
+future work. If it returns, its cost is the one §4.3's two-sided
+attribution argument warns against for a shared service account: every
+device-side change attributed to one name, answerable only from NetHub's
+own audit trail rather than corroborated by the device's own AAA/syslog.
+That must be a decision an admin makes once and visibly, never a default
+a missing IdP quietly falls back to.
 
 ### 4.5 The session, which is where both backends' decisions expire
 
@@ -1666,17 +1455,13 @@ test asserting each.
   `bytes_pruned_at`, `uploaded_by`, `uploaded_at`. Every byte NetHub
   serves, on either day, has exactly one row here.
   - `storage_path` is where the blob actually lives on disk, and is what
-    §7.3's retention purge collects by. There is no `remote_dir`, and
-    the return of a pull transport (§4.3.1) does not bring it back: that
+    §7.3's retention purge collects by. There is no `remote_dir`: that
     column existed because the distribution host could once have been a
     separate remote machine whose layout NetHub did not control (§3.3),
-    which is no longer true in either direction. Push reads the file
-    directly off the published subtree by filename, in the sibling's own
-    process; pull has the device fetch by filename under the one
-    directory the SFTP daemon exposes, which is that same subtree and is
-    named once for the deployment rather than once per artifact. So there
-    is still no per-artifact directory to record, and the constraint
-    below is what both modes rely on instead. `UNIQUE(filename) WHERE
+    which is no longer true. The push reads the file directly off the
+    published subtree by filename, in the sibling's own process, so there
+    is no per-artifact directory to record, and the constraint below is
+    what the push relies on instead. `UNIQUE(filename) WHERE
     state IN ('staged', 'published')` is the constraint that makes
     "push reads by filename" safe: without it, two artifacts uploaded
     under the same original filename can promote to the same on-disk
@@ -1738,8 +1523,7 @@ described there are `upgrade_phase_jobs`-only now.
 - `upgrade_runs` table, the parent record for one upgrade dispatch —
   staging and installing a software bundle across a set of devices
   (§8.1): `id`, `platform`, `submitted_by`,
-  `device_username_used`, `shared_account_mode`, `image_transport_used`,
-  `distribution_host_used`, `request_document`,
+  `device_username_used`, `request_document`,
   `request_sha512`, `state`, `awaiting_phase`, `gate_expires_at`,
   `cancel_requested_at`, `cancel_requested_by`, `created_at`,
   `finished_at`.
@@ -1769,27 +1553,14 @@ described there are `upgrade_phase_jobs`-only now.
     dispatch, for the same reason `upgrade_run_hosts` (below) snapshots
     `version`/`filename`/`sha512`: an audit row that re-reads its own
     answer from a mutable table stops being an audit row the first time
-    somebody's mapping is corrected. `shared_account_mode` snapshots
-    *how* that name was chosen, and it is not optional decoration.
-    Under §4.4's shared account mode every run records the same
-    configured name, so an auditor reading this table a year later
-    cannot tell "jsmith ran this" from "everyone runs as jsmith" — which
-    erases precisely the property §4.3 spends its length building. §4.4
-    calls the flip "a decision an admin makes once and visibly"; that is
-    a data requirement, not a UI one.
-  - `image_transport_used` snapshots the transport the same way, and for
-    a reason that is operational before it is evidentiary. A run parks at
-    approval gates for days (§8.1), so a settings change between two
-    phases of one run is ordinary rather than exotic — and a run that
-    stages by push and then reads a changed setting at activate has no
-    coherent answer for `scp_restore_confirmed`, which is null both when
-    a pull-transport host had nothing to restore and when a
-    push-transport host's restore was never confirmed. Snapshotting the
-    transport at dispatch is what keeps that column readable, and it is
-    the same "a run is self-contained" rule this table already applies to
-    `filename`/`sha512`/`file_size`. Under `pull_sftp` the run also
-    snapshots `distribution_host_used`, so the row records which host the
-    fleet was told to authenticate to that day.
+    somebody's mapping is corrected. It is always the submitter's own
+    name (§4.4). If shared account mode ever returns (§10), this table
+    needs a column recording *how* the name was chosen, or an auditor
+    cannot tell "jsmith ran this" from "everyone runs as jsmith". The
+    same goes for a second transport: `scp_restore_confirmed` (below) is
+    readable alone only because push is the only transport, so a
+    returning pull transport needs a snapshotted transport column beside
+    it.
   - `request_document` stores the submitted request itself, and
     `request_sha512` its digest. NetHub hashes what it ingests (§3.4),
     and a document deciding which images land on which devices is not
@@ -1872,18 +1643,15 @@ described there are `upgrade_phase_jobs`-only now.
     hostname never in the run's target list, and "purged as a unit with
     the run" (§7.4) has no declared mechanism keeping this table in
     lockstep with its parents beyond a shared `run_id`.
-  - `scp_restore_confirmed` is nullable — set only on the stage row of a
-    **push-transport** run, the only phase of the only transport that
-    touches the device's SCP server (§4.3.1). It is null for every
-    pull-transport stage row, and that null means "nothing was ever
-    changed" rather than "a change may be outstanding", which is the
-    opposite reading. Nothing in this row distinguishes the two, so
-    anything querying for devices that may owe a restore must join
-    `upgrade_runs.image_transport_used` rather than reading this column
-    alone — including whatever eventually acts on §10's open question
-    about it. It is otherwise
-    the persisted counterpart of the fact the push adapter already
-    computes locally in its own `finally:` block. It is how a future reconciliation
+  - `scp_restore_confirmed` is nullable — set only on a stage row, the
+    only phase that touches the device's SCP server (§4.3.1). Null means
+    no bracket ran: the image was already staged, or the failure came
+    before the bracket. It never means a confirmed restore. With push the
+    only transport this column is readable alone; an earlier revision
+    also left it null for a pull-transport host, which had nothing to
+    restore, and needed a join against the run's transport to tell the
+    two apart. It is the persisted counterpart of the fact the push
+    adapter already computes locally in its own `finally:` block. It is how a future reconciliation
     pass, or an operator running an ad hoc query today, finds "which
     devices might still have their SCP server enabled" without NetHub
     needing to keep a persistent per-device inventory to answer it
@@ -2080,43 +1848,23 @@ described there are `upgrade_phase_jobs`-only now.
   distinguished by kind rather than merged into one timeline.
 - `settings` table: `key`, `value`, `updated_by`, `updated_at`, plus an
   append-only, never-purged `settings_audit` recording every change with
-  its old and new value. §4.4 names five OIDC settings, shared account
-  mode and its fixed device username, and `local_accounts_enabled`; §8.1
-  adds the target CIDR and the stage-phase concurrency cap; §4.3.1 adds
-  the four transport keys below; §4.3 makes managing all of it an
-  admin's job — and none of it had anywhere to live.
-  - The transport keys are `image_transport` (`push_scp` | `pull_sftp`,
-    default `push_scp`), and — read only under `pull_sftp` —
-    `distribution_host`, `distribution_user`, and
-    `distribution_credential_source` (`same_as_device` | `dedicated`).
-    They are deployment-level and rendered into the job's inventory
-    (§3.5); an upgrade request may not set any of them, for the reason
-    §4.3.1 gives: selecting the transport selects whose credential is
-    spent.
-  - `image_transport` and `distribution_host` are security-relevant in
-    §7.2's sense and belong in its signed set. Repointing
-    `distribution_host` at a host the attacker controls is the single
-    highest-yield settings write in the system — it directs every device
-    in every subsequent run to authenticate to that host. The
-    `verify /sha512` after the copy is what stops substituted *bytes*
-    from being installed (§4.3.1), and it does nothing about the
-    credential the device has already offered, which is why this key
-    needs the signed-projection treatment rather than relying on the
-    digest check downstream of it.
-  - The audit table is not symmetry for its own sake. §4.4's claim that
-    flipping shared account mode is "a decision an admin makes once and
-    visibly" is only true if the flip leaves a record, and the settings
-    here decide who is an admin and which account every device sees.
-  - Secrets stay out of this table. The OIDC client secret, the
-    shared-account password, and the `dedicated` distribution account's
-    password are supplied as systemd credentials or environment, not
-    rows, or the settings page becomes a plaintext secret store readable
-    by any admin. The distribution password is the one most likely to be
-    argued back in, because its settings page is the natural place to
-    type it and it has no human to prompt at a gate — and it is
-    precisely the one an admin-readable table should not hold. Note what
-    this costs and accept it: changing that password is a unit
-    credential change and a restart, not a form submission.
+  its old and new value. §4.4 names five OIDC settings and
+  `local_accounts_enabled`; §8.1 adds the target CIDR and the
+  stage-phase concurrency cap; §4.3 makes managing all of it an admin's
+  job — and none of it had anywhere to live. There are no transport
+  keys: push is the only transport (§4.3.1). A returning pull transport
+  (§10) would add a distribution host, user and credential source here,
+  and repointing that host would become the highest-yield settings write
+  in the system.
+  - The audit table is not symmetry for its own sake. The settings here
+    decide who is an admin and which addresses a run may target, and a
+    change to either that leaves no record is exactly what an audit
+    trail exists to prevent.
+  - Secrets stay out of this table. The OIDC client secret is supplied
+    as a systemd credential or environment, not a row, or the settings
+    page becomes a plaintext secret store readable by any admin. Note
+    what this costs and accept it: changing it is a unit credential
+    change and a restart, not a form submission.
   - **"Append-only" needed to be a constraint, not a description.**
     `users.auth_backend`'s field pairing is enforced with a real `CHECK`
     specifically because, in this document's own words, "a rule that
@@ -2246,16 +1994,13 @@ dispatched against a NetHub-rendered inventory, asserting privilege 15
 among its checks (§4.3) → per-host results recorded and the run parks at
 `awaiting_approval` → admin approves staging, supplying the credential
 for that execution, with each target host's confirmed-by identity and
-confirmation date shown on the approval screen → the image is
-transferred by whichever adapter `image_transport` selects (§4.3.1):
-under push, the device's SCP server is enabled if not already (prior
+confirmation date shown on the approval screen → the image is pushed
+(§4.3.1): the device's SCP server is enabled if not already (prior
 state captured first), the image goes over Netmiko's
 `CiscoIosFileTransfer` under the same credential on a second SSH session
 opened through NetHub's own pinned connection path, and the SCP server
 is restored to its prior state with the restore confirmed or the host
-fails; under pull, the device fetches the image from the distribution
-daemon and nothing on it is reconfigured → either way the image is
-verified against its SHA-512 on the device → admin approves activation →
+fails → the image is verified against its SHA-512 on the device → admin approves activation →
 devices reloaded in serial
 waves → verification runs without a gate →
 optionally, admin approves cleanup, or declines it and closes the run →
@@ -2447,17 +2192,12 @@ covered by neither. Framed only around `artifacts.sha512` (the digest
 devices verify against, §3.4), this understates the exposure: the same
 Flask process that could edit that row also writes `device_host_keys`
 (§4.3, §5) and the security-relevant rows in `settings` (the target
-CIDR, shared-account mode, the OIDC admin group, and the transport keys
-§5 adds — `image_transport` and `distribution_host`). A Flask-side RCE's
-real yield is not "forge a queued row" (§9.2's stated baseline) or even
-"substitute an image digest" — it is silently repointing the host-key
-pin an approver's browser will show them at the next approval screen,
-widening the target CIDR, or flipping the deployment to pull and naming
-a distribution host it controls, ahead of the exact moment §9.1's socket
-releases that approver's own AAA password. That last one is the newest
-and among the most direct: it does not need to forge anything the
-approver looks at, it just changes where the fleet is told to
-authenticate. That is a materially larger
+CIDR and the OIDC admin group). A Flask-side RCE's real yield is not
+"forge a queued row" (§9.2's stated baseline) or even "substitute an
+image digest" — it is silently repointing the host-key pin an
+approver's browser will show them at the next approval screen, or
+widening the target CIDR, ahead of the exact moment §9.1's socket
+releases that approver's own AAA password. That is a materially larger
 yield than the baseline currently prices, and it is priced correctly
 only once the tamper gap is understood to cover those tables and not
 only the digest.
@@ -2473,8 +2213,7 @@ there is nothing left to sign a commit of, and nothing built has replaced
 it: `device_host_keys`, `host_key_scans`, and `device_host_key_audit`
 (§5) all guard against a *submitter* naming an unconfirmed or wrong
 address, none of them against a *Flask-side compromise* silently rewriting
-a confirmed pin, and there is no settings table yet for the transport-repointing
-scenario below to apply to at all. An append-only hash chain over
+a confirmed pin, and there is no settings table yet to protect. An append-only hash chain over
 `artifacts`, or a signed/countersigned projection of the security-relevant
 rows once `settings` exists, is tracked as open in §10 rather than
 described here as built. The honest statement is unchanged from before,
@@ -2482,12 +2221,11 @@ only weaker in degree: NetHub detects drift between the row and the bytes
 on disk (§7.2's own mechanism) and detects nothing at all about a
 consistent lie told from the row itself outward — a Flask-side RCE's real
 yield is not "forge a queued row" (§9.2's stated baseline), it is
-silently repointing a confirmed host-key pin, widening the target CIDR
-once one exists, or (once `settings` and pull-transport deployments both
-exist) naming a distribution host the attacker controls, ahead of the
-exact moment §9.1's socket releases an approver's own AAA password. That
-last one needs neither table to exist today to be worth recording as the
-highest-yield future write in the system once they do.
+silently repointing a confirmed host-key pin, or widening the target
+CIDR once one exists, ahead of the exact moment §9.1's socket releases
+an approver's own AAA password. A returning pull transport (§10) would
+add a worse one: naming a distribution host the attacker controls, so
+the fleet authenticates to it.
 
 ### 7.3 Job lifecycle and failure semantics
 
@@ -2565,9 +2303,8 @@ Several rules fall out of this:
   derived from `file_size` specifically because a single job-level bound
   is the wrong shape for a phase moving gigabytes, and the same reasoning
   applies to heartbeat freshness. A single transfer of a
-  multi-hundred-megabyte image is one long-running call in either
-  transport — a Netmiko SCP push, or a `copy sftp://…` the device runs
-  while the session waits; driving `heartbeat_at` off per-host
+  multi-hundred-megabyte image is one long-running call — a Netmiko SCP
+  push; driving `heartbeat_at` off per-host
   start/end events rather than a wall-clock timer would render a
   slow-but-healthy transfer as *stalled* for its whole duration,
   undermining the distinction the next paragraph is built on. A sweep at
@@ -2825,8 +2562,8 @@ Ordinary Python driving Netmiko, in five modules under
 `nethub/devices/`: `facts.py` (`show version`/`dir`/`show privilege`,
 parsed with ntc-templates), `connection.py` (the only way any NetHub
 process opens a device session, carrying the host-key pin and the
-authentication mechanics from §4.3), `transfer.py` (`stage_image()` plus
-the push/pull adapters from §4.3.1), `install.py` (activate/reload/
+authentication mechanics from §4.3), `transfer.py` (`stage_image()` and
+the SCP push from §4.3.1), `install.py` (activate/reload/
 verify/cleanup), and `phases.py` (the per-host loop, the
 exception-to-`failure_stage` mapping, and the rows). `nethub/sibling.py`
 dispatches them and `nethub/upgrade_routes.py`/`nethub/upgrades.py`
@@ -2856,9 +2593,8 @@ floor transfer rate, so a host that stalls fails in minutes while a
 genuinely slow one is allowed the time it needs. NetHub has the size
 authoritatively at dispatch (below), so this costs nothing to compute.
 **This bound is Netmiko's own read timeout on the transfer call itself,
-not a process-level kill of the sibling** — the distinction matters most
-under the push transport, where the stage phase brackets the transfer
-with a device-config change it must restore (§4.3.1), and a bound
+not a process-level kill of the sibling** — the distinction matters
+because the stage phase brackets the transfer with a device-config change it must restore (§4.3.1), and a bound
 implemented as a `SIGKILL` against the sibling process would routinely
 bypass that restore on exactly the slow links this bound exists to
 catch, turning the "accepted residual risk" §4.3.1 describes for a hard
@@ -2894,11 +2630,9 @@ are then not the bytes the row describes and the device-side
 megabytes. This is a small, direct function rather than a discovery
 cascade with a remote tier: there is no second machine to shell out to
 and measure, for the same reason there is no `remote_dir` column
-anywhere in the schema (§5) — under push the sibling reads the file off
-its own local mount, and under pull the SFTP daemon exports that exact
-same path, so "the image is on the distribution host" names the address
-the *device* dials, not a second filesystem NetHub would need to reach
-across. A design that assumed the store could be a genuinely separate
+anywhere in the schema (§5) — the sibling reads the file off its own
+local mount, so "the image is on the distribution host" names no second
+filesystem NetHub would need to reach across. A design that assumed the store could be a genuinely separate
 machine would need that remote tier back; owning the store outright
 (§3.3) is what removes it.
 
@@ -3056,11 +2790,9 @@ Five things follow from the split:
   split is cheap precisely because the expensive facts are snapshotted
   once. No credential of any kind crosses that gap: the device credential
   the stage phase needs is collected fresh at its own approval gate
-  (§9.1), same as every other phase, and a pull-transport run's
-  distribution credential is either that same credential or a systemd
-  credential the sibling reads at dispatch (§4.3.1) — neither is held
-  while the run is parked, so the Monday-to-Saturday gap holds no live
-  secret of any kind.
+  (§9.1), same as every other phase, and is not held while the run is
+  parked, so the Monday-to-Saturday gap holds no live secret of any
+  kind.
 - **Activation re-checks what staging established, and the check that
   matters is built correctly.** Between the two phases a device may have
   been upgraded by hand or had its flash cleaned, so
@@ -3097,7 +2829,7 @@ Five things follow from the split:
   says which.** `cancel_requested_at` (§5) is polled by the sibling
   between hosts. Cancelling a `queued` phase stops it before it starts.
   Cancelling pre-check or verify is safe outright: both are read-only.
-  Stage under the push transport is not quite the same shape as those
+  Stage is not quite the same shape as those
   two: it's non-disruptive to the fleet's traffic, but push is the one
   thing in the system that mutates device configuration (§4.3.1's
   SCP-server toggle). Since every phase runs its hosts strictly one at a
@@ -3107,9 +2839,7 @@ Five things follow from the split:
   the cancel, rather than killing the sibling process outright. Once
   concurrent staging exists, several hosts could be mid-transfer at once
   when a cancel lands, and the same reasoning would need to wait for all
-  of them, not just one. Under the pull transport stage is read-only with
-  respect to device configuration and cancels like pre-check does, which
-  is one more line in pull's column. Cancelling an activation mid-wave is
+  of them, not just one. Cancelling an activation mid-wave is
   *not* safe and is not presented as though it were — the devices already
   reloaded are on the new version and the rest are not, and the operator
   is choosing a split fleet over finishing the wave. That is sometimes
@@ -3143,9 +2873,8 @@ reload deadline has ample headroom at 228–238s against a 900s default;
 untested is whether a stack or a slower chassis eats into that margin,
 and whether a push over a genuinely constrained WAN link (as opposed to
 the lab's own link) moves the bottleneck somewhere this timing table
-doesn't cover. What remains untested beyond timing is the pull adapter's
-prompt sequence (§4.3.1, §10) and a stage/activate/verify/cleanup
-sequence driven in one sitting starting from a pre-check kicked off
+doesn't cover. What remains untested beyond timing is a
+stage/activate/verify/cleanup sequence driven in one sitting starting from a pre-check kicked off
 through the web app rather than through `upgrade_cli.py` or a direct
 call into `nethub/devices/`.
 
@@ -3153,15 +2882,10 @@ call into `nethub/devices/`.
 
 - Podman Quadlet units for the Flask app, the sibling job runner, and the
   distribution container, which serves the day-0 subtree over plain
-  HTTP, with no separate bootstrap container. Under the default push
-  transport there is no day-2 daemon at all: the store is local to this
-  host and is NetHub's own (§3.3), and images reach a device by the
-  sibling reading the published subtree directly and pushing from it
-  (§3.5, §4.3.1). A deployment that selects the pull transport adds one more
-  unit — an SFTP daemon chrooted to that same subtree, serving the
-  distribution account (§4.3.1) — which is the only unit in this list
-  that exists to be dialled by a device rather than by an operator, and
-  the only one whose absence is the safer default. The HTTP daemon decides nothing:
+  HTTP, with no separate bootstrap container. There is no day-2 daemon
+  at all: the store is local to this host and is NetHub's own (§3.3),
+  and images reach a device by the sibling reading the published subtree
+  directly and pushing from it (§3.5, §4.3.1). The HTTP daemon decides nothing:
   it serves one fixed path holding the generic script, plus a `mint/`
   subtree of one-shot symlinks Flask writes and reaps, and authorization
   for day-0 lives in the phone-home handler. Everything runs on one host,
@@ -3317,20 +3041,12 @@ worth saying plainly that the longest phase — the serial activation wave
 — can itself run for hours, and the credential is live for its
 duration; "one phase execution" is an honest bound, not a short one.
 
-**The socket still carries one credential, and the pull transport does
-not change that.** §4.3.1's original design had the sibling mint a
-distribution password per execution and carry it here; that mechanism is
-gone, and it is not what came back. Under
-`distribution_credential_source = same_as_device` the distribution
-credential *is* the submitter's device credential — the same secret
-already crossing the socket, spent at a second destination, not a second
-message type. Under `dedicated` it does not cross the socket at all: it
-is a systemd credential in the sibling's own unit, which Flask never
-holds and therefore never has to hand over. Either way the socket's
-contract is unchanged — per-execution credentials, one kind, nothing
-else — and neither arrangement leaves the sibling holding a standing
-secret for an execution it has not started, which is the property §9.1
-exists to preserve.
+**The socket carries one credential.** §4.3.1's original pull design had
+the sibling mint a distribution password per execution and carry it
+here; that mechanism is gone. The socket's contract is per-execution
+device credentials, one kind, nothing else, and it never leaves the
+sibling holding a standing secret for an execution it has not started,
+which is the property §9.1 exists to preserve.
 
 **The TTL above needed wiring that a correct-looking implementation can
 still be missing.** `purge_expired()` and `discard()` can exist as
@@ -3353,8 +3069,8 @@ operator to work from. Two more details close the same class of gap:
 `isinstance()`, because `bool` is a subclass of `int` in Python and
 `hash(True) == hash(1)`, so a message carrying `{"job_id": true}` would
 release the credential held under key `1`; and every field that ever
-holds the credential (the store's internal record, `PhaseContext`,
-`transfer.PullTarget`) is declared `field(repr=False)`, a structural
+holds the credential (the store's internal record and `PhaseContext`)
+is declared `field(repr=False)`, a structural
 guard against the day some future `log.debug("ctx=%r", ctx)` writes it to
 journald.
 
@@ -3538,8 +3254,9 @@ the next attempt gets a credential.
   against the device — the comparison §7.2 exists to stop anything
   relying on — so the swap saves no code; and because chosen-prefix
   collisions give a supplier of images a practical substitution path
-  against the two places with no backstop behind the digest (§4.3.1's
-  unverified distribution host, §4's plain-HTTP day-0). Full reasoning
+  against the places with no backstop behind the digest (§4's plain-HTTP
+  day-0, and the unverified distribution host of any future pull
+  transport). Full reasoning
   in §3.4. Worth carrying forward: the *generic* form of the security
   argument is wrong — matching an already-recorded digest is a preimage
   attack, which MD5 still resists — so anyone re-opening this on
@@ -3559,29 +3276,55 @@ the next attempt gets a credential.
   because it needs the device password on an interface with no secure
   credential-delivery path built for it yet (§4.3.1's contract for what
   that path would need).
-- **Whether the pull transport's prompt sequence is what IOS-XE actually
-  emits.** `nethub/devices/transfer.py`'s `_pull_sftp` answers a
-  `Destination filename` prompt and then a `Password:` prompt, in that
-  order, and names only the filesystem as the destination specifically
-  to force the first prompt to appear so the pair is deterministic. That
-  is what the platform is expected to do, not what has been observed —
-  the same class of unknown the transfer library question above was, and
-  it should be settled the same way, by running it against a real device
-  and recording the answer here. This is the one item from the pre-
-  Netmiko design that outlived the rewrite unresolved. A wrong prompt
-  list does not fail fast: it hangs until the read timeout. Capture the
-  session with Netmiko's `session_log` **off** (hard rule, §4.3.1's
-  reasoning on why the pull adapter must never enable it) and replay it
-  offline rather than logging the live channel.
-- **Whether `_pull_sftp`'s unanchored `read_until_pattern(r"[>#]")` can
-  terminate mid-copy.** The pattern matches the first `>` or `#` anywhere
-  in the stream, and `copy sftp://…` is exactly the kind of long-running
-  device command that can emit a progress indicator before it actually
-  finishes. If IOS-XE's `copy` emits anything containing either character
-  while the transfer is still in progress, the adapter would return
-  early and `verify_sha512` would then hash a partial file rather than
-  failing loudly. This is answerable from the same real-device run the
-  prompt-sequence question above needs, not a separate one.
+- **Possible future transport: device-side pull.** An earlier revision
+  let a deployment choose between the SCP push and the device fetching
+  its own image over SFTP (`copy sftp://…`). The pull adapter was written
+  but never wired up: nothing configured a distribution host or
+  credential, so selecting it failed every stage, and it was never run
+  against hardware. It was deleted rather than carried. Push stays right
+  as the only transport because many deployments block device-initiated
+  outbound SSH, and where they do pull does not work at all (§4.3.1).
+  Pull's real attractions were that it reconfigures nothing on the
+  device, avoids Paramiko entirely, and makes a branch-site mirror cheap
+  (see "distributed distribution" below). Bringing it back needs:
+  - **A distribution host and a credential source.** An SFTP daemon on
+    the NetHub host, chrooted (`ForceCommand internal-sftp`) to the
+    published subtree, and a credential that is either the submitter's
+    own device credential or one dedicated read-only account supplied
+    as a systemd credential in the sibling's unit — never a `settings`
+    row. Repointing the distribution host becomes the highest-yield
+    settings write in the system (§7.2), and IOS-XE's SSH client does
+    not verify the host it dials, so a redirected session collects the
+    credential; `verify /sha512` catches substituted bytes, never the
+    substituted host. Transport must stay deployment-level, never
+    request-level, because choosing it chooses whose credential is
+    spent. Whether it should ever be per-host (a mixed fleet with one
+    site blocking egress) is a question to answer then.
+  - **A hardware test of the prompt sequence.** The deleted adapter
+    answered `Destination filename` and then `Password:`, naming only the
+    filesystem as the destination to force the first prompt, and waited
+    for an unanchored `[>#]` to mark completion — which could match a
+    progress indicator and return mid-copy. None of it was observed on a
+    device. The password must be answered at the prompt, never embedded
+    as `sftp://user:pass@host/` (it would land in command history and
+    AAA accounting), error text must not quote the channel, and
+    Netmiko's `session_log` must stay off on that phase.
+  - **Schema.** A snapshotted transport column on `upgrade_runs`, so
+    `scp_restore_confirmed` can be read correctly again (§5).
+  - An HTTP variant would avoid the credential entirely but makes the
+    day-0 daemon part of the day-2 path; it needs §3.3's `mint/`
+    capability paths, never a shared docroot.
+- **Possible future work: shared account mode.** A deployment-level
+  opt-in that fixes the device username to one admin-configured value
+  for every run, for teams with no per-human device logins (§4.4). It
+  was stubbed — a hardcoded-off `SHARED_ACCOUNT_MODE` flag and an
+  `upgrade_runs.shared_account_mode` column recorded on every run — but
+  never had a username setting or anything that read it, so it was
+  deleted. Building it means: the username as a deployment setting in
+  the audited `settings` table, a snapshotted column on `upgrade_runs`
+  recording that the name came from shared mode, and the run pages
+  saying so. It must never be inferred from a missing IdP or anything
+  else, and it gives up the device-side half of §4.3's attribution.
 - **Whether an IOS-XE upgrade can legitimately regenerate a device's SSH
   host key.** This decides whether `wait_for_device()`'s reconnect loop
   is right to leave `connection.HostKeyError` untouched by the
@@ -3606,14 +3349,9 @@ the next attempt gets a credential.
 - **Whether to build a purpose-built transfer script instead of relying
   on deprecated Paramiko indefinitely.** The options tried so far are
   both unsatisfying: `libssh` doesn't work under either library binding,
-  and Paramiko works but is deprecated upstream. This is now less urgent
-  than it was, and worth restating why: the pull transport (§4.3.1)
-  reaches the same outcome without Netmiko's file-transfer class or
-  Paramiko at all, so a deployment blocked by the deprecation has a
-  supported way out that is a settings change rather than a code change.
-  That is a mitigation for the deadline, not an answer to the question —
-  push remains the default and the default should not be the one riding
-  a removed library. A small, single-purpose Python script that does
+  and Paramiko works but is deprecated upstream. Push is the only
+  transport, so the only transport rides a deprecated library. A small,
+  single-purpose Python script that does
   only the SCP push, using the socket layer directly instead of a
   paramiko-dependent transfer class, might outlive either, but the
   amount of work that would take (auth, host-key checking against the
@@ -3638,12 +3376,7 @@ the next attempt gets a credential.
   job-scoped rather than device-scoped, and its tracking column already
   exists (§5): `scp_restore_confirmed` on the stage row in
   `upgrade_host_phase_results` is null or `false` for exactly the rows
-  that owe a restore — with the §5 caveat that null also means "pull
-  transport, nothing to restore", so any process acting on it must join
-  `image_transport_used` rather than reading the column alone. A
-  deployment running pull does not have this gap at all, which is a
-  mitigation available today but not an answer: push is the default and
-  the default is where the gap lives. What's still open is whether to
+  that owe a restore. What's still open is whether to
   build an active process against that column — the sibling's startup
   sweep, or a separate periodic pass, connecting to *those specific
   hosts* and finishing the restore — or to leave it as a queryable
@@ -3663,51 +3396,19 @@ the next attempt gets a credential.
   directly. §4.3.1's second SSH session for the SCP put goes through the
   same override (`SCPConn.establish_scp_conn` is built from it), so the
   question of whether the pin covers a second connection independently
-  is answered by construction too, for both directions the file could
-  travel: there is one connection-opening code path in the tree, and
+  is answered by construction too: there is one connection-opening code path in the tree, and
   every session — primary or transfer — goes through it.
-- **Whether day-2 images should ever be pullable over HTTP as well as
-  SFTP.** Pull currently requires an SFTP daemon and a credential, and
-  the credential is the expensive part of it (§4.3.1): it is the thing a
-  redirected session can collect, and the thing that forced a
-  `distribution_credential_source` setting into §5. An HTTP pull would
-  have none of that — no credential to phish, no account to hold, no
-  second daemon since day-0 already runs one — and `verify /sha512`
-  already provides the integrity property that would be doing the real
-  work either way. What stops it from being obviously right is §3.3: the
-  day-0 docroot is deliberately not a read path over the image store,
-  and an image reachable by guessing a filename is exactly the
-  arrangement that section refuses. Doing it properly means minting
-  capability paths for images the way §3.3 mints them for day-0
-  configs — reuse rather than a new mechanism, but not free, and it
-  makes the day-0 daemon part of the day-2 path for the first time.
-  Worth deciding deliberately; it would simplify §4.3.1's pull half more
-  than anything else on this list.
-- **Whether the transport should ever be per-host rather than
-  per-deployment.** It is one setting for the whole deployment today,
-  and the argument for keeping it that way is §4.3.1's: the transport
-  selects whose credential is spent, so it is not a knob a request may
-  touch. But a deployment is not necessarily uniform — a fleet with one
-  branch site behind a perimeter that blocks device egress and a core
-  site that permits it has a real reason to want both, and the current
-  design makes it choose the mode that works everywhere. A
-  NetHub-managed per-host or per-group override (admin-set, never
-  request-set) would fit inside the existing rule; whether real fleets
-  are mixed enough to need one is a question about deployments rather
-  than about the mechanism.
 - **When distributed distribution comes back (§2, §3.3).** NetHub is the
   sole source of the bytes and multi-site mirrors are out of scope. The
   constraint that bites first is a branch site on a narrow link, where
-  every byte crosses the WAN from NetHub in whichever direction the
-  transport runs. §3.3 is the seam. Reopening it is now two different
-  questions rather than one, and the transports differ sharply in
-  difficulty: a push mirror needs a process near the devices that
-  performs the pushes and authenticates to them, which is most of a
-  second NetHub; a pull mirror needs only an SFTP daemon holding a
-  verified copy of the subtree, because the device does the work and the
-  digest check already catches a mirror serving the wrong bytes. If
-  multi-site support is ever built, pull is the cheaper path to it, and
-  that is worth knowing before the decision rather than after.
+  every byte crosses the WAN from NetHub. §3.3 is the seam. A push mirror
+  needs a process near the devices that performs the pushes and
+  authenticates to them, which is most of a second NetHub; a pull mirror
+  needs only an SFTP daemon holding a verified copy of the subtree,
+  because the device does the work and the digest check already catches
+  a mirror serving the wrong bytes. So if multi-site support is ever
+  built, the device-side pull transport above is the cheaper path to it,
+  and that is worth knowing before the decision rather than after.
 - **Whether Flask and the sibling should run as two rootless users
   rather than one (§9.2).** Under a single user, the socket's mount
   scope is the only thing distinguishing callers and `SO_PEERCRED`
@@ -3728,8 +3429,8 @@ the next attempt gets a credential.
   pre-dispatch re-check the sibling performs against whichever store
   ends up being authoritative. Deciding this needs `settings` to exist
   first, since two of the three rows this section is about
-  (`device_host_keys` exists today; the transport-repointing scenario
-  needs `settings`) don't both exist yet — but the `artifacts` half is
+  (`device_host_keys` exists today; the security-relevant settings rows
+  need `settings`) don't both exist yet — but the `artifacts` half is
   buildable now and shouldn't wait on the other two.
 - **The two day-0 numbers in §3.2 are asserted, not measured.** A
   two-second p99 and a fifteen-minute device backoff are what the

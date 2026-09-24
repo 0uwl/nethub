@@ -66,7 +66,7 @@ class CredentialError(Exception):
 class _Held:
     username: str
     #: repr=False on every field holding the credential, here and on
-    #: PhaseContext and PullTarget. No path renders any of them today --
+    #: PhaseContext. No path renders either of them today --
     #: tracebacks carry no frame locals and DEBUG is off -- but PhaseContext is
     #: the object CLAUDE.md names as the credential's entire lifetime
     #: container, and one `log.debug("ctx=%r", ctx)` added while debugging

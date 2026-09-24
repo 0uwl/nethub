@@ -260,8 +260,8 @@ verification predates build step 7 and the review fixes**: the unit still
 set the deleted `REGISTRIES_ROOT` and never set `ARTIFACT_STORE`, so the
 store defaulted onto the read-only image layer and the artifacts page
 500'd on load. It now sets `ARTIFACT_STORE=/app/artifacts` with a volume
-behind it, carries commented `DEVICE_TARGET_CIDRS`/`IMAGE_TRANSPORT`
-lines, and adds `LimitCORE=0` plus `ProtectProc=invisible` to `[Service]`.
+behind it, carries a commented `DEVICE_TARGET_CIDRS` line, and adds
+`LimitCORE=0` plus `ProtectProc=invisible` to `[Service]`.
 Those two *are* now verified against a real `podman run` under the unit's
 own property set, and `LimitCORE=0` was confirmed to reach the container
 process itself (`/proc/self/limits` reads `Max core file size 0`) rather
@@ -324,8 +324,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 |---|---|---|
 | `SECRET_KEY` | none — required (web unit only) | Flask/Flask-Login session-signing key. Web-only: it lives in `config.py`, which only `create_app()` loads; the sibling loads `shared_config.py` and its unit carries no key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. **`config.py` also refuses a known placeholder or anything under 32 characters**, not just an absent value: alpha has no server-side `sessions` row (§4.5), so the cookie signature is the only thing authenticating a user and a published key is a forged admin session. The reference unit ships the line commented out rather than filled in, for the same reason. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
-| `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: both transports address it by filename. Usually a large mounted volume. |
-| `IMAGE_TRANSPORT` | `push_scp` | Deployment-level, never request-level — choosing the transport chooses whose credential is spent (§4.3.1). |
+| `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: the SCP push addresses it by filename. Usually a large mounted volume. |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
 | `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. An oversize request gets a real `413` page (`nethub/__init__.py`'s `too_large_error`) stating the configured limit, not Werkzeug's bare default (WS-5.6). |
@@ -380,21 +379,17 @@ stay short** (design doc §4.3): **privilege level 15**. NetHub otherwise
 writes no configuration outside the upgrade itself, and asserts privilege
 15 at pre-check (`phases.phase_precheck`). One exception is deliberate,
 bracketed rather than
-standing, **and belongs to the push transport alone**: the stage phase
+standing: the stage phase
 enables the device's own SCP server for the duration of the push and
 restores whatever it found (enabled or not) in a `finally:` block in
 `transfer._push_scp`, confirmed by re-reading the running-config rather than trusted from the
 adapter's exit status (design doc §4.3.1). A host whose restore can't be
 confirmed is failed outright, because an unconfirmed enable would otherwise
-ride into startup-config on `write memory`. Under the
-pull transport nothing on the device is reconfigured at all, so the
-exception doesn't arise. The pre-check asserts no
-`ip ssh source-interface` in either mode — it was a pull-era carryover
-and push confirmed it doesn't gate the device's SCP server, an unrelated
-service. It's relevant again *for a deployment running pull* (the device
-is an SSH client again), but as a device-side prerequisite an operator
-satisfies rather than a check NetHub makes — `phase_precheck` asserts
-privilege, boot mode and free space, and deliberately nothing about it.
+ride into startup-config on `write memory`. The pre-check asserts nothing
+about `ip ssh source-interface` — it was a carryover from the old pull
+design, and push confirmed it doesn't gate the device's SCP server, an
+unrelated service. `phase_precheck` asserts privilege, boot mode and free
+space.
 
 **On privilege 15 specifically — there is no `enable` escalation
 anywhere** (design doc §4.3). Every command an upgrade runs —
@@ -428,14 +423,10 @@ mint, not the boot, so the log records what was *offered*, never
 
 **Single artifact pipeline, two egress adapters** (design doc §3.4): one
 ingest path (upload → hash → size → store → record) feeds both days —
-day-0 devices pull over HTTP; day-2 goes in whichever direction the
-deployment's `image_transport` setting selects (design doc §4.3.1),
-either NetHub pushing over SCP (a second session to the same pinned
-address, under the submitter's device credential — the default, and the mode
-with no distribution credential at all) or the device pulling over SFTP from
-a distribution daemon. **Only push can actually run today**: nothing sets
-the sibling's `pull_target`, so `IMAGE_TRANSPORT=pull_sftp` fails every
-stage (PLAN.md WS-5 removes it). One `artifacts`
+day-0 devices pull over HTTP; day-2 is NetHub pushing over SCP (design doc
+§4.3.1) — a second session to the same pinned address, under the
+submitter's device credential, with no distribution credential at all.
+Push is the only day-2 transport. One `artifacts`
 table backs both days; a `kind` discriminator (script/config/image)
 distinguishes rows rather than splitting into separate tables. The SHA-512
 is computed once at ingest and then read, never recomputed: by day-0
@@ -481,12 +472,12 @@ on a first pass. Three findings, in the order they mattered:
   this. What decides it is *chosen-prefix collisions* (practical since
   2019): an attacker who supplies the image to an admin can hand over a
   benign image prepared to collide with a malicious one, let NetHub ingest
-  the benign one, and substitute later. Two places in this design have no
-  backstop if that works — under pull the device does not verify the
-  distribution host at all, so the digest is the only control (§4.3.1),
-  and day-0 names payload hash verification as one of three compensations
-  for deliberate plain HTTP (§4). Large binaries with slack space are good
-  collision carriers.
+  the benign one, and substitute later. Day-0 names payload hash
+  verification as one of three compensations for deliberate plain HTTP
+  (§4), so it has no backstop if that works — and neither would a future
+  device-side pull transport (design doc §10), where the device does not
+  verify the distribution host and the digest is the only control. Large
+  binaries with slack space are good collision carriers.
 
 The reopening condition is unchanged and is the one the rule above already
 states: a second platform that only offers MD5. That would be an *added*
@@ -696,11 +687,12 @@ dispatch. There is no `remote_dir` column at all anymore — it addressed a
 device's own `copy sftp://…` path under the old pull design, a remnant
 from when the distribution host could have been a separate remote
 machine, and push reads straight from a fixed local mount by filename
-(design doc §5). Don't reintroduce it. `upgrade_runs` also snapshots
-`shared_account_mode` beside `device_username_used`, or an auditor can't
-tell "jsmith ran this" from "everyone runs as jsmith". Shared account mode
-is not implemented, so that column is always `False` (PLAN.md WS-5 removes
-it).
+(design doc §5). Don't reintroduce it. `upgrade_runs` has no transport
+or shared-account column: push is the only transport and the device
+username is always the submitter's own. If either feature returns (design
+doc §10), it needs a snapshot column beside `device_username_used`, or an
+auditor can't tell which transport ran or "jsmith ran this" from "everyone
+runs as jsmith".
 
 **§6.1 specifies the target API surface**: routes, methods, the `202` +
 job-id polling contract, and an error envelope that returns §7.3's
@@ -843,49 +835,20 @@ seems to require one, the design is what needs revisiting, not the rule.
   carries this on its own. *Separate* units matter too: distinct PID
   namespaces are what prevent same-uid `ptrace` and `/proc/<pid>/mem`
   between Flask and the sibling, so never put them in a shared `Pod=`.
-- **No shared service account for device login — except one explicit,
-  deployment-level opt-in.** Per-user credentials are the default; a
-  deployment with no per-human device logins can turn on **shared
-  account mode** (design doc §4.4), which fixes the device username to one
-  admin-configured value for every run instead of reading
-  `users.device_username`. It is a knowingly-made deployment setting, not
-  a per-user choice and not a fallback that engages itself when an IdP
-  is missing — don't wire it up as a default or infer it from the
-  absence of OIDC. The pull transport's `dedicated` distribution account
-  (design doc §4.3.1) is not a counterexample and must not become one:
-  it is an account on the *distribution host*, read-only over one
-  directory, never a device login. No shared account ever authenticates
-  to a device except under shared account mode.
-- **The device-side SCP-server toggle (push transport only) must always
-  be bracketed by a confirmed restore, and a host whose restore can't be
-  confirmed must fail, not warn.** `transfer.py`'s push adapter captures the device's prior
-  `ip scp server enable` state before touching it, changes it only if not
-  already enabled, and restores it in a `finally:` block regardless of
-  whether the push succeeded (design doc §4.3.1). The restore is
-  *confirmed* by re-reading the running-config, not trusted from a module
-  exit status — an unconfirmed restore fails the host outright, because an
-  unconfirmed enable would otherwise ride into
-  startup-config on the activate phase's own `write memory`. Don't relax
-  this to a logged warning: a device left with its SCP server on and no
-  record of it is exactly the "cannot enumerate afterward" failure the
-  design used to reject push over. Known, accepted, and *not* covered by
-  this mechanism: a killed process, an abandoned run, or a crashed
-  sibling never reaches the `finally:` block at all (design doc §4.3.1,
-  §10) — don't claim this is fully closed. All of this is scoped to
-  `transfer.py`'s push adapter; the pull adapter reconfigures nothing and has no
-  bracket, which is why `scp_restore_confirmed` is null for a
-  pull-transport stage row and why that null must be read together with
-  `upgrade_runs.image_transport_used` rather than alone (design doc §5).
-- **Day-2 transfer runs in whichever direction `image_transport` says,
-  and the adapters are not interchangeable in their costs** (design doc
-  §4.3.1). Both live in `nethub/devices/transfer.py`; `stage_image()`
-  dispatches between them and owns the shared `verify /sha512`.
-  - `push_scp` is the default: `CiscoIosFileTransfer` over Netmiko, which is
-    Paramiko underneath. IOS-XE has no SFTP *server* (client only), so a push
-    has no SFTP option — SCP is the only wire protocol available in that
-    direction.
-  - `pull_sftp` is the alternative: one `copy sftp://…` on the device's own
-    CLI, prompts answered on the channel.
+- **Push over SCP is the only transport; every run uses the submitter's
+  own device username** (design doc §4.3.1, §4.4). This replaced four
+  rules (transport direction, transport as a deployment setting, push as
+  the default, and a shared-account opt-in) when PLAN.md WS-5 deleted the
+  pull transport and shared account mode. Neither could run: nothing
+  configured a distribution host or credential for pull, and shared
+  account mode was a hardcoded-off flag with no username setting. Both
+  are recorded in design doc §10 as possible future work. Don't add a
+  transport switch, a distribution credential, or a way for anything but
+  the submitter's own `users.device_username` to reach a device, without
+  re-reading §10's entries first. What still holds:
+  - **The transfer is `CiscoIosFileTransfer` over Netmiko, which is
+    Paramiko underneath.** IOS-XE has no SFTP *server* (client only), so
+    SCP is the only wire protocol available in this direction.
   - **`paramiko` is not an incidental choice.** Under Ansible, `net_put` with
     the `libssh` connection type was tested against a real device and found
     unusable — the SSH connection broke repeatedly at image size, with nothing
@@ -898,67 +861,45 @@ seems to require one, the design is what needs revisiting, not the rule.
     to hand a credential to a subprocess without it landing on a command line
     or on disk (design doc §4.3.1, §10). Don't add an OpenSSH-`scp` fallback
     without revisiting that.
-  - The pull password is answered at the device's own `Password:` prompt and
-    **never** embedded as `sftp://user:pass@host/` — that form lands in the
-    device's command history and AAA command accounting, which is the record
-    §4.3's attribution property depends on. `_pull_sftp` also refuses to put
-    exception text in its error, because a channel read can quote what was
-    written to that channel. Don't enable Netmiko's `session_log` on a
-    pull-transport phase for the same reason.
-  - **The pull adapter's prompt sequence is still unverified against a real
-    device** (design doc §10) — the one item from the deleted playbooks that
-    outlived them. Naming only the filesystem as the destination is
-    deliberate: it forces the `Destination filename` prompt so both prompts
-    appear in a known order. A wrong list hangs until the read timeout rather
-    than failing fast.
-- **Transport is deployment-level and never request-level, and its
-  credential never lives in the `settings` table** (design doc §4.3.1,
-  §5). `settings` holds `image_transport`, `distribution_host`,
-  `distribution_user`, `distribution_credential_source` — no password.
-  Under `same_as_device` the distribution credential is the submitter's
-  own, already crossing §9.1's socket; under `dedicated` it is a systemd
-  credential in the sibling's unit that Flask never sees. A request may
-  not select the transport, because selecting the transport selects whose
-  credential gets spent. And **don't reach for Ansible Vault**: the file
-  it would protect is a Python variable that exists for the life of one
-  phase execution, so vault would protect the least-exposed copy using a
-  second secret delivered by the same means — the key-disposal problem this
-  design already removed once. Repointing the distribution host would be
-  the highest-yield settings write in the system, and nothing yet protects
-  settings or other security-relevant rows against a Flask-side rewrite
-  (design doc §7.2, §10).
+  - **Push is right as the only transport because of a hard fact about
+    networks.** A device-side pull needs the device to open an outbound
+    connection to NetHub, which a nontrivial fraction of real deployments
+    block at the perimeter — where that rule is in force pull doesn't
+    degrade, it doesn't work. Don't propose it as a fix for a push problem
+    without confirming the deployment's devices can reach NetHub.
+  - **Don't reach for Ansible Vault** for the credential: the thing it would
+    protect is a Python variable that exists for the life of one phase
+    execution, so vault would protect the least-exposed copy using a second
+    secret delivered by the same means.
+- **The device-side SCP-server toggle must always be bracketed by a
+  confirmed restore, and a host whose restore can't be confirmed must
+  fail, not warn.** `transfer._push_scp` captures the device's prior
+  `ip scp server enable` state before touching it, changes it only if not
+  already enabled, and restores it in a `finally:` block regardless of
+  whether the push succeeded (design doc §4.3.1). The restore is
+  *confirmed* by re-reading the running-config, not trusted from a module
+  exit status — an unconfirmed restore fails the host outright, because an
+  unconfirmed enable would otherwise ride into
+  startup-config on the activate phase's own `write memory`. Don't relax
+  this to a logged warning: a device left with its SCP server on and no
+  record of it is exactly the "cannot enumerate afterward" failure the
+  design used to reject push over. Known, accepted, and *not* covered by
+  this mechanism: a killed process, an abandoned run, or a crashed
+  sibling never reaches the `finally:` block at all (design doc §4.3.1,
+  §10) — don't claim this is fully closed. `scp_restore_confirmed` is
+  null when no bracket ran (the image was already staged, or the failure
+  came before the bracket); it never means a confirmed restore.
 - **NetHub is the sole source of the image bytes, and that is not
-  modular** (design doc §2 Non-goals, §3.3). The *source* is fixed even
-  though the *direction* is configurable: both adapters read the same
-  published subtree on the NetHub host — pushed from it directly, or served
-  from it by the pull transport's SFTP daemon. There is
-  no remote distribution target, no mirror, and no second store — both
-  adapters read `PhaseContext.search_dir`. The cost
-  is written down: every byte crosses whatever link separates NetHub from
-  the device either way, which bites first on a branch site behind a
-  narrow link. Reopening it (§10) is now two questions — a push mirror
-  needs a process near the devices that authenticates to them, a pull
-  mirror needs only a verified copy of the subtree behind a daemon.
-  Also: don't serve day-2 images from the day-0 HTTP docroot to avoid
-  running the SFTP daemon. That puts the image store behind a guessable
-  filename on an unauthenticated read path, which §3.3 exists to forbid;
-  HTTP pull is tracked in §10 and would need `mint/`-style capability
-  paths, not a shared docroot.
-- **Push is the *default*, not the only mode, and the reason it is the
-  default is a hard fact about networks** (design doc §4.3.1). Pull
-  requires the device to open an outbound connection to NetHub, which a
-  nontrivial fraction of real deployments block at the perimeter — where
-  that rule is in force pull doesn't degrade, it doesn't work. So:
-  don't make pull the default, don't infer it from anything, and don't
-  propose it as a fix for a push problem without confirming the
-  deployment's devices can actually reach the distribution host. Two
-  costs are pull's alone and must not be argued away: an inbound SFTP
-  daemon on the NetHub host, and **no host-key verification of the
-  distribution host by the device** — IOS-XE's SSH client doesn't do it,
-  so a redirected session collects the distribution credential.
-  `verify /sha512` catches substituted *bytes*; nothing catches the
-  substituted *host*. That asymmetry is why the transport is an admin's
-  decision and never a submitter's.
+  modular** (design doc §2 Non-goals, §3.3). The push reads the published
+  subtree on the NetHub host (`PhaseContext.search_dir`) directly. There
+  is no remote distribution target, no mirror, and no second store. The
+  cost is written down: every byte crosses whatever link separates
+  NetHub from the device, which bites first on a branch site behind a
+  narrow link. Reopening it is a §10 question. Also: never serve day-2
+  images from the day-0 HTTP docroot. That puts the image store behind a
+  guessable filename on an unauthenticated read path, which §3.3 exists
+  to forbid; any HTTP pull would need `mint/`-style capability paths,
+  not a shared docroot.
 
 ## Device layer (`nethub/devices/`)
 
@@ -986,9 +927,7 @@ link-bound — a full 1.2 GB image is roughly 15 minutes per device, which
 is what §8's per-host stage bound has to be calibrated against, and it is
 also why staging many devices at once costs NetHub's link little (twenty
 concurrent devices is ~28 MB/s). Untested: the same push across a
-constrained WAN link, where the bottleneck moves. The pull adapter has
-not been run against a device at all — its prompt sequence remains the
-open item.
+constrained WAN link, where the bottleneck moves.
 
 **`install.py` is fully validated too, including the reload.** A round trip
 was run on the lab switch — 17.12.6 → 17.12.08 → 17.12.6, both directions
@@ -1430,8 +1369,8 @@ executions it has not started, and could be flooded. These things about
   would have bound to 1 as well. Bounded by the mount and by the sibling never
   sending a bool, but this function's entire purpose is validating a message
   before it selects a secret.
-- **Every field holding the credential is `field(repr=False)`** — on `_Held`,
-  `phases.PhaseContext` and `transfer.PullTarget`. No path renders any of them
+- **Every field holding the credential is `field(repr=False)`** — on `_Held`
+  and `phases.PhaseContext`. No path renders either of them
   today (tracebacks carry no frame locals, `DEBUG` is off, neither netmiko nor
   paramiko defines a repr that would pull one in), so this is a structural
   guard rather than a fix. `PhaseContext` is the object this file names as the
@@ -1479,7 +1418,7 @@ rather than an export path.
 **`ARTIFACT_STORE` is NetHub's own directory**, which is the difference from
 the `REGISTRIES_ROOT` it replaced: that was a place an admin bind-mounted
 *their* files into for NetHub to point at. It is one flat directory because
-both transports address the source by filename (§3.3).
+the push addresses the source by filename (§3.3).
 
 **Two constraints live in the schema rather than in the code that writes it.**
 
@@ -1553,13 +1492,11 @@ artifact cannot re-target it. A request names a *key* and never a filename or
 a digest — a submitted pair would name any bytes against any checksum and
 bypass the table that owns both.
 
-Four deployment settings §5 puts in a `settings` table are env vars in
+Two deployment settings §5 puts in a `settings` table are env vars in
 `shared_config.py`, because alpha has neither that table nor its audit:
-`ARTIFACT_STORE`, `IMAGE_TRANSPORT`, `DEVICE_TARGET_CIDRS`,
-`SHARED_ACCOUNT_MODE`. **An empty
+`ARTIFACT_STORE` and `DEVICE_TARGET_CIDRS`. **An empty
 `DEVICE_TARGET_CIDRS` refuses every submit** rather than allowing any address
-— an unset security setting is not "allow all". `SHARED_ACCOUNT_MODE` is
-hardcoded False and must not be inferred from anything (§4.4).
+— an unset security setting is not "allow all".
 
 `users.device_username` is new. It is read server-side and a request can
 never assert it, because §4.3's two-sided attribution depends on the device

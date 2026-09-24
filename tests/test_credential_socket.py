@@ -294,12 +294,6 @@ class TestReprsHideTheCredential:
         assert PASSWORD not in repr(ctx)
         assert "jsmith" in repr(ctx)
 
-    def test_pull_target_repr(self):
-        from nethub.devices.transfer import PullTarget
-        target = PullTarget("dist.example.net", "jsmith", PASSWORD)
-        assert PASSWORD not in repr(target)
-        assert "dist.example.net" in repr(target)
-
 
 class TestSocketHandover:
     """Adopting the descriptor a `.socket` unit handed over.

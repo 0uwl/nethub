@@ -1,26 +1,23 @@
-"""Getting an image onto a device, in whichever direction the deployment says.
+"""Getting an image onto a device: NetHub pushes it over SCP.
 
-`stage_image()` is the entry point and owns everything transport-independent:
-the source cross-check, the free-space gate, the skip-if-already-staged test,
-and the `verify /sha512` that both directions end with. The two adapters below
-it move bytes and nothing else.
+`stage_image()` is the entry point and owns the source cross-check, the
+free-space gate, the skip-if-already-staged test, and the `verify /sha512` the
+push ends with. `_push_scp` moves bytes, bracketed by the device's SCP server
+state, and nothing else.
 
-Transport is a deployment setting and never a request field (design doc
-§4.3.1): selecting the transport selects whose credential gets spent. Push is
-the default because a nontrivial number of deployments block the outbound
-connection pull needs -- where that rule is in force pull does not degrade, it
-does not work.
+Push over SCP is the only transport (design doc §4.3.1). IOS-XE has no SFTP
+server, so SCP is the only protocol available in that direction; a device-side
+pull is recorded in §10 as possible future work.
 
-NetHub is the sole source of the bytes either way (§3.3). Both adapters read
-the same published subtree: push off a local mount, pull via the path the
-SFTP daemon exposes, which must be that same path. There is no second store
-and no per-artifact directory to name.
+NetHub is the sole source of the bytes (§3.3): the push reads the published
+subtree off a local mount by filename. There is no second store and no
+per-artifact directory to name.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -30,8 +27,6 @@ from nethub.devices import connection, facts
 
 if TYPE_CHECKING:
     from netmiko.base_connection import BaseConnection
-
-Transport = Literal["push_scp", "pull_sftp"]
 
 #: `verify /sha512 (flash:packages.conf) = <128 hex>` -- captured from a real
 #: 17.12.06 device. We match the digest, never the word "Verified": a bare
@@ -43,8 +38,6 @@ _DIGEST_RE = re.compile(r"=\s*([0-9a-fA-F]{128})\b")
 #: this replaced.
 _IMAGE_NAME_RE = re.compile(r"[\w.+-]+")
 _REMOTE_PATH_RE = re.compile(r"[\w:./-]+")
-_HOSTNAME_RE = re.compile(r"[\w.:-]+")
-_USERNAME_RE = re.compile(r"[\w.@-]+")
 
 _SCP_ENABLE = "ip scp server enable"
 _SCP_SHOW = "show running-config | include ^ip scp server"
@@ -61,9 +54,7 @@ class TransferError(Exception):
 
     `scp_restore_confirmed` mirrors the `upgrade_host_phase_results` column
     (design doc §5): False means a push left the device's SCP server in an
-    unknown state, None means no bracket ran -- either the failure came before
-    it or the transport was pull, which reconfigures nothing. Null there has
-    to be read together with the run's transport rather than alone.
+    unknown state, None means no bracket ran: the failure came before it.
 
     `summary` is what reaches the year-retained `error_summary` column
     (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
@@ -95,21 +86,9 @@ class ScpRestoreError(TransferError):
 @dataclass(frozen=True)
 class StageOutcome:
     status: Literal["image_copied", "already_staged"]
-    transport: Transport
     sha512: str
-    #: None under pull: there was never anything to restore.
+    #: None when the image was already staged: no bracket ran.
     scp_restore_confirmed: bool | None
-
-
-@dataclass(frozen=True)
-class PullTarget:
-    """Where the device dials under `pull_sftp`. Not a second image store --
-    this is an address, and the directory behind it is NetHub's own."""
-
-    host: str
-    username: str
-    #: repr=False: see the note on `credential_socket._Held`.
-    password: str = field(repr=False)
 
 
 def stage_image(
@@ -118,10 +97,8 @@ def stage_image(
     image: str,
     sha512: str,
     search_dir: str,
-    transport: Transport,
     file_size: int | None = None,
     file_system: str = "flash:",
-    pull_target: PullTarget | None = None,
     transfer_read_timeout: float = TRANSFER_READ_TIMEOUT,
     verify_read_timeout: float = VERIFY_READ_TIMEOUT,
 ) -> StageOutcome:
@@ -133,47 +110,23 @@ def stage_image(
     checked, and design doc §8.1 is explicit that "still verifies" for a later
     phase has to mean re-running `verify /sha512`.
     """
-    if transport not in ("push_scp", "pull_sftp"):
-        # An unrecognised value would otherwise skip both adapters and leave
-        # the host with no image, which `verify` would then report as a
-        # confusing verification failure rather than as a misconfiguration.
-        raise TransferError(
-            f"image_transport must be 'push_scp' or 'pull_sftp', got {transport!r}",
-            status="not_copied",
-        )
     _check_name(image, _IMAGE_NAME_RE, "image name")
     _check_name(file_system, _REMOTE_PATH_RE, "file system")
     source, size = resolve_source(search_dir, image, declared_size=file_size)
     expected = _normalise_digest(sha512)
 
     if _already_staged(conn, file_system, image, expected, size, verify_read_timeout):
-        return StageOutcome("already_staged", transport, expected, None)
+        return StageOutcome("already_staged", expected, None)
 
     _check_space(conn, file_system, image, size)
 
-    if transport == "push_scp":
-        restore_confirmed = _push_scp(
-            conn,
-            source=source,
-            image=image,
-            file_system=file_system,
-            read_timeout=transfer_read_timeout,
-        )
-    else:
-        if pull_target is None:
-            raise TransferError(
-                "the pull_sftp transport needs a distribution host, user and password",
-                status="not_copied",
-            )
-        _pull_sftp(
-            conn,
-            target=pull_target,
-            search_dir=search_dir,
-            image=image,
-            file_system=file_system,
-            read_timeout=transfer_read_timeout,
-        )
-        restore_confirmed = None
+    restore_confirmed = _push_scp(
+        conn,
+        source=source,
+        image=image,
+        file_system=file_system,
+        read_timeout=transfer_read_timeout,
+    )
 
     verify_sha512(
         conn,
@@ -183,7 +136,7 @@ def stage_image(
         read_timeout=verify_read_timeout,
         scp_restore_confirmed=restore_confirmed,
     )
-    return StageOutcome("image_copied", transport, expected, restore_confirmed)
+    return StageOutcome("image_copied", expected, restore_confirmed)
 
 
 def resolve_source(
@@ -227,7 +180,7 @@ def verify_sha512(
     """Have the device hash what it now holds, and compare here.
 
     This is the third consumption of the digest computed once at ingest
-    (design doc §3.4) and it is identical in both directions.
+    (design doc §3.4).
 
     The device is asked for the digest rather than handed the expected one to
     check: `verify /sha512 <file> <digest>` echoes the digest back, so a
@@ -332,50 +285,6 @@ def _scp_put(conn: BaseConnection, *, source: Path, image: str, file_system: str
         socket_timeout=SCP_SOCKET_TIMEOUT,
     ) as transfer:
         transfer.transfer_file()
-
-
-def _pull_sftp(
-    conn: BaseConnection,
-    *,
-    target: PullTarget,
-    search_dir: str,
-    image: str,
-    file_system: str,
-    read_timeout: float,
-) -> None:
-    """Have the device fetch the image itself. Nothing here is reconfigured.
-
-    The password is answered at the device's own `Password:` prompt and is
-    never embedded as `sftp://user:pass@host/` -- that form lands in the
-    device's command history and in AAA command accounting, which is the
-    record §4.3's attribution property depends on.
-
-    Naming only the filesystem as the destination is deliberate: it forces the
-    `Destination filename` prompt, so both prompts always appear in a known
-    order. **The prompt sequence is unverified against real hardware** (design
-    doc §10) -- a wrong list hangs until the read timeout rather than failing
-    fast. Record the answer when someone runs it.
-    """
-    _check_name(target.host, _HOSTNAME_RE, "distribution host")
-    _check_name(target.username, _USERNAME_RE, "distribution user")
-    _check_name(search_dir, _REMOTE_PATH_RE, "search dir")
-    if not target.password:
-        raise TransferError("no distribution password supplied", status="not_copied")
-
-    command = f"copy sftp://{target.username}@{target.host}{search_dir}/{image} {file_system}"
-    try:
-        conn.write_channel(command + "\n")
-        conn.read_until_pattern(r"[Dd]estination filename", read_timeout=60.0)
-        conn.write_channel(image + "\n")
-        conn.read_until_pattern(r"[Pp]assword:", read_timeout=60.0)
-        conn.write_channel(target.password + "\n")
-        conn.read_until_pattern(r"[>#]", read_timeout=read_timeout)
-    except Exception as exc:
-        # str(exc) can quote channel content, and the password was written to
-        # that channel. Report the command, never the exception text.
-        raise TransferError(
-            f"SFTP pull of {image} from {target.host} failed", status="not_copied"
-        ) from exc
 
 
 def _already_staged(

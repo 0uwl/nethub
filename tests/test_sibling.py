@@ -58,7 +58,7 @@ def run(app):
         db.session.commit()
         run = UpgradeRun(
             submitted_by=user.id, device_username_used="jsmith",
-            image_transport_used="push_scp", request_document="{}",
+            request_document="{}",
             request_sha512=DIGEST, state="pre_checking",
         )
         db.session.add(run)

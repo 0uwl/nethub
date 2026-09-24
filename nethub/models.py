@@ -98,7 +98,7 @@ class Artifact(db.Model):
 
     __tablename__ = 'artifacts'
     __table_args__ = (
-        # Load-bearing rather than tidy (§5). Both transports address the
+        # Load-bearing rather than tidy (§5). The push addresses the
         # source by *filename* under one directory, so without this two
         # uploads sharing an original filename promote to the same path and
         # silently overwrite each other's bytes -- and every downstream hash
@@ -124,9 +124,8 @@ class Artifact(db.Model):
     sha512 = db.Column(db.String(128), nullable=False)
     file_size = db.Column(db.BigInteger, nullable=False)
     #: Where the blob actually lives, and what a retention purge collects by.
-    #: There is no `remote_dir` and a returning pull transport does not bring
-    #: one back -- both directions address one deployment-wide directory by
-    #: filename (§5).
+    #: There is no `remote_dir`: the push addresses one deployment-wide
+    #: directory by filename (§5).
     storage_path = db.Column(db.String(500), nullable=False)
     version = db.Column(db.String(32), nullable=False)
 
@@ -197,8 +196,6 @@ PHASE_FAILURE_STAGES = (
     'credential', 'connect', 'hostkey', 'privilege', 'precheck',
     'transfer', 'checksum', 'install', 'reload', 'postcheck',
 )
-
-TRANSPORTS = ('push_scp', 'pull_sftp')
 
 
 def is_terminal(status):
@@ -329,14 +326,6 @@ class UpgradeRun(db.Model):
     # mutable table stops being an audit row the first time somebody's mapping
     # is corrected (§5).
     device_username_used = db.Column(db.String(80), nullable=False)
-    #: Whether that name came from the submitter or from shared account mode.
-    #: Without it an auditor cannot tell "jsmith ran this" from "everyone runs
-    #: as jsmith", which erases the property §4.3 exists to build.
-    shared_account_mode = db.Column(db.Boolean, nullable=False, default=False)
-    #: A run parks at gates for days, so a settings change mid-run is ordinary.
-    #: Snapshotting the transport is what keeps scp_restore_confirmed readable.
-    image_transport_used = db.Column(_enum(TRANSPORTS, 'transport'), nullable=False)
-    distribution_host_used = db.Column(db.String(255))
 
     request_document = db.Column(db.Text, nullable=False)
     request_sha512 = db.Column(db.String(128), nullable=False)
@@ -471,11 +460,9 @@ class UpgradeHostPhaseResult(db.Model):
     status = db.Column(db.String(40), nullable=False)
     failure_stage = db.Column(_enum(PHASE_FAILURE_STAGES, 'result_failure_stage'))
     error_summary = db.Column(db.String(500))
-    #: Set only on the stage row of a *push* run -- the only phase of the only
-    #: transport that touches the device's SCP server. Null means "nothing was
-    #: ever changed" under pull and "no bracket ran" otherwise, never "a change
-    #: may be outstanding". Read it together with
-    #: UpgradeRun.image_transport_used, never alone (§5).
+    #: Set only on a stage row -- the only phase that touches the device's SCP
+    #: server. Null means "no bracket ran", never "a change may be
+    #: outstanding" (§5).
     scp_restore_confirmed = db.Column(db.Boolean)
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
