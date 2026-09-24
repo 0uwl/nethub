@@ -192,9 +192,12 @@ HOST_STATES = (
 #: publish side: a publish stops at promote/render/commit, and §8.1's phases are
 #: themselves named `stage` and `verify`, so one vocabulary would produce a row
 #: reading phase='activate', failure_stage='stage' that is ambiguous on its face.
+#: `internal` is an error in NetHub's own code (`Sibling.recover_own`), which
+#: used to be recorded as `connect` and read as a device problem. Changing this
+#: tuple changes a CHECK constraint, so it needs a migration (see 0002).
 PHASE_FAILURE_STAGES = (
     'credential', 'connect', 'hostkey', 'privilege', 'precheck',
-    'transfer', 'checksum', 'install', 'reload', 'postcheck',
+    'transfer', 'checksum', 'install', 'reload', 'postcheck', 'internal',
 )
 
 

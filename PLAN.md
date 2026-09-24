@@ -65,8 +65,8 @@ function name.
 | 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | merged |
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | merged |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | merged |
-| 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | in review |
-| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | todo |
+| 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | merged |
+| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | in review |
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | todo |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | todo |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | todo |
@@ -99,7 +99,12 @@ halfway through a branch.
 7. **The frontend has no JavaScript** (WS-11).
 8. **`ADMIN_USERNAME` has no default** (WS-10), so the first admin is not
    always called `admin`.
-9. **Schema changes go through Flask-Migrate** (WS-6) from then on.
+9. **Schema changes go through Flask-Migrate** (WS-6) from then on, and
+   **migrations run automatically**: the web process applies them at startup,
+   so upgrading is "back up, new image, restart". The sibling waits for them
+   and never migrates. Decided by the maintainer at the start of WS-6, in
+   place of the earlier "check the revision and let the admin run
+   `db upgrade`".
 10. **gunicorn stays at one worker for now** because of SQLite, but after
     WS-7 that is a tuning choice, not a correctness rule.
 11. **Day-0 phone-home will be a separate service** (WS-13 records this in
@@ -281,13 +286,16 @@ not include columns WS-5 deletes.
 Add Flask-Migrate (pin it in `requirements.txt`). Generate a baseline
 migration from the current models, including the terminal-status trigger on
 `upgrade_phase_jobs` (it is DDL attached to `after_create` today; a migration
-must create it explicitly). Replace `db.create_all()` in `create_app()` with a
-check that the database is at the latest revision, and document
-`flask --app nethub db upgrade` in the README and `CLAUDE.md`. Tests may keep
-using `create_all()` for speed if a test asserts that the migrations produce
-the same schema.
+must create it explicitly). Replace `db.create_all()` in `create_app()` with
+an automatic upgrade to the latest revision (decision 9): the web process
+migrates, the sibling waits, a database newer than the code is refused, a
+failed migration rolls back whole. Adopt databases created before migrations
+by repairing the drift `create_all()` left behind, and refuse anything else.
+Add the `internal` failure stage (from "Found while working") as the first
+real migration. Document the upgrade procedure in the README and `CLAUDE.md`.
 
-**Done when:** a fresh database built by `db upgrade` matches `create_all()`,
+**Done when:** a fresh database built by the migrations matches `create_all()`,
+an existing database is migrated or adopted on start with its rows intact,
 and `CLAUDE.md` no longer says "migrate by hand or recreate".
 
 ### WS-7: Sealed credentials instead of the socket
@@ -326,6 +334,13 @@ the sibling's public key.
 - Clear the column on every path to a terminal state and on cancel. The
   terminal-status trigger forbids updates after a terminal state, so clear
   before or in the same update.
+- The column is added by a migration (WS-6), so existing deployments get it
+  on their first start of the new image.
+- A queued job that reaches its deadline unclaimed ends `expired` with
+  `failure_stage='credential'` and a fixed summary saying its credential was
+  discarded unused, so the run page says why (maintainer decision). The WS-4
+  expired-credential scenario becomes this; the 30-minute TTL it tested is
+  gone.
 - `expires_at` defaults to the job's `deadline_at`, so a credential waits as
   long as the job may wait.
 - Keep `check_credential`'s allowlist and `field(repr=False)` on everything
@@ -550,11 +565,18 @@ the code, and this file is gone.
 Add items here that are outside the current workstream. Each needs a file,
 a one-line description and the workstream it was found in.
 
-- `nethub/sibling.py` `recover_own()` records an unexpected error in our own
-  code as `failure_stage='connect'`, because the vocabulary has nothing
-  closer. It reads as a device connection problem. Add an `internal` value
-  when WS-6 brings migrations, since a new enum value changes the column's
-  CHECK constraint. Found in WS-1.
+- `nethub/sibling.py` `recover_own()` recorded an unexpected error in our own
+  code as `failure_stage='connect'`. Found in WS-1; done in WS-6, which added
+  `internal` in migration 0002.
+- `nethub/sibling.py` `sweep()` still records a phase abandoned by a dead
+  sibling as `failure_stage='connect'`, though nothing says the device was at
+  fault. Consider `internal` or a new value; a new value needs a migration.
+  Found in WS-6.
+- **Every database created before WS-5 could not submit a run.**
+  `upgrade_runs.image_transport_used` is NOT NULL with no default, WS-5
+  removed it from the models, and `create_all()` never drops a column. Found
+  in WS-6 while tracing schema history, and fixed there: adoption drops the
+  retired columns (`schema.RETIRED_COLUMNS`).
 - `design-document.md` §4.4 (around "And `config.py` currently sets `DEBUG =
   True`") is false: `DEBUG` defaults off and is read from an env var. Fix in
   WS-13. Found in WS-3.

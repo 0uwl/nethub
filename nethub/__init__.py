@@ -6,7 +6,7 @@ import logging
 
 from flask import Flask, render_template
 
-from .extensions import csrf, db, login_manager
+from .extensions import csrf, db, login_manager, migrate
 
 
 def create_app():
@@ -23,6 +23,9 @@ def create_app():
     login_manager.init_app(app)
     csrf.init_app(app)
 
+    from . import schema
+    migrate.init_app(app, db, directory=str(schema.MIGRATIONS_DIR))
+
     from . import models  # noqa: F401 -- registers the user_loader; needed before first request
     from .artifact_routes import artifacts_bp
     from .artifact_routes import register_cli as register_artifact_cli
@@ -37,8 +40,10 @@ def create_app():
     register_cli(app)
     register_artifact_cli(app)
 
+    # The web process is the only one that migrates (nethub/schema.py): an
+    # upgrade is a new image and a restart, and the sibling waits for this.
+    schema.upgrade_database(app.config['SQLALCHEMY_DATABASE_URI'])
     with app.app_context():
-        db.create_all()
         bootstrap_admin()
 
     _serve_credential_socket(app)

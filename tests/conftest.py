@@ -26,9 +26,30 @@ def app():
     flask_app = create_app()
     flask_app.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield flask_app
+    drop_database(flask_app)
+
+
+def drop_database(flask_app):
+    """Empty the shared test database for the next test's create_app().
+
+    create_app() migrates (nethub/schema.py), and drop_all() only knows the
+    model tables: left behind, alembic_version would tell the next startup
+    that the empty database is already at head.
+    """
     with flask_app.app_context():
         db.session.remove()
         db.drop_all()
+        with db.engine.begin() as connection:
+            connection.exec_driver_sql('DROP TABLE IF EXISTS alembic_version')
+
+
+@pytest.fixture(name='drop_database')
+def drop_database_fixture():
+    """`drop_database` for fixtures that build their own app, such as
+    test_templates.py's CSRF app. A fixture rather than an import: conftest is
+    loaded as `conftest`, and importing it as `tests.conftest` would run its
+    module-level environment setup a second time."""
+    return drop_database
 
 
 @pytest.fixture
