@@ -61,10 +61,10 @@ keyed on the **row, not the submitted username**, because §4.2 argues a
 counter keyed on attacker-chosen input is unbounded growth in the shared
 SQLite file; attempts against usernames that don't exist are therefore not
 counted, which is only safe *because* the timing oracle is closed.
-**`db.create_all()` does not ALTER an existing table**, and there is no
-Alembic in this project, so those two columns arrive only on a fresh
-database — the same limitation `users.device_username` already had. Migrate
-by hand or recreate.
+Schema changes go through migrations (`nethub/migrations/`, applied
+automatically at web startup; see "Schema and migrations" below). A database
+from before migrations that lacks those two columns, or `device_username`, is
+repaired when first started by a version that has them.
 Provisioning (day-0) is entirely unimplemented.
 The `ansible/` tree is gone (build step 6) along with `.ansible-lint` and
 the `ansible-lint` CI job. Nothing in the repo runs Ansible any more; the
@@ -89,7 +89,8 @@ mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 
 ```bash
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, gunicorn, pytest, netmiko,
+                                   # Flask-WTF, Flask-Migrate (+ alembic, pinned
+                                   # on its own), gunicorn, pytest, netmiko,
                                    # ntc-templates -- all pinned to exact
                                    # versions, because CI resolves this file
                                    # fresh on every push to main and publishes
@@ -105,6 +106,14 @@ flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
 flask --app nethub check-store     # hash every stored image against its row; prints
                                     # what is missing or altered, exits 1 if anything is
+
+flask --app nethub db current      # which migration the database is at. Every
+flask --app nethub db history      # create_app() applies pending migrations itself,
+                                    # so there is no `db upgrade` step to run.
+flask --app nethub db migrate -m "what changed"   # draft a new migration from the
+                                    # models -- then edit it by hand: autogenerate
+                                    # misses CHECK (vocabulary) changes and triggers.
+                                    # See "Schema and migrations".
 
 pytest                             # runs tests/ -- see tests/conftest.py for the
                                     # app/client fixtures (temp DB + artifact store per test)
@@ -169,6 +178,18 @@ sibling, so WS-7 swaps that fixture and keeps the scenarios. Two test seams
 exist for it and nothing else: `Sibling.connect` (a fake device behind a real
 run) and `nethub.verify_running_for(app)` (the production interlock, so tests
 serve the store with it rather than a copy).
+
+**`tests/test_schema.py` holds the migrations to the models.** It builds one
+database from the migrations and one from `create_all()` and asserts they are
+identical, CHECK constraints, partial indexes and the trigger included, and it
+adopts the real pre-migration schemas under `tests/fixtures/schemas/`
+(`create_all()` output from three historical commits, evidence in the same
+sense as `tests/captures/`: don't edit them). Every other test starts its app
+through the real migrations, not `create_all()`; that costs ~15 ms per app,
+and it is why `conftest.drop_database` also drops `alembic_version` -- left
+behind, it tells the next test's startup that an empty database is at head.
+Use the `drop_database` fixture, not an import of `tests.conftest`: conftest
+loads as `conftest`, and importing it again re-runs its env setup.
 
 Tests cover `nethub/{config,credentials,models,bootstrap,auth,artifacts,artifact_routes,upgrade_routes}.py`
 end-to-end through Flask's test client (login flow and lockout, CSRF disabled in
@@ -246,7 +267,9 @@ only reclaims `running` rows and the scan result page renders `queued` and
 `running` identically. If something never starts, check that unit first.
 Start order matters once: systemd refuses to start the socket while
 `nethub.service` is already running, so start the socket first (or just
-start `nethub`, whose `Requires=` pulls it in). All three units, the
+start `nethub`, whose `Requires=` pulls it in). After an upgrade the sibling
+also waits, logging why, until the web unit's startup has migrated the
+database (see "Schema and migrations"). All three units, the
 `Sockets=` hand-over, and a `systemctl restart` of each were verified
 against a real `podman build`/`podman run` on podman 5.4.1.
 
@@ -1275,7 +1298,9 @@ column is retained for a year.
 `main()`'s loop body is `Sibling.tick()`, so it is testable. When a phase or
 scan raises something nothing downstream handled, `tick()` rolls back and
 fails every row still `running` under this instance's own id (job
-`failure_stage='connect'`, fixed summary, run `failed`). `sweep()` cannot do
+`failure_stage='internal'`, fixed summary, run `failed`). `internal` was
+added by migration 0002; before it this was recorded as `connect`, which sent
+operators looking at the network for a bug in NetHub. `sweep()` cannot do
 this, since it only matches foreign ids. `failed` rather than `abandoned`:
 the process did not die, our code raised, and re-approval would re-run the
 same bug. `tick()` also calls `expire_gates()` every pass, which moves a run
@@ -1403,6 +1428,73 @@ Ansible it was unclear which `known_hosts` file a connection plugin
 actually read. Under Netmiko the paramiko client is ours: there is no
 rendered `known_hosts`, and the check is a policy object in
 `connection.py`.
+
+## Schema and migrations (`nethub/schema.py`, `nethub/migrations/`)
+
+PLAN.md WS-6. **Upgrading a deployment is back up the database, new image,
+restart**, and the schema follows by itself. `create_app()` calls
+`schema.upgrade_database()` before anything else touches the database; there
+is no `db upgrade` step for an admin to forget. The README's "Upgrading
+NetHub" is the operator's version of this.
+
+- **Only the web process migrates.** The sibling's `main()` calls
+  `schema.wait_for_current_schema()` and blocks, logging once a minute, until
+  the database is at the head its own code knows. Two processes altering one
+  SQLite file at once is how a schema ends up half-changed. gunicorn runs one
+  worker, so `create_app()` migrates once. A second process calling
+  `create_app()` at the same moment (a `flask --app nethub ...` command) waits
+  on `BEGIN IMMEDIATE` and then finds nothing to do.
+- **A migration is one real transaction, and that took work.** pysqlite only
+  issues BEGIN before DML, so by default every CREATE/ALTER/DROP autocommits
+  alone, and a migration failing halfway leaves half of it applied.
+  `migrations/env.py` runs on a private engine with pysqlite's transaction
+  handling off and issues `BEGIN IMMEDIATE` itself. `test_a_failed_migration_changes_nothing`
+  checks this, and it fails when the private engine is swapped for a plain one.
+- **Foreign keys are off during a migration and checked before commit.**
+  SQLite changes a constraint by rebuilding the table (Alembic batch mode:
+  new table, copy, drop, rename), and with `foreign_keys=ON` dropping a
+  referenced table breaks. The pragma cannot change inside a transaction, so
+  env.py sets it on the raw connection before BEGIN and runs `PRAGMA
+  foreign_key_check` before COMMIT.
+- **Three refusals, never a guess.** A database at a revision this code does
+  not know (a newer image migrated it) is refused, since there are no
+  downgrades and the way back is the backup. A pre-migration database is
+  adopted only through the repairs `schema.py` names (`RETIRED_COLUMNS`,
+  `ADOPT_DEFAULTS`, `ADOPT_EXPRESSIONS`: the columns `create_all()` could not
+  add or drop, and pre-WS-2 dangling `artifact_id`s set to NULL). An unknown
+  table or column, or a required column with no known value, is refused with
+  the differences listed. A failed migration rolls back and the web process
+  does not start.
+- **Pre-WS-5 databases could not submit anything, and adoption is the fix.**
+  `upgrade_runs.image_transport_used` was NOT NULL with no default; WS-5 took
+  it out of the models, `create_all()` left it in the table, and every submit
+  then failed on it. `test_the_ws5_columns_are_what_blocked_every_submit` pins
+  this.
+- **Writing a migration:** `flask --app nethub db migrate -m "..."` drafts
+  one, which is then edited and frozen. Everything in it is a literal, never
+  an import from `models.py`, because a migration must mean the same thing
+  after the models change. Autogenerate misses two things this schema relies
+  on: **a change to an allowed-value list** (the vocabularies are CHECK
+  constraints, and SQLite cannot alter one in place, so the table is rebuilt
+  with `batch_alter_table(..., recreate='always')` and the old named CHECK is
+  dropped first; see `0002_internal_failure_stage.py`), and **the
+  terminal-status trigger**, which is dropped with its table by any rebuild
+  of `upgrade_phase_jobs` and has to be recreated in the same migration.
+  `tests/test_schema.py`'s equivalence test catches both. Name the file and
+  revision `NNNN_what_it_does`.
+- **`env.py` never configures logging.** Flask-Migrate's template calls
+  `logging.config.fileConfig`, which inside gunicorn would replace gunicorn's
+  handlers and disable every existing logger. `alembic.ini` has no logging
+  sections for the same reason. The sibling sets the `alembic` logger to
+  WARNING, because it checks the revision every few seconds while it waits.
+- **Verified in the real image, not only in tests**: built from
+  `Containerfile` and run with a read-only root, tmpfs `/tmp` and UID 1000,
+  like the Quadlet units. A sibling started on an empty volume waited, the web
+  container migrated and served `/login`, and the sibling then started. A
+  restart on a current database logged no migration. A pre-WS-5 database
+  with rows was adopted (the run row kept, `image_transport_used` gone). A
+  database stamped with an unknown revision stopped gunicorn with the backup
+  message.
 
 ## Artifact store (`nethub/artifacts.py`, `nethub/artifact_routes.py`)
 

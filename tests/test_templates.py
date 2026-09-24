@@ -199,15 +199,13 @@ def test_an_uncategorised_flash_still_reads_as_an_error(logged_in_client):
 # --- CSRF: the check the shared fixture cannot make -------------------------
 
 @pytest.fixture
-def csrf_app():
+def csrf_app(drop_database):
     shutil.rmtree(os.environ['ARTIFACT_STORE'], ignore_errors=True)
     os.makedirs(os.environ['ARTIFACT_STORE'])
     flask_app = create_app()
     flask_app.config.update(TESTING=True, WTF_CSRF_ENABLED=True)
     yield flask_app
-    with flask_app.app_context():
-        db.session.remove()
-        db.drop_all()
+    drop_database(flask_app)
 
 
 def test_every_post_form_carries_a_csrf_token(csrf_app):

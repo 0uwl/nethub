@@ -1,6 +1,7 @@
 import sqlite3
 
 from flask_login import LoginManager
+from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf import CSRFProtect
 from sqlalchemy import event
@@ -10,6 +11,9 @@ db = SQLAlchemy()
 login_manager = LoginManager()
 login_manager.login_view = 'auth.login'
 csrf = CSRFProtect()
+#: Provides `flask --app nethub db ...`. Startup migration does not go through
+#: it; see nethub/schema.py.
+migrate = Migrate()
 
 
 #: How long a writer waits for the other process's lock before giving up.

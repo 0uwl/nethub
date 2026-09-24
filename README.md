@@ -46,8 +46,8 @@ design target, not a description of current code.
 
 ```bash
 pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, gunicorn, pytest, netmiko,
-                                   # ntc-templates -- pinned to exact versions
+                                   # Flask-WTF, Flask-Migrate, gunicorn, pytest,
+                                   # netmiko, ntc-templates -- pinned to exact versions
 
 export SECRET_KEY=$(openssl rand -hex 32)   # required; nethub/config.py rejects an absent
                                    # key, a known placeholder, or anything under 32 chars
@@ -56,6 +56,11 @@ flask --app nethub run            # runs the dev server (DEBUG defaults off; --d
 flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
 ```
+
+The database is created, and kept up to date, by NetHub itself: every start
+applies any pending migrations before serving (see
+[Upgrading NetHub](#upgrading-nethub)). `flask --app nethub db current` and
+`flask --app nethub db history` show where a database stands.
 
 Uploaded image bytes land in `instance/artifacts/` (next to the repo
 root) — set `ARTIFACT_STORE` to point it elsewhere, and do set it in a
@@ -141,6 +146,39 @@ For local development with live edits (no rebuild on every change):
 
 This builds `Containerfile.dev` (Flask's own dev server, debug + reload)
 and runs it with the repo bind-mounted in, at `http://localhost:8080`.
+
+### Upgrading NetHub
+
+Upgrade while no phase is running (the runs list shows none `running`).
+Restarting the sibling mid-phase stops that phase, and its next start marks
+it abandoned: a gated phase goes back to its gate for re-approval, while an
+interrupted pre-check or verify fails the run. Either way a reload cut short
+is not something to cause on purpose.
+
+1. **Back up the database.** NetHub has no downgrades; the backup is the way
+   back. With the units running, SQLite's online backup is safe:
+   `sqlite3 ~/.local/share/nethub/data/database.db ".backup '/path/to/nethub-$(date +%F).db'"`.
+   Or stop both units and copy `database.db` together with any
+   `database.db-wal`/`database.db-shm` beside it.
+2. **Put the new image in place.** The reference units both run
+   `localhost/nethub:latest`, so rebuild or pull that tag; or point `Image=`
+   at a new tag in both `nethub.container` and `nethub-sibling.container`.
+   Either way, both units must run the same image.
+3. **Restart:** `systemctl --user daemon-reload && systemctl --user restart nethub nethub-sibling`.
+
+The web unit migrates the database at startup and logs
+`migrating the database from <old> to <new>`; the sibling logs that it is
+waiting for this, then starts. A migration that fails changes nothing and the
+web unit does not start: check `journalctl --user -u nethub`, fix or go back.
+
+To go back to an older version, restore the backup and the older image
+together. An older image refuses to start on a database a newer one has
+migrated, rather than run against a schema it does not understand.
+
+A database created before NetHub had migrations is adopted automatically on
+the first start of a version that has them, including repairing the columns
+earlier versions could not add or remove. If it differs in any other way,
+NetHub refuses to start and lists the differences.
 
 ### Upgrading a device with NetHub switched off
 

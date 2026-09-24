@@ -649,7 +649,7 @@ class TestUnexpectedErrorDoesNotStrandTheRow:
             assert make_sibling().tick() is None
             row = db.session.get(UpgradePhaseJob, job.id)
             assert row.status == "failed"
-            assert row.failure_stage == "connect"
+            assert row.failure_stage == "internal", "our bug, not a device fault"
             assert row.finished_at is not None
             assert "s3cret" not in row.error_summary
             assert db.session.get(UpgradeRun, run).state == "failed"

@@ -175,6 +175,8 @@ class Sibling:
 
         `failed`, not `abandoned`: the process did not die, our code raised,
         and parking the run for re-approval would invite the same error again.
+        `failure_stage='internal'`, not `connect`: nothing here says the device
+        was at fault, and `connect` sent operators looking at the network.
         The summary is fixed text. The exception went to the log, and
         `error_summary` is retained for a year (§7.4).
         """
@@ -183,7 +185,7 @@ class Sibling:
         ).all()
         for job in jobs:
             job.status = 'failed'
-            job.failure_stage = 'connect'
+            job.failure_stage = 'internal'
             job.error_summary = 'the sibling hit an unexpected error; see its log'
             job.finished_at = self.now()
             self._fail_run(job.run)
@@ -523,7 +525,11 @@ def _database_app():
 
 
 def main(poll_interval: float = 5.0) -> None:
-    """Sweep once, then work the queue until killed.
+    """Wait for the schema, sweep once, then work the queue until killed.
+
+    The sibling never migrates the database (nethub/schema.py). After an
+    upgrade it waits here until the web unit's startup has brought the
+    database to the revision this code expects.
 
     `NETHUB_CREDENTIAL_SOCKET` is the path the mount puts the socket at, and
     `NETHUB_SEARCH_DIR` is the published subtree the push reads from (§3.3 --
@@ -535,6 +541,10 @@ def main(poll_interval: float = 5.0) -> None:
     from .credential_socket import connect_to
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+    # Alembic logs "Context impl SQLiteImpl." at INFO on every revision check,
+    # and wait_for_current_schema checks every few seconds. nethub.schema says
+    # what matters itself.
+    logging.getLogger('alembic').setLevel(logging.WARNING)
 
     socket_path = os.environ.get('NETHUB_CREDENTIAL_SOCKET')
     search_dir = os.environ.get('NETHUB_SEARCH_DIR')
@@ -543,8 +553,11 @@ def main(poll_interval: float = 5.0) -> None:
             'NETHUB_CREDENTIAL_SOCKET and NETHUB_SEARCH_DIR must both be set'
         )
 
+    from . import schema
+
     worker = Sibling(connect_socket=connect_to(socket_path), search_dir=search_dir)
     app = _database_app()
+    schema.wait_for_current_schema(app.config['SQLALCHEMY_DATABASE_URI'])
     with app.app_context():
         swept = worker.sweep()
         log.info('runner %s started; swept %d abandoned row(s)',

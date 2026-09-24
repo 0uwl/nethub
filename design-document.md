@@ -1448,6 +1448,24 @@ default and would otherwise silently turn every reference below into a
 suggestion. All three are set in `extensions._configure_sqlite`, with a
 test asserting each.
 
+The schema changes only through migrations (Alembic, via Flask-Migrate;
+`nethub/migrations/`), and they run by themselves: the web process brings
+the database to the latest migration at startup, before it serves anything
+(`nethub/schema.py`), so upgrading a deployment is a new image and a restart
+(§9). Only the web process migrates; the sibling waits until the database is
+at the revision its own code expects, because two processes altering one
+SQLite file at once is how a schema ends up half-changed. Each upgrade runs in
+one transaction with foreign keys suspended for SQLite's table rebuilds and
+checked before commit, so a migration that fails leaves the database as it
+was. NetHub refuses to start on a database a newer version has migrated,
+rather than write to a schema it does not understand. A database created
+before migrations existed is adopted only by the repairs `schema.py` lists
+for drift NetHub itself caused (columns added to an existing table, or
+removed, when `create_all()` could do neither); anything else is refused
+with the differences named. The models and the migrations are held equal by
+a test that builds a database each way and compares them, CHECK
+constraints, partial indexes and the terminal-status trigger included.
+
 - `artifacts` table, the single ingest record behind both days (§3.4):
   `id`, `kind` (script/config/image), `platform`, `bundle_key`,
   `filename`, `sha512`, `file_size`, `storage_path`,
@@ -2271,7 +2289,10 @@ short operator-facing reason. With no publish job status left to share a
 vocabulary with, `failure_stage` for a phase job is free to be exactly
 the phase-specific vocabulary this design always needed: `credential`,
 `connect`, `hostkey`, `privilege`, `precheck`, `transfer`, `checksum`,
-`install`, `reload`, `postcheck`. That it no longer has to avoid
+`install`, `reload`, `postcheck`, and `internal` for an error in NetHub's
+own code rather than anything the device or the network did (recorded when
+the sibling recovers from an exception nothing else handled; before it had a
+word of its own this read as `connect`). That it no longer has to avoid
 colliding with a publish-side `promote`/`render`/`commit` set is a side
 effect of that set no longer existing, not the original reason for
 keeping the vocabularies separate — the original reason survives anyway,
@@ -2899,6 +2920,12 @@ call into `nethub/devices/`.
   session-signing `SECRET_KEY` lives in the web tier's `config.py`, which
   the sibling never imports, so the sibling unit holds no key that could
   forge an admin session.
+- **Upgrading NetHub is a new image and a restart.** Back up the database
+  first, change the image tag in both units, restart. The web unit applies
+  any pending migrations at startup and the sibling waits for it (§5). There
+  are no downgrades: going back to an older image means restoring the backup
+  taken before the upgrade, and an older image refuses to start on a
+  database a newer one has migrated rather than guess at it.
 - **DHCP integration is the deliberate exception**: it runs natively as
   its own service rather than as a unit, because it binds a privileged
   broadcast-facing port on the provisioning VLAN and is the one
