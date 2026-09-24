@@ -295,7 +295,8 @@ def test_a_succeeded_scan_shows_the_fingerprint_and_a_confirm_button(
     scan_id = make_scan(status='succeeded')
     body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
     assert 'SHA256:x' in body
-    assert 'confirm it' in body.lower()
+    assert 'action="/hostkeys/confirm"' in body
+    assert f'name="scan_id" value="{scan_id}"' in body
     assert 'name="csrf_token"' in body
     assert '{{' not in body and '{%' not in body
 
@@ -306,20 +307,20 @@ def test_a_queued_scan_offers_a_reload_link_not_a_confirm_button(
     scan_id = make_scan(status='queued')
     body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
     assert 'reload' in body.lower()
-    assert 'confirm it' not in body.lower()
+    assert 'action="/hostkeys/confirm"' not in body
 
 
 def test_a_failed_scan_shows_the_error_summary(logged_in_client, make_scan):
     scan_id = make_scan(status='failed', error_summary='could not reach 192.0.2.10:22')
     body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
     assert 'could not reach 192.0.2.10:22' in body
-    assert 'confirm it' not in body.lower()
+    assert 'action="/hostkeys/confirm"' not in body
 
 
 def test_a_consumed_scan_offers_no_confirm_button(logged_in_client, make_scan):
     scan_id = make_scan(status='succeeded', consumed_at=datetime.now(timezone.utc))
     body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
-    assert 'confirm it' not in body.lower()
+    assert 'action="/hostkeys/confirm"' not in body
     assert 'already been used' in body.lower()
 
 
