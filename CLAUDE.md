@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Active plan: read `PLAN.md` before starting any work.** It is the agreed
 direction from the 2026-09-23 review, split into workstreams that each get
 their own branch. Where it conflicts with this file, `PLAN.md` wins: several
-hard rules below are scheduled to change, and parts of this file are known to
-be wrong (listed under the plan's WS-0).
+hard rules below are scheduled to change, and each workstream in `PLAN.md`
+names the rules it changes.
 
 ## Project status
 
@@ -1295,6 +1295,17 @@ forever. The rarer failure was handled cleanly and the common one was not. The
 copying `str(exc)`: the message is chosen by the OS and the path, and that
 column is retained for a year.
 
+**Any other exception reaching the loop is recovered by `recover_own()`.**
+`main()`'s loop body is `Sibling.tick()`, so it is testable. When a phase or
+scan raises something nothing downstream handled, `tick()` rolls back and
+fails every row still `running` under this instance's own id (job
+`failure_stage='connect'`, fixed summary, run `failed`). `sweep()` cannot do
+this, since it only matches foreign ids. `failed` rather than `abandoned`:
+the process did not die, our code raised, and re-approval would re-run the
+same bug. `tick()` also calls `expire_gates()` every pass, which moves a run
+at `awaiting_approval` past `gate_expires_at` (7 days) to `expired`, as a
+conditional update like `claim()` so an approval committed in between wins.
+
 **`sweep()`'s predicate is `or_(runner_instance_id.is_(None), != self)`.**
 `!=` alone evaluates to NULL — not true — for a NULL column, so a `running`
 row with no runner id was invisible to every sweep forever. Latent rather than
@@ -1553,6 +1564,16 @@ the submitter for pre-check. Don't tighten that back to a non-null check.
 (`CredentialStore.release` pops before validating). That makes replay
 worthless at the cost that a stray request forces a re-approval — acceptable
 only because the mount is what decides who can reach the socket at all.
+
+**The queued row is committed only after its credential is held.** The
+routes call `upgrades.submit`/`approve` with `commit=False` (a flush, so the
+job has an id), hold the credential, then commit (`_commit_holding`). The
+sibling claims any committed `queued` row, so committing first let it claim
+the job, find nothing and fail the run. If the commit fails the credential
+is discarded before the rollback, because the rollback frees the id for the
+next insert. `approve()` requires the approver's own `device_username` for
+the same reason `submit()` requires the submitter's, and refuses a gate past
+`gate_expires_at` even before the sibling has expired it.
 
 **Known gap, not yet decided:** `upgrade_runs.device_username_used` snapshots
 the *submitter's* device username, but each gate collects the credential of

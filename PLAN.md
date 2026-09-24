@@ -34,7 +34,16 @@ function name.
 ## How to work this plan
 
 - One workstream per branch. Branch off a freshly fetched `main` using the
-  branch name given. Work one workstream at a time.
+  branch name given. Work one workstream at a time. If your session was
+  assigned a different branch name, ask the maintainer which to use rather
+  than picking one silently.
+- Do not trust the status table for what has merged. Each branch sets its
+  own row to "in review", and `main` keeps saying that after the merge until
+  a later branch changes it. Check `git log --oneline origin/main` for the
+  merge of each branch your workstream depends on. When starting a
+  workstream, set any row that `main` shows as merged to "merged".
+- Before starting, read "Found while working" at the bottom of this file for
+  items tagged with your workstream. They are part of its scope.
 - Before and after every change, run the baseline:
   `python -m pytest -q`, `ruff check .` (ruff **0.16.7**, the CI pin; check
   `ruff --version` first), and `python -m yamllint .`. The test count must
@@ -51,8 +60,8 @@ function name.
 
 | WS | Branch | Summary | Depends on | Status |
 |---|---|---|---|---|
-| 0 | `docs/claude-md-corrections` | Remove false claims from `CLAUDE.md` | none | in review |
-| 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | todo |
+| 0 | `docs/claude-md-corrections` | Remove false claims from `CLAUDE.md` | none | merged |
+| 1 | `fix/dispatch-correctness` | Credential race, approver check, stranded rows, gate expiry | none | in review |
 | 2 | `fix/storage-correctness` | SQLite pragmas, artifact delete guard, `check_store` off the request path | none | todo |
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | todo |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | todo |
@@ -535,3 +544,8 @@ a one-line description and the workstream it was found in.
   table until build step 7". The table exists; the column is still a bare
   integer. WS-2 should decide whether it becomes a real foreign key as part
   of the artifact delete guard. Found in WS-0.
+- `nethub/sibling.py` `recover_own()` records an unexpected error in our own
+  code as `failure_stage='connect'`, because the vocabulary has nothing
+  closer. It reads as a device connection problem. Add an `internal` value
+  when WS-6 brings migrations, since a new enum value changes the column's
+  CHECK constraint. Found in WS-1.

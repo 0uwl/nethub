@@ -9,12 +9,14 @@ job edge (the `queued` row); the sibling writes every other one, plus the
 per-host rows via `phases.execute_phase`. The startup sweep lives here rather
 than in Flask so it can never fire against a run that is healthy under another
 process -- with the consequence, stated in §7.3, that a sibling which dies and
-stays dead is swept by nobody. Flask reads `heartbeat_at` and renders
-"stalled"; noticing is not the sweep's job.
+stays dead is swept by nobody. The design has Flask read `heartbeat_at` and
+render "stalled" (not built yet; PLAN.md WS-11); noticing is not the sweep's
+job.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,6 +42,8 @@ NEXT_PHASE = {
 }
 
 DEFAULT_GATE_TTL = timedelta(days=7)
+
+log = logging.getLogger('nethub.sibling')
 
 
 def _utcnow() -> datetime:
@@ -157,6 +161,95 @@ class Sibling:
         run.awaiting_phase = job.phase
         run.gate_expires_at = self.now() + self.gate_ttl
         run.finished_at = None
+
+    def recover_own(self) -> int:
+        """Fail rows this instance left `running` after an unexpected error.
+
+        `main()` calls this when a phase or scan raised something nothing
+        downstream handled. The row was claimed under *our* id, and `sweep()`
+        only reclaims foreign ids, so without this it stayed `running` until
+        the sibling restarted. The loop is single-threaded, so once an
+        exception reaches `main()` nothing of ours is legitimately running.
+
+        `failed`, not `abandoned`: the process did not die, our code raised,
+        and parking the run for re-approval would invite the same error again.
+        The summary is fixed text. The exception went to the log, and
+        `error_summary` is retained for a year (§7.4).
+        """
+        jobs = UpgradePhaseJob.query.filter_by(
+            status='running', runner_instance_id=self.runner_instance_id
+        ).all()
+        for job in jobs:
+            job.status = 'failed'
+            job.failure_stage = 'connect'
+            job.error_summary = 'the sibling hit an unexpected error; see its log'
+            job.finished_at = self.now()
+            self._fail_run(job.run)
+        for scan in HostKeyScan.query.filter_by(
+            status='running', runner_instance_id=self.runner_instance_id
+        ):
+            scan.status = 'failed'
+            scan.error_summary = 'the sibling hit an unexpected error; see its log'
+            scan.finished_at = self.now()
+        db.session.commit()
+        return len(jobs)
+
+    def expire_gates(self) -> int:
+        """Move runs parked at a gate past `gate_expires_at` to `expired`.
+
+        §7.3 gives this edge to the sibling. No job row exists at a gate (the
+        approval is what writes one), so only the run changes. Candidates are
+        compared in Python, through `_aware`, because SQLite hands the column
+        back naive; there are few parked runs. The write is then conditional on
+        the run still being at the gate, the same shape as `claim()`: an
+        approval Flask commits between our read and our write must win, not be
+        overwritten with `expired`.
+        """
+        now = self.now()
+        due = [
+            run.id for run in UpgradeRun.query.filter(
+                UpgradeRun.state == 'awaiting_approval',
+                UpgradeRun.gate_expires_at.isnot(None),
+            )
+            if now >= _aware(run.gate_expires_at)
+        ]
+        if not due:
+            return 0
+        changed = (
+            db.session.query(UpgradeRun)
+            .filter(UpgradeRun.id.in_(due), UpgradeRun.state == 'awaiting_approval')
+            .update(
+                {'state': 'expired', 'awaiting_phase': None, 'finished_at': now},
+                synchronize_session=False,
+            )
+        )
+        db.session.commit()
+        return changed
+
+    # -- the loop ---------------------------------------------------------
+    def tick(self) -> str | None:
+        """One pass of `main()`'s loop. Returns None when there was nothing to do.
+
+        A scan is checked before a phase job every pass (WS-6.2b): it is
+        bounded by `connection.CONNECT_TIMEOUT` and an admin is very likely
+        watching the result page, where a phase job may be a 15-minute stage
+        already in flight.
+        """
+        try:
+            self.expire_gates()
+            status = self.run_scan_once()
+            if status is None:
+                status = self.run_once()
+            return status
+        except Exception:
+            log.exception('phase execution raised; continuing')
+            db.session.rollback()
+            try:
+                self.recover_own()
+            except Exception:
+                log.exception('could not fail the stranded row(s)')
+                db.session.rollback()
+            return None
 
     # -- the queue --------------------------------------------------------
     def claim(self, job_id: int) -> bool:
@@ -395,14 +488,12 @@ def main(poll_interval: float = 5.0) -> None:
     `NETHUB_SEARCH_DIR` is the published subtree both transports read from
     (§3.3 -- one source, whichever direction the bytes move).
     """
-    import logging
     import os
     import time
 
     from .credential_socket import connect_to
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-    log = logging.getLogger('nethub.sibling')
 
     socket_path = os.environ.get('NETHUB_CREDENTIAL_SOCKET')
     search_dir = os.environ.get('NETHUB_SEARCH_DIR')
@@ -418,19 +509,7 @@ def main(poll_interval: float = 5.0) -> None:
         log.info('runner %s started; swept %d abandoned row(s)',
                  worker.runner_instance_id, swept)
         while True:
-            try:
-                # A scan is checked first every iteration (WS-6.2b): it is
-                # bounded by connection.CONNECT_TIMEOUT and an admin is very
-                # likely watching the result page, where a phase job may be a
-                # 15-minute stage already in flight.
-                status = worker.run_scan_once()
-                if status is None:
-                    status = worker.run_once()
-            except Exception:
-                log.exception('phase execution raised; continuing')
-                db.session.rollback()
-                status = None
-            if status is None:
+            if worker.tick() is None:
                 time.sleep(poll_interval)
 
 

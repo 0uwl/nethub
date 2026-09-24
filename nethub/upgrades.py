@@ -133,6 +133,15 @@ class RequestError(Exception):
     """The submitted request cannot be compiled into a run."""
 
 
+def _aware(value):
+    """SQLite hands back naive datetimes for values written aware; the same
+    helper as `phases._aware`, kept here so this module needs no device
+    imports."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -233,19 +242,32 @@ def build_document(bundle: str, hosts) -> str:
     )
 
 
-def submit(*, user, bundle, hosts_raw, transport, cidrs,
-           shared_account_mode=False, flash_dir='flash:', platform='iosxe'):
-    """Compile a request into a run, its host rows, and a queued pre-check.
-
-    Flask writes exactly one job edge in the whole system and this is it: the
-    row that arrives `queued` (§7.3). Everything after dispatch is the
-    sibling's.
-    """
+def _require_device_username(user):
+    """Submit and approve both collect this user's device credential, so both
+    need the name it goes with. Without the check on approve, the route held
+    `None` as the username and the sibling refused it as a malformed
+    credential, after the gate had already been spent."""
     if not user.device_username:
         raise RequestError(
             'Your device username is not set. NetHub maps it server-side and '
             'will not take it from a request -- set it on your profile first.'
         )
+
+
+def submit(*, user, bundle, hosts_raw, transport, cidrs,
+           shared_account_mode=False, flash_dir='flash:', platform='iosxe',
+           commit=True):
+    """Compile a request into a run, its host rows, and a queued pre-check.
+
+    Flask writes exactly one job edge in the whole system and this is it: the
+    row that arrives `queued` (§7.3). Everything after dispatch is the
+    sibling's.
+
+    `commit=False` flushes instead, so the job has an id but the sibling
+    cannot see it yet. The route uses that to hold the credential *before*
+    the row becomes claimable; see `upgrade_routes._commit_holding`.
+    """
+    _require_device_username(user)
     hosts = parse_hosts(hosts_raw)
     artifact = resolve_bundle(bundle, platform=platform)
     targets = []
@@ -289,11 +311,14 @@ def submit(*, user, bundle, hosts_raw, transport, cidrs,
         deadline_at=phase_deadline('precheck', hosts=len(run.hosts)),
     )
     db.session.add(job)
-    db.session.commit()
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
     return run, job
 
 
-def approve(*, run, phase, user):
+def approve(*, run, phase, user, commit=True):
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
@@ -303,9 +328,13 @@ def approve(*, run, phase, user):
 
     The check below is a check-then-insert, so it turns the *sequential* case
     into a message and loses the concurrent one -- which matters now that
-    `gunicorn.conf.py` runs more than one thread. The commit is wrapped for
+    `gunicorn.conf.py` runs more than one thread. The flush is wrapped for
     that. The constraint holds either way, so two reloads were never possible;
     without the wrapper the losing admin just got a 500.
+
+    `commit=False` flushes instead, as for `submit`. The flush is where the
+    unique constraint fires, so the duplicate-approval message comes from
+    there in both modes.
     """
     if run.state != 'awaiting_approval':
         raise RequestError(f'This run is {run.state}, not waiting at a gate.')
@@ -315,6 +344,13 @@ def approve(*, run, phase, user):
         raise RequestError(
             f'This run is waiting at the {run.awaiting_phase} gate, not {phase}.'
         )
+    expires = _aware(run.gate_expires_at)
+    if expires is not None and _utcnow() >= expires:
+        # The sibling moves the run to `expired` on its next loop. Refusing
+        # here too means the TTL holds even while the sibling is down, without
+        # Flask writing the expiry edge itself (§7.3 gives that to the sibling).
+        raise RequestError('This gate has expired. Submit a new run.')
+    _require_device_username(user)
     attempt = 1 + (
         UpgradePhaseJob.query.filter_by(run_id=run.id, phase=phase)
         .filter(UpgradePhaseJob.status.in_(('abandoned',)))
@@ -341,16 +377,17 @@ def approve(*, run, phase, user):
     run.awaiting_phase = None
     run.gate_expires_at = None
     try:
-        db.session.commit()
+        db.session.flush()
     except IntegrityError:
-        # The check above is a check-then-insert, and this function's own
-        # docstring used to claim it "turns that into a message rather than an
-        # IntegrityError" -- true single-threaded, false under the threads
-        # `gunicorn.conf.py` now runs. UNIQUE(run_id, phase, attempt) holds
-        # either way, so there was never a risk of two reloads; the losing
-        # admin just got a 500 that looked like a crash.
+        # The check above is a check-then-insert, so under the threads
+        # `gunicorn.conf.py` runs, two approvals can both pass it.
+        # UNIQUE(run_id, phase, attempt) holds either way, so there is never a
+        # risk of two reloads; this turns the loser's IntegrityError into a
+        # message instead of a 500.
         db.session.rollback()
         raise RequestError('That phase has already been approved.') from None
+    if commit:
+        db.session.commit()
     return job
 
 

@@ -60,6 +60,32 @@ def _hold(job, password):
                   approved_by=job.approved_by or current_user.id)
 
 
+def _commit_holding(job, password):
+    """Hold the credential for a flushed job, then commit it. In that order.
+
+    The sibling claims any committed `queued` row on its next poll. Committing
+    first left a window in which it claimed the job, found no credential and
+    failed the run, and the route's cleanup then deleted rows the sibling
+    already owned. A flushed row is invisible to the sibling, so holding
+    first closes the window and a refusal is a plain rollback.
+
+    If the commit fails, the credential is discarded before the rollback. The
+    job id came from the flush, and the rollback frees it for the next insert;
+    a credential left under it would be released to someone else's job.
+    """
+    try:
+        _hold(job, password)
+    except CredentialError as exc:
+        db.session.rollback()
+        raise upgrades.RequestError(str(exc)) from None
+    try:
+        db.session.commit()
+    except Exception:
+        _store().discard(job.id)
+        db.session.rollback()
+        raise
+
+
 # -- host keys ---------------------------------------------------------------
 
 @hostkeys_bp.route('/hostkeys')
@@ -233,17 +259,12 @@ def new_run():
                 transport=current_app.config['IMAGE_TRANSPORT'],
                 cidrs=current_app.config['DEVICE_TARGET_CIDRS'],
                 shared_account_mode=current_app.config['SHARED_ACCOUNT_MODE'],
+                commit=False,
             )
             # Pre-check has no gate but still opens a session, so the
             # credential is collected here (§8.1's table: "none; runs on
             # submit"). If the store refuses it the run must not exist.
-            try:
-                _hold(job, password)
-            except CredentialError as exc:
-                db.session.delete(job)
-                db.session.delete(run)
-                db.session.commit()
-                raise upgrades.RequestError(str(exc)) from None
+            _commit_holding(job, password)
             flash(f'Submitted run #{run.id}; pre-check is queued.', 'success')
             return redirect(url_for('upgrades.show_run', run_id=run.id))
         except upgrades.RequestError as exc:
@@ -280,16 +301,11 @@ def approve(run_id):
         flash('No such run.')
         return redirect(url_for('upgrades.list_runs'))
     try:
-        job = upgrades.approve(run=run, phase=phase, user=current_user)
-        try:
-            _hold(job, password)
-        except CredentialError as exc:
-            # The approval is what supplies the credential, so an approval
-            # whose credential is refused must not leave a queued row behind.
-            db.session.delete(job)
-            run.state, run.awaiting_phase = 'awaiting_approval', phase
-            db.session.commit()
-            raise upgrades.RequestError(str(exc)) from None
+        job = upgrades.approve(run=run, phase=phase, user=current_user,
+                               commit=False)
+        # The approval is what supplies the credential, so an approval whose
+        # credential is refused must not leave a queued row behind.
+        _commit_holding(job, password)
         flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
