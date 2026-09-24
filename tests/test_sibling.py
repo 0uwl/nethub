@@ -12,7 +12,7 @@ import pytest
 
 from nethub import sibling as S
 from nethub import verify_running_for
-from nethub.devices import connection, phases, transfer
+from nethub.devices import connection, install, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
     DeviceHostKey,
@@ -192,16 +192,19 @@ class TestRunStateMachine:
             row = db.session.get(UpgradeRun, run)
             assert (row.state, row.awaiting_phase) == ("awaiting_approval", "activate")
 
-    def test_activate_queues_verify_with_no_gate(self, app, run, monkeypatch):
-        """§8.1 gives verify no gate -- it is read-only and runs on completion."""
+    def test_activate_runs_verify_straight_after_with_no_gate(self, app, run, monkeypatch):
+        """§8.1 gives verify no gate -- it is read-only and runs on completion,
+        in the same pass as activate rather than back through the queue."""
         with app.app_context():
             queue(run, "activate")
             succeed(monkeypatch, "activate")
-            make_sibling().run_once()
+            succeed(monkeypatch, "verify")
+            assert make_sibling().run_once() == "succeeded"
             row = db.session.get(UpgradeRun, run)
-            assert (row.state, row.awaiting_phase) == ("running", None)
-            assert UpgradePhaseJob.query.filter_by(phase="verify",
-                                                   status="queued").count() == 1
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "cleanup")
+            verify = UpgradePhaseJob.query.filter_by(phase="verify").one()
+            assert verify.status == "succeeded"
+            assert verify.approved_by is None, "nobody approved verify"
 
     def test_verify_parks_at_the_optional_cleanup_gate(self, app, run, monkeypatch):
         with app.app_context():
@@ -349,6 +352,83 @@ class TestEndToEndOverTheSocket:
                 stop.set()
                 thread.join(timeout=3)
                 listening.close()
+
+
+class TestVerifyRunsOnActivatesCredential:
+    """No approval ever holds a credential for verify: the sibling queues it
+    itself when activate succeeds. Fetching one could only fail, which is
+    how every app-driven run used to end -- failed right after the switch
+    was upgraded. It runs on the credential activate's approval supplied."""
+
+    @staticmethod
+    def counting_socket(fetched):
+        inner = credential_socket(password="act1vate-pass")
+
+        def connect():
+            fetched.append(1)
+            return inner()
+        return connect
+
+    def test_one_fetch_covers_activate_and_verify(self, app, run, monkeypatch):
+        seen, fetched = {}, []
+
+        def verify(conn, host, ctx):
+            seen["password"] = ctx.device_password
+            seen["ctx"] = ctx
+            return phases.HostOutcome(host.hostname, "verified")
+
+        with app.app_context():
+            queue(run, "activate")
+            succeed(monkeypatch, "activate")
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "verify", verify)
+            make_sibling(connect_socket=self.counting_socket(fetched)).run_once()
+
+        assert fetched == [1], "one credential fetch, for activate's job"
+        assert seen["password"] == "act1vate-pass"
+        assert seen["ctx"].device_password == "", "cleared once verify ended"
+
+    def test_a_failed_activate_queues_no_verify(self, app, run, monkeypatch):
+        with app.app_context():
+            queue(run, "activate")
+            monkeypatch.setitem(
+                phases.PHASE_RUNNERS, "activate",
+                lambda conn, host, ctx: (_ for _ in ()).throw(
+                    install.InstallError("install failed", status="install_failed")))
+            assert make_sibling().run_once() == "failed"
+            assert UpgradePhaseJob.query.filter_by(phase="verify").count() == 0
+            assert db.session.get(UpgradeRun, run).state == "failed"
+
+    def test_a_cancel_during_activate_stops_verify(self, app, run, monkeypatch):
+        """Verify goes through the same pre-claim checks as a queued job."""
+        ran = []
+
+        def activate(conn, host, ctx):
+            host.run.cancel_requested_at = NOW
+            return phases.HostOutcome(host.hostname, "activated")
+
+        with app.app_context():
+            queue(run, "activate")
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", activate)
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "verify",
+                                lambda conn, host, ctx: ran.append(1))
+            assert make_sibling().run_once() == "cancelled"
+            assert ran == []
+            verify = UpgradePhaseJob.query.filter_by(phase="verify").one()
+            assert verify.status == "cancelled"
+            assert db.session.get(UpgradeRun, run).state == "cancelled"
+
+    def test_a_verify_left_queued_by_a_crash_fails_rather_than_hangs(
+        self, app, run, monkeypatch
+    ):
+        """If the sibling dies between activate and verify, the restarted one
+        finds a queued verify with no credential held for it. That fails
+        with failure_stage='credential' -- visible, not stuck."""
+        with app.app_context():
+            queue(run, "verify")
+            worker = make_sibling(connect_socket=credential_socket(ok=False))
+            assert worker.run_once() == "failed"
+            job = UpgradePhaseJob.query.filter_by(phase="verify").one()
+            assert job.failure_stage == "credential"
 
 
 class TestAbandonedPhaseCanBeReApproved:

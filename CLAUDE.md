@@ -16,12 +16,9 @@ along with every trace of `ansible-runner`, the EE, and the rendered
 inventory it used. The device layer is validated end-to-end against real
 hardware (two live upgrades, plus a live pre-check driven through the
 Flask app), so there is only one layer in the tree now, and it has been
-exercised, not just written. **An app-driven run cannot complete today:**
-`tests/test_end_to_end.py` drives one through the UI against a fake switch
-and it fails at `verify`, right after the switch was upgraded, because the
-sibling queues `verify` with no approval and so no credential is ever held
-for it (PLAN.md, "Found while working"). The two clean-run tests there are
-`xfail(strict=True)`; take the marker off with the fix. The migration's own handoff document
+exercised, not just written. `tests/test_end_to_end.py` drives a whole
+run through the UI to `completed` against a fake switch; no app-driven run
+has yet been taken past pre-check on real hardware. The migration's own handoff document
 (`netmiko.md`) is gone too, once its build order and reasoning had all
 either landed in code or been folded into this file and
 `design-document.md` — read the hard rules below directly rather than
@@ -796,7 +793,8 @@ seems to require one, the design is what needs revisiting, not the rule.
   renders a directory for an execution to read, so there is no `extravars`,
   no `env/passwords`, and no `podman run -e` showing up in
   `/proc/<pid>/cmdline`. The credential is a Python attribute on
-  `phases.PhaseContext`, held for the life of one phase execution. What still
+  `phases.PhaseContext`, held for the life of one phase execution (plus the
+  `verify` chained onto `activate`; see "Dispatch"). What still
   has to be *engineered* is the other end: `error_summary` is retained for a
   year (§7.4), so `phases._summarise` reads an exception's `summary`
   attribute rather than its `str()` (WS-4.2). Every exception the device
@@ -1290,6 +1288,19 @@ there is one rather than trusting the arithmetic.
 **`phase_activate` owns the reconnect**, not `phase_verify`: a device that
 never returns is a `reload` failure, a different `failure_stage` and a
 different conversation than a wrong version.
+
+**`verify` runs on `activate`'s credential, in the same `run_once` pass.**
+It is the one phase nobody approves, so nothing ever holds a credential
+for it: the sibling queues it when `activate` succeeds, then immediately
+puts it through the same cancel/deadline checks and conditional claim as a
+queued job and runs it with the `PhaseContext` still in hand, clearing the
+password only once `verify` ends. Before this, `verify` went back through
+the queue, fetched, found nothing, and failed every app-driven run with
+`failure_stage='credential'` right after the switch was upgraded — what
+design doc §9.1 described ("approving the reload collects for activate and
+the verify that follows it") was never implemented. Don't route it back
+through the queue, and don't hold a second credential for it: a `verify`
+left queued by a sibling crash fails visibly instead, which is the intent.
 
 **An abandoned phase is parked at its gate, not failed — and only if someone
 can approve it.** §7.3 grants an abandoned device-touching phase a fresh

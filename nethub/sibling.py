@@ -32,7 +32,7 @@ from nethub.models import APPROVABLE, HostKeyScan, UpgradePhaseJob, UpgradeRun
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
 #: `awaiting_approval` until a human approves the next phase. `verify` follows
 #: `activate` with no gate because §8.1's table gives it none -- it is
-#: read-only and runs on completion.
+#: read-only and runs on completion, on activate's credential (`run_once`).
 NEXT_PHASE = {
     'precheck': ('stage', True),
     'stage': ('activate', True),
@@ -354,16 +354,23 @@ class Sibling:
         return 'succeeded'
 
     def run_once(self) -> str | None:
-        """Take at most one job off the queue and see it through."""
+        """Take at most one job off the queue and see it through.
+
+        "Through" includes a phase with no gate that follows it. `verify` is
+        the only one: the sibling queues it when `activate` succeeds, and no
+        approval ever holds a credential for it, so fetching one could only
+        fail. It runs here instead, on the credential still in hand from
+        `activate`, and that credential is cleared once `verify` ends.
+        Approving `activate` therefore releases both. Returns the status of
+        the last job run.
+        """
         job = self.next_queued()
         if job is None:
             return None
 
-        if job.run.cancel_requested_at is not None:
-            return self._finish(job, 'cancelled')
-        deadline = _aware(job.deadline_at)
-        if deadline is not None and self.now() >= deadline:
-            return self._finish(job, 'expired')
+        stopped = self._stop_before_claim(job)
+        if stopped is not None:
+            return stopped
         if not self.claim(job.id):
             return None  # another instance took it; nothing to do
 
@@ -409,13 +416,35 @@ class Sibling:
             connect=self.connect,
         )
         try:
-            status = phases.execute_phase(job, ctx, now=self.now)
+            while True:
+                status = phases.execute_phase(job, ctx, now=self.now)
+                following = self._advance_run(job, status)
+                db.session.commit()
+                if following is None:
+                    return status
+                # Go through the same checks and the same conditional claim as
+                # a job taken off the queue, so a cancel that landed during
+                # activate still stops verify.
+                stopped = self._stop_before_claim(following)
+                if stopped is not None:
+                    return stopped
+                if not self.claim(following.id):
+                    return status
+                job = following
         finally:
-            # The credential is bound to this execution and nothing longer.
+            # The credential is bound to the approval's executions and nothing
+            # longer: this one, plus a gateless phase chained onto it.
             ctx.device_password = ''
-        self._advance_run(job, status)
-        db.session.commit()
-        return status
+
+    def _stop_before_claim(self, job: UpgradePhaseJob) -> str | None:
+        """Finish a queued job that must not start: cancelled, or past its
+        deadline. Returns the status it was given, or None to go ahead."""
+        if job.run.cancel_requested_at is not None:
+            return self._finish(job, 'cancelled')
+        deadline = _aware(job.deadline_at)
+        if deadline is not None and self.now() >= deadline:
+            return self._finish(job, 'expired')
+        return None
 
     # -- the run state machine (§7.3) -------------------------------------
     def _finish(self, job: UpgradePhaseJob, status: str) -> str:
@@ -433,14 +462,19 @@ class Sibling:
         run.gate_expires_at = None
         run.finished_at = self.now()
 
-    def _advance_run(self, job: UpgradePhaseJob, status: str) -> None:
+    def _advance_run(self, job: UpgradePhaseJob, status: str) -> UpgradePhaseJob | None:
+        """Move the run on after `job` ended with `status`.
+
+        Returns the job queued for a phase with no gate, which the caller runs
+        on the same credential (see `run_once`); None otherwise.
+        """
         run = job.run
         if status == 'cancelled':
             run.state, run.finished_at = 'cancelled', self.now()
-            return
+            return None
         if status != 'succeeded':
             self._fail_run(run)
-            return
+            return None
 
         following, gated = NEXT_PHASE[job.phase]
         if following is None:
@@ -448,7 +482,7 @@ class Sibling:
             run.awaiting_phase = None
             run.gate_expires_at = None
             run.finished_at = self.now()
-            return
+            return None
         if gated:
             # An approval is a row, so the run parks here until a human writes
             # one. `awaiting_phase` says which gate -- inferring it from the
@@ -457,14 +491,16 @@ class Sibling:
             run.state = 'awaiting_approval'
             run.awaiting_phase = following
             run.gate_expires_at = self.now() + self.gate_ttl
-            return
+            return None
         run.state = 'running'
         run.awaiting_phase = None
         run.gate_expires_at = None
-        db.session.add(UpgradePhaseJob(
+        queued = UpgradePhaseJob(
             run_id=run.id, phase=following, attempt=1, status='queued',
             created_at=self.now(),
-        ))
+        )
+        db.session.add(queued)
+        return queued
 
 
 def _database_app():
