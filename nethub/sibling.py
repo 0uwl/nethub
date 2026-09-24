@@ -24,10 +24,10 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 
-from nethub.credential_socket import CredentialError, fetch_credential
 from nethub.devices import connection, install, phases
 from nethub.extensions import db
 from nethub.models import APPROVABLE, HostKeyScan, UpgradePhaseJob, UpgradeRun
+from nethub.sealed_credentials import CredentialError, open_sealed
 
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
 #: `awaiting_approval` until a human approves the next phase. `verify` follows
@@ -67,7 +67,9 @@ class Sibling:
     either miss abandoned rows or steal live ones (§7.3).
     """
 
-    connect_socket: Callable
+    #: The sibling's private key (nethub/sealed_credentials.py). Only this
+    #: process can open what Flask sealed into a job row.
+    private_key: object
     search_dir: str
     runner_instance_id: str = ''
     now: Callable[[], datetime] = _utcnow
@@ -257,27 +259,45 @@ class Sibling:
 
     # -- the queue --------------------------------------------------------
     def claim(self, job_id: int) -> bool:
-        """Conditional update. One changed row means we own the execution.
+        """Conditional update. One changed row means we own the execution."""
+        claimed, _sealed = self._claim(job_id)
+        return claimed
+
+    def _claim(self, job_id: int) -> tuple[bool, bytes | None]:
+        """Claim the job and take its sealed credential off the row, at once.
 
         A read-then-write double-claims under WAL, and nothing enforces that
         only one sibling is running (§9.1) -- so the claim has to be the
         `WHERE status='queued'` itself, with the rowcount as the answer.
+
+        The ciphertext is cleared in that same statement, so a claimed job
+        never carries it (the CHECK constraint on the table holds every writer
+        to that). SQLite's RETURNING gives the *new* row, which would be NULL,
+        so the value is read first and the update is made conditional on it
+        being unchanged: one changed row means both that the job is ours and
+        that the bytes read are the ones cleared.
         """
+        sealed = db.session.query(UpgradePhaseJob.sealed_credential).filter(
+            UpgradePhaseJob.id == job_id).scalar()
+        unchanged = (UpgradePhaseJob.sealed_credential.is_(None) if sealed is None
+                     else UpgradePhaseJob.sealed_credential == sealed)
         changed = (
             db.session.query(UpgradePhaseJob)
-            .filter(UpgradePhaseJob.id == job_id, UpgradePhaseJob.status == 'queued')
+            .filter(UpgradePhaseJob.id == job_id, UpgradePhaseJob.status == 'queued',
+                    unchanged)
             .update(
                 {
                     'status': 'running',
                     'started_at': self.now(),
                     'heartbeat_at': self.now(),
                     'runner_instance_id': self.runner_instance_id,
+                    'sealed_credential': None,
                 },
                 synchronize_session=False,
             )
         )
         db.session.commit()
-        return changed == 1
+        return changed == 1, sealed
 
     def next_queued(self) -> UpgradePhaseJob | None:
         """One FIFO queue, ordered by `created_at` -- `started_at` is null
@@ -326,7 +346,7 @@ class Sibling:
         """Take at most one queued scan and execute it.
 
         No credential fetch and no `PhaseContext`: the host key is exchanged
-        before authentication, so this never touches §9.1's socket.
+        before authentication, so this never needs a sealed credential.
         """
         scan = self.next_queued_scan()
         if scan is None:
@@ -372,45 +392,31 @@ class Sibling:
         stopped = self._stop_before_claim(job)
         if stopped is not None:
             return stopped
-        if not self.claim(job.id):
+        claimed, sealed = self._claim(job.id)
+        if not claimed:
             return None  # another instance took it; nothing to do
 
         try:
-            username, password = fetch_credential(self.connect_socket, job.id)
-        except (CredentialError, OSError) as exc:
-            # OSError as well as CredentialError. `fetch_credential` does not
-            # wrap `connect_socket()`, and `connect_to(path)._open()` calls a
-            # bare `socket.connect(path)` -- so a Flask unit restarting at the
-            # moment we pick a job up raises ConnectionRefusedError or
-            # FileNotFoundError, neither of which is a CredentialError.
-            #
-            # That escaped to main()'s `except Exception`, which logs and
-            # continues -- but `claim()` had already committed status='running'
-            # under *our* runner_instance_id, and `sweep()` only matches rows
-            # whose id differs from its own. The instance that stranded the row
-            # was structurally incapable of recovering it, so the run sat
-            # `running` forever. The rare failure was handled; the common one
-            # was not.
+            credential = open_sealed(
+                self.private_key, sealed, job_id=job.id,
+                approved_by=self._supplier(job), now=self.now(),
+            )
+        except CredentialError as exc:
+            # The row is ours now (`running` under our runner id), and sweep()
+            # only matches other ids, so it must be finished here or it sits
+            # `running` forever. CredentialError messages are fixed text of
+            # ours, never library or peer text -- error_summary is kept a year.
             job.status = 'failed'
             job.failure_stage = 'credential'
-            job.error_summary = (
-                str(exc)[:500] if isinstance(exc, CredentialError)
-                # Not str(exc) for an OSError: the message is chosen by the OS
-                # and the path, and error_summary is retained for a year
-                # (§7.4). The distinction still matters operationally -- a
-                # socket that is not there is a different problem from a
-                # credential that was refused -- so name the class, not the
-                # text.
-                else f'could not reach the credential socket ({type(exc).__name__})'
-            )
+            job.error_summary = str(exc)[:500]
             job.finished_at = self.now()
             self._fail_run(job.run)
             db.session.commit()
             return 'failed'
 
         ctx = phases.PhaseContext(
-            device_username=username,
-            device_password=password,
+            device_username=credential.username,
+            device_password=credential.password,
             search_dir=self.search_dir,
             reload_wait=self.reload_wait,
             connect=self.connect,
@@ -447,7 +453,26 @@ class Sibling:
         return None
 
     # -- the run state machine (§7.3) -------------------------------------
+    @staticmethod
+    def _supplier(job: UpgradePhaseJob) -> int:
+        """Whose credential this job must carry: the approver for a gated
+        phase, the submitter for pre-check, which has no gate (§8.1). Refusing
+        a null here once failed every pre-check dispatched."""
+        return job.approved_by if job.approved_by is not None else job.run.submitted_by
+
     def _finish(self, job: UpgradePhaseJob, status: str) -> str:
+        """End a queued job that must not start: cancelled, or past its deadline.
+
+        The ciphertext goes in the same update, because the terminal-status
+        trigger forbids touching the row afterwards. An expired job that was
+        carrying one says so (maintainer decision, PLAN.md WS-7): the operator
+        sees a credential that waited past its deadline, not a bare `expired`.
+        """
+        if status == 'expired' and job.sealed_credential is not None:
+            job.failure_stage = 'credential'
+            job.error_summary = ('not started before its deadline; its credential '
+                                 'was discarded unused')
+        job.sealed_credential = None
         job.status = status
         job.finished_at = self.now()
         run = job.run
@@ -531,14 +556,15 @@ def main(poll_interval: float = 5.0) -> None:
     upgrade it waits here until the web unit's startup has brought the
     database to the revision this code expects.
 
-    `NETHUB_CREDENTIAL_SOCKET` is the path the mount puts the socket at, and
     `NETHUB_SEARCH_DIR` is the published subtree the push reads from (§3.3 --
-    NetHub is the one source of the bytes).
+    NetHub is the one source of the bytes). The private key comes from the
+    systemd credential `credential_private_key` or `NETHUB_CREDENTIAL_KEY_FILE`,
+    and must match `NETHUB_CREDENTIAL_PUBLIC_KEY`, the key Flask seals to.
     """
     import os
     import time
 
-    from .credential_socket import connect_to
+    from . import sealed_credentials, shared_config
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     # Alembic logs "Context impl SQLiteImpl." at INFO on every revision check,
@@ -546,16 +572,19 @@ def main(poll_interval: float = 5.0) -> None:
     # what matters itself.
     logging.getLogger('alembic').setLevel(logging.WARNING)
 
-    socket_path = os.environ.get('NETHUB_CREDENTIAL_SOCKET')
     search_dir = os.environ.get('NETHUB_SEARCH_DIR')
-    if not socket_path or not search_dir:
-        raise SystemExit(
-            'NETHUB_CREDENTIAL_SOCKET and NETHUB_SEARCH_DIR must both be set'
-        )
+    if not search_dir:
+        raise SystemExit('NETHUB_SEARCH_DIR must be set')
+    try:
+        private_key = sealed_credentials.load_private_key()
+        sealed_credentials.check_pair(private_key, sealed_credentials.load_public_key(
+            shared_config.NETHUB_CREDENTIAL_PUBLIC_KEY))
+    except sealed_credentials.KeyConfigError as exc:
+        raise SystemExit(str(exc)) from None
 
     from . import schema
 
-    worker = Sibling(connect_socket=connect_to(socket_path), search_dir=search_dir)
+    worker = Sibling(private_key=private_key, search_dir=search_dir)
     app = _database_app()
     schema.wait_for_current_schema(app.config['SQLALCHEMY_DATABASE_URI'])
     with app.app_context():

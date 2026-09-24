@@ -103,24 +103,41 @@ Once you're logged in as an admin:
    boot mode, free space.
 5. The run then parks at an **approval gate** before each phase that
    touches a device — stage, activate, cleanup. Each gate collects your
-   device password again, holds it in memory for that one phase
-   execution, and never writes it to a row, a log, or the session.
-   Activate reloads the device; verify runs after it comes back.
-6. **Check store** re-hashes every published image against what is on
-   disk and flags a missing file or a digest that no longer matches. It
-   is a button rather than a page load, because it hashes everything.
+   device password again for that one phase. It is stored only encrypted,
+   sealed to a key only the dispatch process holds, and only until that
+   phase starts; never in the clear in a row, a log, or the session.
+   Activate reloads the device; verify runs after it comes back, on the
+   password the activate approval supplied.
+6. `flask --app nethub check-store` re-hashes every published image against
+   what is on disk and flags a missing file or a digest that no longer
+   matches. It is a command rather than a page, because it hashes
+   everything.
 7. Deleting an artifact removes the row and its image file.
 
 ## Running it in a container
 
 ```bash
 podman build -t localhost/nethub:latest .
+
+# The dispatch process's key pair: device passwords are sealed to the public
+# half and only the private half can open them. Keep the private key for the
+# sibling unit only.
+mkdir -p ~/.config/nethub
+podman run --rm --userns=keep-id:uid=1000,gid=1000 -v ~/.config/nethub:/keys:z \
+  --entrypoint python localhost/nethub:latest \
+  -m nethub.sealed_credentials keygen --out /keys/credential_private_key
+# ...prints NETHUB_CREDENTIAL_PUBLIC_KEY=<key>
+
 podman run --rm -p 8080:8080 \
   -e SECRET_KEY="$(openssl rand -hex 32)" \
   -e ADMIN_PASSWORD=<initial-admin-password> \
   -e ARTIFACT_STORE=/app/artifacts \
+  -e NETHUB_CREDENTIAL_PUBLIC_KEY=<key> \
   localhost/nethub:latest
 ```
+
+That serves the UI but performs no device work; that is the sibling's job
+(`quadlet/nethub-sibling.container`).
 
 The session cookie is `Secure` by default, so a deployment reached over plain
 HTTP needs a TLS terminator in front of it. `http://localhost:8080` works as
@@ -129,14 +146,15 @@ same container over a LAN address without TLS means the browser silently
 drops the cookie and login bounces back to the form. Add
 `-e SESSION_COOKIE_INSECURE=1` for that case, and only for local testing.
 
-`quadlet/nethub.container` is a reference Podman Quadlet unit for
-running it as a systemd user service, with every environment variable
-documented inline (including loading `SECRET_KEY`/`ADMIN_PASSWORD` as
-systemd credentials instead of plaintext, and the `ARTIFACT_STORE` volume
-that has to be set explicitly -- its default lands on the image's read-only
-layer).
-Copy it to `~/.config/containers/systemd/`, fill in the required values,
-then `systemctl --user daemon-reload && systemctl --user start nethub`.
+`quadlet/nethub.container` (the UI) and `quadlet/nethub-sibling.container`
+(all device work) are reference Podman Quadlet units for running NetHub as
+systemd user services, with every environment variable documented inline:
+loading `SECRET_KEY`/`ADMIN_PASSWORD` as systemd credentials instead of
+plaintext, the `ARTIFACT_STORE` volume that has to be set explicitly (its
+default lands on the image's read-only layer), the public key in both units
+and the private key mounted into the sibling only. Copy both to
+`~/.config/containers/systemd/`, fill in the required values, then
+`systemctl --user daemon-reload && systemctl --user start nethub nethub-sibling`.
 
 For local development with live edits (no rebuild on every change):
 
@@ -145,7 +163,10 @@ For local development with live edits (no rebuild on every change):
 ```
 
 This builds `Containerfile.dev` (Flask's own dev server, debug + reload)
-and runs it with the repo bind-mounted in, at `http://localhost:8080`.
+and runs it with the repo bind-mounted in, at `http://localhost:8080`. On
+first run it also creates a local key pair in `instance/credential_private_key`
+(gitignored) and passes the public half to the app, which refuses to start
+without one.
 
 ### Upgrading NetHub
 

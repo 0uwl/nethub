@@ -254,8 +254,8 @@ class HostKeyScan(db.Model):
     belongs in the process that does all other device I/O; §3.2's argument
     against blocking Flask applies to any blocking device call, not only
     phase executions. It needs no device credential (the key is exchanged
-    before authentication), so it never touches §9.1's credential socket --
-    it is dispatched like a phase job, just simpler: no state machine, no
+    before authentication), so nothing is sealed for it -- it is
+    dispatched like a phase job, just simpler: no state machine, no
     approval gate, no per-host loop.
 
     `ansible_host` is a plain string, not a foreign key to `DeviceHostKey` --
@@ -401,6 +401,12 @@ class UpgradePhaseJob(db.Model):
         # otherwise queue two reloads. `attempt` is what keeps that constraint
         # from also forbidding the fresh retry §7.3 grants an abandoned phase.
         db.UniqueConstraint('run_id', 'phase', 'attempt', name='uq_phase_job_attempt'),
+        # Ciphertext exists only while the job waits to be claimed (PLAN.md
+        # WS-7). The claim clears it in the same statement, and every path
+        # that ends a job before a claim clears it too; this is the database
+        # holding every writer to that, not a habit.
+        db.CheckConstraint("status = 'queued' OR sealed_credential IS NULL",
+                           name='ck_sealed_credential_only_while_queued'),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -433,6 +439,12 @@ class UpgradePhaseJob(db.Model):
     #: container restarts and meaningless across PID namespaces (§7.3).
     runner_instance_id = db.Column(db.String(36))
     log_path = db.Column(db.String(255))
+
+    #: The device credential that approval supplied, sealed to the sibling's
+    #: public key (nethub/sealed_credentials.py): Flask can write it and never
+    #: read it. Null for `verify`, which runs on `activate`'s credential, and
+    #: for every job that is no longer queued.
+    sealed_credential = db.Column(db.LargeBinary)
 
 
 class UpgradeHostPhaseResult(db.Model):

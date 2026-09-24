@@ -20,7 +20,7 @@ from nethub import models, schema
 from nethub.extensions import db
 
 FIXTURES = Path(__file__).parent / "fixtures" / "schemas"
-HEAD = "0002_internal_failure_stage"
+HEAD = "0003_sealed_credential"
 
 
 def url(path):

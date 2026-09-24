@@ -77,13 +77,13 @@ NetHub containerizes as a single-process image (`Containerfile` —
 `python:3.12-slim`, gunicorn, one worker) plus a dev image
 (`Containerfile.dev` — Flask's own dev server with reload, run via
 `dev.sh` against a bind-mounted repo for live edits). **A deployment is
-three units, not one**: `quadlet/nethub.container` (the UI),
+two units**: `quadlet/nethub.container` (the UI) and
 `quadlet/nethub-sibling.container` (all device work — the same image at a
-different entrypoint), and `quadlet/nethub-credential.socket` (§9.1's
-channel between them, a plain systemd unit because Quadlet has no `.socket`
-generator, so it installs to a different directory). See "Container" below
-for the full environment-variable list and the systemd-credential
-mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
+different entrypoint). They share the database and nothing else; a device
+credential crosses from one to the other sealed in the job row, to a key
+pair only the sibling holds the private half of (PLAN.md WS-7, "Sealed
+credentials" below). See "Container" below for the full environment-variable
+list and the systemd-credential mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 
 ## Commands
 
@@ -137,9 +137,16 @@ yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML f
                                     # reasons: ci.yml has no `---`, and Actions' `on:`
                                     # key is a YAML 1.1 boolean.
 
-python -m nethub.sibling           # the dispatcher; reads NETHUB_CREDENTIAL_SOCKET
-                                    # and NETHUB_SEARCH_DIR (exits immediately naming both
-                                    # if either is unset). Needs no SECRET_KEY: it loads
+python -m nethub.sealed_credentials keygen --out <file>   # the sibling's key pair:
+                                    # private key to <file> (0600, never overwritten),
+                                    # public key printed for NETHUB_CREDENTIAL_PUBLIC_KEY.
+                                    # `... public-key --key <file>` recovers the public half.
+
+python -m nethub.sibling           # the dispatcher; needs NETHUB_SEARCH_DIR, its private
+                                    # key (systemd credential `credential_private_key` or
+                                    # NETHUB_CREDENTIAL_KEY_FILE) and NETHUB_CREDENTIAL_PUBLIC_KEY,
+                                    # and exits naming whichever is missing or mismatched.
+                                    # Needs no SECRET_KEY: it loads
                                     # only shared_config.py, never config.py. Runs as its own unit
                                     # (quadlet/nethub-sibling.container), never inside the
                                     # Flask process. NOTHING IS DISPATCHED WITHOUT IT:
@@ -170,14 +177,16 @@ uncategorised calls are refusals and downgrading them to a neutral notice
 would mis-style real failures.
 
 **`tests/test_end_to_end.py` drives whole runs**: the UI through Flask's test
-client, the real `Sibling` on the app `main()` builds, the real credential
-store over a socket pair, and the real device layer, with only the switch
-faked (`FakeSwitch`, answering from `tests/captures/`). Only its
-`credential_channel` fixture knows how a credential crosses from Flask to the
-sibling, so WS-7 swaps that fixture and keeps the scenarios. Two test seams
-exist for it and nothing else: `Sibling.connect` (a fake device behind a real
-run) and `nethub.verify_running_for(app)` (the production interlock, so tests
-serve the store with it rather than a copy).
+client, the real `Sibling` on the app `main()` builds, credentials really
+sealed by the web side and opened by the sibling with conftest's key pair, and
+the real device layer, with only the switch faked (`FakeSwitch`, answering
+from `tests/captures/`). Only its `credential_channel` fixture knows how a
+credential crosses from Flask to the sibling (WS-7 swapped it from the socket
+to the sealed column). One test seam exists for it and nothing else:
+`Sibling.connect`, a fake device behind a real run. conftest generates the key
+pair at import, puts the public half in `NETHUB_CREDENTIAL_PUBLIC_KEY` before
+`nethub` is imported, and hands out the private half as the
+`credential_private_key` fixture.
 
 **`tests/test_schema.py` holds the migrations to the models.** It builds one
 database from the migrations and one from `create_all()` and asserts they are
@@ -196,8 +205,8 @@ end-to-end through Flask's test client (login flow and lockout, CSRF disabled in
 the `app` fixture — see the template-test note above for why that matters —
 artifact ingest and its two uniqueness constraints, host-key confirm, submit and
 approve refusals), plus
-`nethub/devices/{facts,connection,transfer,install,phases}.py`, `nethub/sibling.py` and
-`nethub/credential_socket.py` — most of which need neither those fixtures nor a
+`nethub/devices/{facts,connection,transfer,install,phases}.py`, `nethub/sibling.py`,
+`nethub/sealed_credentials.py` and `nethub/schema.py` — most of which need neither those fixtures nor a
 device, parsing the real output under `tests/captures/` and exercising the
 host-key policy against the same device's public host key. `tests/conftest.py`
 carries `make_user`, `make_artifact` (real bytes on disk, mirroring
@@ -238,10 +247,10 @@ is), so `dev.sh` can bind-mount the repo at `/app` and get live edits
 with no rebuild. Never run `Containerfile.dev` as anything but a local
 dev convenience — same reasoning as the `DEBUG` hard rule below.
 
-`nethub/gunicorn.conf.py` fixes `workers = 1` (not a knob — SQLite plus
-the single-worker hard rule below both assume exactly one process), sets
-`worker_class = 'gthread'` with `threads = 4` — the *other* half of that
-hard rule, and required rather than optional: gunicorn's defaults are
+`nethub/gunicorn.conf.py` fixes `workers = 1` — for SQLite's sake, and since
+WS-7 a tuning choice rather than a correctness rule (see the hard rule below)
+— sets `worker_class = 'gthread'` with `threads = 4`, required rather than
+optional: gunicorn's defaults are
 `sync`/`threads=1`, so leaving them unset made production single-threaded
 and a 1.5 GB upload held the whole server, the exact §3.2 failure arriving
 through ingest — and sets `control_socket_disable = True`: gunicorn ≥25.1 otherwise tries to
@@ -251,13 +260,10 @@ by actually running the built image read-only, not by inspection — if
 gunicorn's default behavior changes again, re-check by running the
 container rather than trusting this note.
 
-`entrypoint.sh` is baked in as the image's ENTRYPOINT and exists for one
-reason: to stop gunicorn's arbiter from mistaking the credential socket for
-an HTTP listener. It is a pass-through for anything not socket-activated
-(`dev.sh`, a plain `podman run`, the sibling unit, every test). The
-mechanism and the failure it prevents are written out under "Dispatch"
-below — read that before changing either the ENTRYPOINT line or
-`systemd_socket()`.
+The image's ENTRYPOINT is gunicorn itself. WS-7 deleted `entrypoint.sh`,
+the shim that renamed systemd's socket-activation variables so gunicorn would
+not serve HTTP on the credential socket: with no socket there is nothing to
+hand over.
 
 **Running `nethub.container` alone gets you a UI that accepts work and
 performs none of it.** Flask writes a `queued` row and stops there by design
@@ -265,13 +271,19 @@ performs none of it.** Flask writes a `queued` row and stops there by design
 "Still working" indefinitely — and nothing surfaces it, because `sweep()`
 only reclaims `running` rows and the scan result page renders `queued` and
 `running` identically. If something never starts, check that unit first.
-Start order matters once: systemd refuses to start the socket while
-`nethub.service` is already running, so start the socket first (or just
-start `nethub`, whose `Requires=` pulls it in). After an upgrade the sibling
-also waits, logging why, until the web unit's startup has migrated the
-database (see "Schema and migrations"). All three units, the
-`Sockets=` hand-over, and a `systemctl restart` of each were verified
-against a real `podman build`/`podman run` on podman 5.4.1.
+Neither unit depends on the other being up: a web restart between an
+approval and its phase costs nothing, because the credential is in the row.
+After an upgrade the sibling waits, logging why, until the web unit's
+startup has migrated the database (see "Schema and migrations").
+
+WS-7 was verified in the built image with a read-only root, like the units:
+the keygen command run inside the image; a sibling refusing a mismatched
+key; a submit over HTTP leaving only ciphertext in the database files; the
+web container restarted before the sibling started; and the pre-check then
+opening the credential and failing at `connect` (no switch at the TEST-NET
+address), not at `credential`. The earlier three-unit layout's socket
+hand-over was verified on podman 5.4.1; the two-unit layout has been run
+with docker, not yet under Quadlet.
 
 `quadlet/nethub.container` is the reference Podman Quadlet unit (see
 Drawbridge's own `quadlet/drawbridge.container` for the sibling
@@ -348,6 +360,8 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `SECRET_KEY` | none — required (web unit only) | Flask/Flask-Login session-signing key. Web-only: it lives in `config.py`, which only `create_app()` loads; the sibling loads `shared_config.py` and its unit carries no key. A systemd credential named `secret_key` takes priority over this env var (`nethub/credentials.py`) — see the unit file's `[Service]` block. **`config.py` also refuses a known placeholder or anything under 32 characters**, not just an absent value: alpha has no server-side `sessions` row (§4.5), so the cookie signature is the only thing authenticating a user and a published key is a forged admin session. The reference unit ships the line commented out rather than filled in, for the same reason. |
 | `DATABASE_PATH` | `<repo root>/database.db` | Bare SQLite file path, not a URL — set to a path under the `/app/data` volume in the container. |
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: the SCP push addresses it by filename. Usually a large mounted volume. |
+| `NETHUB_CREDENTIAL_PUBLIC_KEY` | none — required (both units) | The sibling's public key, base64. Flask seals device credentials to it (`nethub/sealed_credentials.py`), and `create_app()` refuses to start without a valid one, before migrating. The sibling checks its private key matches it and refuses to start otherwise. Public, so an env var is fine. Printed by `python -m nethub.sealed_credentials keygen`. |
+| `NETHUB_CREDENTIAL_KEY_FILE` | none (sibling unit only) | Path to the sibling's private key file, mounted read-only into the sibling container only. A systemd credential named `credential_private_key` takes priority. Never the key itself in an env var: `/proc/<pid>/environ` is readable and every child inherits it. |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
 | `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. An oversize request gets a real `413` page (`nethub/__init__.py`'s `too_large_error`) stating the configured limit, not Werkzeug's bare default (WS-5.6). |
@@ -548,11 +562,13 @@ disabled deployment-wide (`local_accounts_enabled`) — without that, an
 OIDC admin about to lose their group just creates a local admin row and
 the IdP's decision is inert. But a device SSH session needs a
 password neither auth
-backend will yield, so an upgrade run collects the submitter's device
-credential at each approval gate, holds it in memory only for the life
-of the *phase execution* that approval releases (design doc §4.3/§9.1 —
-not for the life of the run, since a run can park at a gate for days),
-and never writes it to a row, a log or the session. The device
+backend will yield, so an upgrade run collects the device credential of
+whoever stands at each approval gate and keeps it only for the *phase
+execution* that approval releases (design doc §4.3/§9.1 — not for the life
+of the run, since a run can park at a gate for days): sealed to the
+sibling's key in that job's row until the job is claimed or ends (PLAN.md
+WS-7), then in the sibling's memory for the execution. Never in the
+clear in a row, a log or the session. The device
 username comes from `users.device_username`, mapped server-side and
 never read from a submitted request. The property this buys is
 two-sided attribution: the same human in `upgrade_runs.submitted_by` and
@@ -772,45 +788,48 @@ seems to require one, the design is what needs revisiting, not the rule.
   reason and it is enough: Flask holds the only unauthenticated route, and a
   handler that opened a device session would hold it for minutes. So Flask
   writes a `queued` row and nothing else; `nethub/sibling.py` does the rest,
-  and the job row is the only *control* channel between them — which is also
-  why there is no terminal streamed to a browser. There is exactly one other
-  channel and it is not general: a **sibling-initiated** Unix socket carrying
-  per-execution credentials and nothing else (§9.1, `nethub/credential_socket.py`).
-  Don't widen it into RPC, don't let control or status onto it, and don't let
-  Flask be the side that connects — the reason is window minimisation (a
-  deposit endpoint leaves the sibling holding secrets for executions it hasn't
-  started, and can be flooded). Three construction details are easy to get
-  wrong: the **mount** is the authenticator, not `SO_PEERCRED` — under one
-  shared rootless user a uid check discriminates nothing, so don't write one
-  and believe it means something; the listening socket comes from a systemd
-  `.socket` unit, never from `unlink()`+`bind()` in either container; and the
-  sibling parses bytes Flask chose, so the response needs framing, caps,
-  deadlines and a character allowlist on the credential before it reaches any
+  and the job row is the only channel between them — which is also why there
+  is no terminal streamed to a browser. That includes the device credential
+  since PLAN.md WS-7: it rides in the job row, sealed to the sibling's public
+  key (`upgrade_phase_jobs.sealed_credential`; see "Sealed credentials").
+  WS-7 deleted the sibling-initiated Unix socket that carried it before, with
+  its `.socket` unit, the gunicorn entrypoint shim and the in-memory store.
+  Don't bring a second channel back for credentials: a restart of the web
+  process lost every held one, and approving a phase queued behind a long
+  one outran the socket store's TTL. And don't let the sibling trust what it
+  opens: a compromised Flask chooses those bytes and the sibling is the
+  privileged side, so `open_sealed` checks the job, the approver, the
+  expiry and the character allowlist before the credential reaches any
   variable or command string.
-- **Flask runs exactly one worker — and more than one thread.**
-  `gunicorn` with `workers = 2` silently breaks the credential path: a
-  credential submitted to worker A is invisible to worker B (design doc
-  §9.2). It fails closed but intermittently, and the error says nothing
-  about workers. Threads are the other half of the same rule and are
-  *required*, not optional: §3.2 now notes that a 1.2 GB image upload
+- **Flask runs one worker — and more than one thread.** One worker is now
+  a tuning choice for SQLite's sake rather than a correctness rule (PLAN.md
+  decision 10): the credential used to live in one worker's memory, so a
+  second worker broke approvals intermittently, and since WS-7 it lives in
+  the row instead. Don't raise it without measuring SQLite under two writers
+  in the web tier plus the sibling. Threads are *required*, not optional: §3.2 now notes that a 1.2 GB image upload
   plus its SHA-512 pass is the longest operation in the system after the
   device work, and single-threaded it would hold the phone-home route for
   the whole window — the exact failure §3.2 legislated against, arriving
   through ingest rather than through a dispatch call. Hash
   incrementally over the chunks as they're written so "hashed once at
-  ingest" survives. The socket is served on its own thread with
-  deadlines, for the same reason. §3.2 also now names the budget the
+  ingest" survives. §3.2 also now names the budget the
   whole design is calibrated against: **2 s p99 on phone-home, 15 min of
   device backoff.** Check changes to the request path against those
   numbers.
-- **The device credential never reaches disk, and this is now easy rather
-  than delicate.** The whole `private_data_dir` problem is gone: nothing
-  renders a directory for an execution to read, so there is no `extravars`,
-  no `env/passwords`, and no `podman run -e` showing up in
-  `/proc/<pid>/cmdline`. The credential is a Python attribute on
-  `phases.PhaseContext`, held for the life of one phase execution (plus the
-  `verify` chained onto `activate`; see "Dispatch"). What still
-  has to be *engineered* is the other end: `error_summary` is retained for a
+- **The device credential reaches disk only as ciphertext, only while its
+  job is queued** (PLAN.md WS-7; this replaced "never reaches disk"). Flask
+  seals it to the sibling's public key into `upgrade_phase_jobs.sealed_credential`
+  in the transaction that creates the `queued` row; the sibling's claim
+  clears the column in the same statement; every path that ends a job
+  unclaimed clears it too; and a CHECK constraint
+  (`ck_sealed_credential_only_while_queued`) makes the database refuse
+  ciphertext on any row that is not queued. Flask cannot decrypt it, so a
+  copy of the database alone yields no password. In plaintext the credential
+  exists in the web process for the request that seals it, and in the
+  sibling as a Python attribute on `phases.PhaseContext` for the life of one
+  phase execution (plus the `verify` chained onto `activate`; see
+  "Dispatch"). There is still no rendered directory, no `extravars`, and no
+  `podman run -e`. What still has to be *engineered* is the other end: `error_summary` is retained for a
   year (§7.4), so `phases._summarise` reads an exception's `summary`
   attribute rather than its `str()` (WS-4.2). Every exception the device
   layer raises sets `summary` explicitly in `__init__`, defaulting to its own
@@ -1171,7 +1190,7 @@ whitespace-padded digest staged successfully and was then refused at
 activate, with an error whose two halves differed only in case. Both call
 sites now share one normalisation point rather than each having its own.
 
-## Dispatch (`nethub/sibling.py`, `nethub/credential_socket.py`)
+## Dispatch (`nethub/sibling.py`, `nethub/sealed_credentials.py`)
 
 The schema is in `nethub/models.py` — `device_host_keys`, `upgrade_runs`,
 `upgrade_run_hosts`, `upgrade_phase_jobs`, `upgrade_host_phase_results`, with
@@ -1281,18 +1300,14 @@ with the other vocabularies so the sibling can read it without importing
 `upgrades` (and the artifact store behind it); `upgrades.APPROVABLE` still
 resolves, by import.
 
-**`run_once` catches `OSError` as well as `CredentialError`.**
-`fetch_credential` does not wrap `connect_socket()`, and `connect_to()._open()`
-calls a bare `socket.connect(path)` — so a Flask unit restarting as the
-sibling picks a job up raises `ConnectionRefusedError`/`FileNotFoundError`,
-which escaped to `main()`'s `except Exception` *after* `claim()` had committed
-`running` under this instance's own `runner_instance_id`. `sweep()` only
-matches rows whose id differs from its own, so the instance that stranded the
-row was structurally incapable of recovering it and the run sat `running`
-forever. The rarer failure was handled cleanly and the common one was not. The
-`error_summary` for that branch names the exception *class* rather than
-copying `str(exc)`: the message is chosen by the OS and the path, and that
-column is retained for a year.
+**A credential failure is finished in `run_once`, never left to the loop.**
+The claim has already committed `running` under this instance's own
+`runner_instance_id` by the time the credential is opened, and `sweep()` only
+matches other ids, so a failure there that escaped to `main()` would strand
+the row `running` forever. That happened once, under the socket, when a web
+restart made the fetch raise an `OSError` nothing caught. Now the only failure
+is a `CredentialError` from `open_sealed`, whose messages are fixed text of
+ours and so safe for the year-retained `error_summary`.
 
 **Any other exception reaching the loop is recovered by `recover_own()`.**
 `main()`'s loop body is `Sibling.tick()`, so it is testable. When a phase or
@@ -1327,81 +1342,61 @@ lets two readers both see `queued` and both claim it, and nothing enforces
 that only one sibling runs (§9.1). `runner_instance_id` is a UUID minted per
 start and never a PID.
 
-**The credential socket: Flask serves, the sibling connects.** Not the
-reverse — a deposit endpoint would leave the sibling holding secrets for
-executions it has not started, and could be flooded. These things about
-`nethub/credential_socket.py` are load-bearing:
+**Sealed credentials (PLAN.md WS-7, `nethub/sealed_credentials.py`).** The
+approver's device password is sealed with libsodium's sealed box (PyNaCl
+`SealedBox`) to the sibling's public key, and stored in the job row it was
+collected for. These things are load-bearing:
 
-- **Nothing in it calls `bind()`.** `systemd_socket()` adopts the descriptor
-  a `.socket` unit handed over, and returns `None` when the process was not
-  socket-activated — the caller then skips serving rather than creating a
-  path with the wrong ownership. `quadlet/nethub-credential.socket` is that
-  unit, and the path is now exercised end-to-end rather than only argued: a
-  real `podman run` under it answers a request on the socket. A dev run, a
-  plain `podman run` and most tests still take the `None` branch.
-- **The descriptor reaches Flask under a *renamed* pair of variables, and
-  that is not stylistic.** gunicorn's arbiter reads `LISTEN_FDS`/`LISTEN_PID`
-  itself and, when the pid matches, **clears the configured `bind` and serves
-  HTTP on whatever systemd handed over** — so passing this socket in the
-  obvious way breaks NetHub twice: gunicorn speaks HTTP on the credential
-  socket, and nothing listens on `NETHUB_PORT` at all. It also unsets both
-  variables, so the forked worker — where `create_app()` and the store
-  actually live — would find nothing left to read. The image's
-  `entrypoint.sh` therefore re-exports the count as `NETHUB_LISTEN_FDS`
-  (`credential_socket.HANDOVER_FDS_ENV`) and unsets systemd's own before
-  exec'ing gunicorn; the descriptor itself is untouched and survives the exec
-  and the fork. Observed, not inferred: gunicorn logged `Listening at:
-  unix:/…/credential.sock` with nothing on the HTTP port.
-- **The `LISTEN_PID` check cannot apply to that handover, so the descriptor
-  is interrogated instead.** It is read in a forked worker, so the pid never
-  matches by construction. `_adopt_listening_fd` accepts fd 3 only if it is
-  really a listening `AF_UNIX` socket (`SO_ACCEPTCONN`), declines otherwise,
-  and never closes a descriptor that isn't ours — a narrower question than
-  "was this environment meant for me", and a live one under gunicorn, whose
-  arbiter opens its own listener during startup.
-- **There is no `SO_PEERCRED` check and there should not be one.** Under one
-  rootless user a uid check tells Flask only "the peer shares my uid", which
-  anything a Flask compromise spawns also satisfies. The mount is the
-  authenticator (§9.2). Don't add a uid check and believe it discriminates.
-- **The store is keyed by `upgrade_phase_jobs.id`, never `run_id`**, and the
-  approving identity is cross-checked on release. Keying by run would
-  eventually hand one person's password to another person's approved
-  execution against an address that person chose.
-- **The reply is untrusted input on the sibling's side.** A compromised Flask
-  chooses those bytes and the sibling is the privileged side, so
-  `fetch_credential` caps, deadlines and allowlists what comes back before it
-  reaches any variable or command string.
-- **The store is bounded by its TTL, not only by use, and that took wiring.**
-  `purge_expired()` and `discard()` existed with **no caller anywhere in
-  `nethub/`** — the TTL was enforced only inside `release()`, i.e. only if the
-  sibling eventually asked for that exact job. An approval whose job never ran
-  (sibling down, run cancelled, job abandoned) left a named human's plaintext
-  AAA password in the worker that also serves the only unauthenticated route,
-  which with one worker and a long-lived unit is weeks. `hold()` and
-  `release()` now sweep on every use, and `upgrade_routes.cancel` discards the
-  credentials of `queued` jobs. Two details are load-bearing: the sweep in
-  `release()` runs **after** the target is popped, or an expired credential
-  reports "no credential held" instead of "expired; the phase needs
-  re-approval" — the same refusal a never-approved job gets, and a worse
-  diagnosis (a test pins this). And cancel sweeps only `queued` rows: a
-  `running` job has already fetched, and keying the discard by run rather than
-  job would be exactly the mistake §9.1 forbids. Deliberately **not** a
-  background timer — this store has no supervisor, and a thread outliving a
-  request is worse to reason about than a sweep on each use.
-- **`type(job_id) is not int`, not `isinstance`.** `bool` is a subclass of
-  `int` and `hash(True) == hash(1)`, so `{"job_id": true}` released the
-  credential held under key 1 — and `db.session.get(UpgradePhaseJob, True)`
-  would have bound to 1 as well. Bounded by the mount and by the sibling never
-  sending a bool, but this function's entire purpose is validating a message
-  before it selects a secret.
-- **Every field holding the credential is `field(repr=False)`** — on `_Held`
-  and `phases.PhaseContext`. No path renders either of them
-  today (tracebacks carry no frame locals, `DEBUG` is off, neither netmiko nor
-  paramiko defines a repr that would pull one in), so this is a structural
-  guard rather than a fix. `PhaseContext` is the object this file names as the
-  credential's entire lifetime container, and one `log.debug("ctx=%r", ctx)`
-  added while debugging writes it to journald or a CI log that outlives the
-  phase. Don't drop the flag when adding a field beside them.
+- **Flask can seal and never open.** It holds only `NETHUB_CREDENTIAL_PUBLIC_KEY`.
+  The private key is in the sibling unit alone (systemd credential
+  `credential_private_key`, or a read-only file named by
+  `NETHUB_CREDENTIAL_KEY_FILE`), never in an env var. The design once rejected
+  an encrypted column because "the key would be readable by Flask"; that is
+  true of a shared key, not of a public one.
+- **Sealed in the transaction that creates the `queued` row**
+  (`upgrades._seal_into`, called by `submit` and `approve`), so no committed
+  queued job ever lacks its credential. That is WS-1's race closed by
+  construction; the old hold-then-commit ordering (`_commit_holding`) is gone.
+  Username and password are checked against the allowlist before anything is
+  written, so a refusal is a message rather than a rollback.
+- **What is sealed binds the credential to one execution:** job id, the
+  supplying identity (the approver, or the submitter for pre-check, which has
+  no gate: `Sibling._supplier`; refusing a null there once failed every
+  pre-check), and `expires_at`, which is the job's `deadline_at`. A credential
+  waits exactly as long as its job may, so there is no separate TTL.
+- **The claim takes the ciphertext off the row in the same statement.**
+  `Sibling._claim` reads the column, then runs the conditional `UPDATE ...
+  WHERE status='queued' AND sealed_credential = <what was read>` setting it
+  NULL. SQLite's `RETURNING` gives the *new* row, which would be NULL, so the
+  read-then-conditional-update is what makes "one changed row" mean both "the
+  job is ours" and "these are the bytes we cleared".
+- **The database holds every writer to "ciphertext only while queued":**
+  `CHECK (status = 'queued' OR sealed_credential IS NULL)` (migration 0003).
+  `_finish` (cancelled or expired before a claim) clears it in the same update,
+  because the terminal-status trigger forbids touching the row afterwards, and
+  `upgrades.request_cancel` clears it on queued jobs at once, without changing
+  their status, since the sibling still writes `cancelled`. An `expired` job
+  that carried a credential records `failure_stage='credential'` and "its
+  credential was discarded unused" (maintainer decision).
+- **`open_sealed` treats the plaintext as untrusted.** A compromised Flask
+  chooses those bytes and the sibling is the privileged side. So: size cap
+  before decrypting, exact field set, `type(job_id) is int` (a JSON `true`
+  equals 1), job and approver matched against the row, expiry checked, and the
+  character allowlist applied again.
+- **What sealing does not do, stated in design doc §9.1:** a sealed box proves
+  nothing about who sealed it. Anyone who can write the database and knows the
+  public key can plant a credential. Binding the job id stops a blob being
+  copied onto another row, not a forgery, and a forger has to supply the
+  password themselves, so learns nothing. A compromised Flask still sees
+  passwords as they are submitted, as it always did.
+- **Both processes refuse to start on bad keys:** `create_app()` without a
+  valid public key, before it migrates anything, and the sibling when its
+  private key does not match the public one. Otherwise every job would fail
+  one at a time with a credential error that says nothing about keys.
+- **Every field holding the plaintext is `field(repr=False)`** — on
+  `sealed_credentials.Credential` and `phases.PhaseContext`. One
+  `log.debug("ctx=%r", ctx)` added while debugging would otherwise write the
+  password to journald or a CI log that outlives the phase.
 
 **`upgrade_cli.py` warns when it takes the password from
 `NETHUB_DEVICE_PASSWORD`** rather than the prompt. The var is kept because a
@@ -1412,14 +1407,8 @@ reads the same var and now carries the same warning (WS-6.1/WS-2.3) — it no
 longer connects with `AutoAddPolicy` either, so both of that script's
 `upgrade_cli.py`-mirroring gaps closed in the same change.
 
-**`verify_running` runs on the serving thread and needs its own app
-context.** Flask-SQLAlchemy's session is thread-local, so without one every
-request fails with a generic refusal that says nothing about the cause. The
-wiring in `nethub/__init__.py` does this; a test that forgot it is how it was
-found.
-
-The sibling is `python -m nethub.sibling`, reading `NETHUB_CREDENTIAL_SOCKET`
-and `NETHUB_SEARCH_DIR`. It builds a bare Flask app for SQLAlchemy's context
+The sibling is `python -m nethub.sibling`, reading `NETHUB_SEARCH_DIR`, its
+private key and `NETHUB_CREDENTIAL_PUBLIC_KEY`. It builds a bare Flask app for SQLAlchemy's context
 rather than calling `create_app()` — that would register routes and run the
 first-boot admin bootstrap, and the sibling must do neither.
 
@@ -1621,26 +1610,20 @@ Things that are refusals rather than validation niceties:
   get a message rather than an `IntegrityError` — and never two reloads.
 
 **Pre-check is the phase with no approver, and that broke the credential
-interlock once.** §9.1 has Flask cross-check the phase job's `approved_by`
-against the identity that supplied the credential — but §8.1 gives pre-check
-no gate, so its `approved_by` is null by design. A `verify_running` that
-refused a null failed *every* pre-check, and each half looked correct alone.
-The rule is "the identity that supplied it": the approver for a gated phase,
-the submitter for pre-check. Don't tighten that back to a non-null check.
+check once.** The sibling matches the identity sealed with a credential
+against the job row — but §8.1 gives pre-check no gate, so its `approved_by`
+is null by design. The socket-era check that refused a null failed *every*
+pre-check, and each half looked correct alone. The rule is "the identity that
+supplied it": the approver for a gated phase, the submitter for pre-check
+(`Sibling._supplier`). Don't tighten that back to a non-null check.
 
-**A credential release that fails its checks destroys the credential**
-(`CredentialStore.release` pops before validating). That makes replay
-worthless at the cost that a stray request forces a re-approval — acceptable
-only because the mount is what decides who can reach the socket at all.
-
-**The queued row is committed only after its credential is held.** The
-routes call `upgrades.submit`/`approve` with `commit=False` (a flush, so the
-job has an id), hold the credential, then commit (`_commit_holding`). The
-sibling claims any committed `queued` row, so committing first let it claim
-the job, find nothing and fail the run. If the commit fails the credential
-is discarded before the rollback, because the rollback frees the id for the
-next insert. `approve()` requires the approver's own `device_username` for
-the same reason `submit()` requires the submitter's, and refuses a gate past
+**The credential is sealed into the queued row in the transaction that
+creates it** (`upgrades._seal_into`; see "Sealed credentials" under
+"Dispatch"). The sibling claims any committed `queued` row, and under the
+socket a row committed before its credential was held could be claimed with
+nothing to fetch; with the ciphertext in the row that ordering cannot arise.
+`approve()` requires the approver's own `device_username` for the same reason
+`submit()` requires the submitter's, and refuses a gate past
 `gate_expires_at` even before the sibling has expired it.
 
 **Known gap, not yet decided:** `upgrade_runs.device_username_used` snapshots
@@ -1703,7 +1686,7 @@ operator could run them by hand against a fleet with nothing else running.
 Folding device work into `nethub/devices/` took that away — an accepted
 loss, not an unnoticed one.
 
-It needs **no Flask app, no sibling, no credential socket and no job rows**,
+It needs **no Flask app, no sibling, no sealed credential and no job rows**,
 because `nethub/devices/` never depended on any of them. That is why this is a
 few hundred lines rather than a parallel implementation, and it is worth
 protecting: a change that makes the device layer need the database would cost

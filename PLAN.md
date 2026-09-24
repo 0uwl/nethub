@@ -66,8 +66,8 @@ function name.
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | merged |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | merged |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | merged |
-| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | in review |
-| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | todo |
+| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | merged |
+| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | in review |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | todo |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | todo |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | todo |
@@ -584,3 +584,10 @@ a one-line description and the workstream it was found in.
   Found in WS-4, fixed on `fix/verification-credential`: `sibling.run_once`
   now runs `verify` straight after `activate` on the same credential, as
   design doc §9.1 already said it should.
+- `README.md` "Using it" said the store-drift check was a web page; it has
+  been the `flask --app nethub check-store` command since WS-2. Found and
+  fixed in WS-7.
+- The WS-4 end-to-end test changed beyond its credential fixture in WS-7:
+  its expired-credential scenario now tests a job that reaches its deadline
+  unclaimed (the 30-minute TTL it tested is gone), and a web-restart
+  scenario was added. Per the maintainer's decision recorded in WS-7.

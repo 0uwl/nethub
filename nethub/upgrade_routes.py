@@ -7,9 +7,10 @@ Thin over `nethub/upgrades.py`, the way `registry_routes.py` is over
   writes (design doc §7.3); the sibling owns everything after it. A handler
   that waited for a device would also hold the process behind the phone-home
   route (§3.2).
-- **Never persist the device credential.** It goes into the in-memory store
-  keyed by the phase job, and from there over §9.1's socket to the sibling.
-  Not into a row, not into the session, not into a log.
+- **Never keep the device credential readable.** It is sealed to the
+  sibling's public key into the job row it was collected for
+  (`upgrades._seal_into`, PLAN.md WS-7): Flask can write it and never read it
+  back. Not into the session, not into a log.
 """
 from datetime import timedelta
 
@@ -26,7 +27,6 @@ from flask_login import current_user, login_required
 
 from . import artifacts as artifact_store
 from . import upgrades
-from .credential_socket import CredentialError
 from .devices.phases import _aware
 from .extensions import db
 from .models import (
@@ -48,42 +48,6 @@ hostkeys_bp = Blueprint('hostkeys', __name__)
 #: device that has since changed hands on that address is exactly the kind of
 #: staleness a fresh scan is supposed to rule out.
 SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
-
-
-def _store():
-    return current_app.extensions['credential_store']
-
-
-def _hold(job, password):
-    """Put the credential where the sibling can fetch it exactly once."""
-    _store().hold(job.id, current_user.device_username, password,
-                  approved_by=job.approved_by or current_user.id)
-
-
-def _commit_holding(job, password):
-    """Hold the credential for a flushed job, then commit it. In that order.
-
-    The sibling claims any committed `queued` row on its next poll. Committing
-    first left a window in which it claimed the job, found no credential and
-    failed the run, and the route's cleanup then deleted rows the sibling
-    already owned. A flushed row is invisible to the sibling, so holding
-    first closes the window and a refusal is a plain rollback.
-
-    If the commit fails, the credential is discarded before the rollback. The
-    job id came from the flush, and the rollback frees it for the next insert;
-    a credential left under it would be released to someone else's job.
-    """
-    try:
-        _hold(job, password)
-    except CredentialError as exc:
-        db.session.rollback()
-        raise upgrades.RequestError(str(exc)) from None
-    try:
-        db.session.commit()
-    except Exception:
-        _store().discard(job.id)
-        db.session.rollback()
-        raise
 
 
 # -- host keys ---------------------------------------------------------------
@@ -252,17 +216,14 @@ def new_run():
     if request.method == 'POST':
         password = request.form.get('device_password', '')
         try:
-            run, job = upgrades.submit(
+            run, _job = upgrades.submit(
                 user=current_user,
                 bundle=form['bundle'],
                 hosts_raw=form['hosts'],
                 cidrs=current_app.config['DEVICE_TARGET_CIDRS'],
-                commit=False,
+                password=password,
+                public_key=current_app.extensions['credential_public_key'],
             )
-            # Pre-check has no gate but still opens a session, so the
-            # credential is collected here (§8.1's table: "none; runs on
-            # submit"). If the store refuses it the run must not exist.
-            _commit_holding(job, password)
             flash(f'Submitted run #{run.id}; pre-check is queued.', 'success')
             return redirect(url_for('upgrades.show_run', run_id=run.id))
         except upgrades.RequestError as exc:
@@ -299,11 +260,10 @@ def approve(run_id):
         flash('No such run.')
         return redirect(url_for('upgrades.list_runs'))
     try:
-        job = upgrades.approve(run=run, phase=phase, user=current_user,
-                               commit=False)
-        # The approval is what supplies the credential, so an approval whose
-        # credential is refused must not leave a queued row behind.
-        _commit_holding(job, password)
+        job = upgrades.approve(
+            run=run, phase=phase, user=current_user, password=password,
+            public_key=current_app.extensions['credential_public_key'],
+        )
         flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
@@ -330,17 +290,6 @@ def cancel(run_id):
     if run is not None:
         try:
             upgrades.request_cancel(run=run, user=current_user)
-            # A `queued` job's credential will never be fetched now, so it
-            # would otherwise sit in this worker until its TTL or a restart.
-            # `discard()` had no callers anywhere in nethub/ before this.
-            #
-            # Only `queued`: a `running` job already fetched its credential,
-            # and `release()` pops before it validates, so there is nothing
-            # left to discard. Queried here rather than returned from
-            # `request_cancel` -- the store belongs to Flask, and the service
-            # module should not grow a signature to serve it.
-            for job in UpgradePhaseJob.query.filter_by(run_id=run.id, status='queued'):
-                _store().discard(job.id)
             flash('Cancel requested. A running phase stops between hosts.', 'info')
         except upgrades.RequestError as exc:
             flash(str(exc))

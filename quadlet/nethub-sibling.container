@@ -26,23 +26,17 @@ Description=NetHub dispatch sibling (phase jobs and host-key scans)
 After=network-online.target
 Wants=network-online.target
 
-# The socket unit owns %t/nethub, so it must run before this container
-# bind-mounts that directory -- otherwise podman creates the directory itself,
-# with a mode nobody chose. Not a dependency on Flask being *up*: the sibling
-# only opens the socket when a phase actually needs a credential (connect_to()
-# returns a closure and connects lazily), and host-key scans never open it at
-# all, so the sibling stays useful across a Flask restart.
-Requires=nethub-credential.socket
-After=nethub-credential.socket
+# No dependency on the web unit being up: the two share only the database, and
+# a device credential arrives sealed in the job row (nethub/sealed_credentials.py),
+# so a web restart between an approval and its phase costs nothing. After an
+# upgrade this process waits, logging why, until the web unit has migrated the
+# database (nethub/schema.py).
 
 [Container]
 Image=localhost/nethub:latest
 ContainerName=nethub-sibling
 
-# `python -m nethub.sibling`, replacing the image's gunicorn entrypoint. The
-# entrypoint shim is skipped on purpose: it exists to hide systemd's socket-
-# activation variables from gunicorn's arbiter, and this unit is handed no
-# socket -- it connects to one by path.
+# `python -m nethub.sibling`, replacing the image's gunicorn entrypoint.
 Entrypoint=python
 Exec=-m nethub.sibling
 
@@ -63,22 +57,33 @@ UserNS=keep-id:uid=1000,gid=1000
 Volume=%h/.local/share/nethub/data:/app/data:z
 Volume=%h/.local/share/nethub/artifacts:/app/artifacts:z
 
-# The credential socket. Lowercase :z (shared), not :Z (private): systemd
-# created this socket and the label has to stay usable by more than this
-# container. Mounting the directory rather than the socket file itself means
-# a socket unit restart -- which replaces the inode -- does not leave this
-# container holding a mount of a file that no longer exists.
-Volume=%t/nethub:/run/nethub:z
-
 Environment=DATABASE_PATH=/app/data/database.db
 Environment=ARTIFACT_STORE=/app/artifacts
 
-# The two the sibling's main() requires by name; it exits immediately, with a
-# message naming both, if either is unset. NETHUB_SEARCH_DIR is the published
-# subtree the SCP push reads the image bytes from (§3.3 -- NetHub is the one
-# source), so it is ARTIFACT_STORE, not a second copy of anything.
+# Required by the sibling's main(), which exits naming it if unset.
+# NETHUB_SEARCH_DIR is the published subtree the SCP push reads the image
+# bytes from (§3.3 -- NetHub is the one source), so it is ARTIFACT_STORE, not
+# a second copy of anything.
 Environment=NETHUB_SEARCH_DIR=/app/artifacts
-Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
+
+# --- Required: the key pair (nethub/sealed_credentials.py) ---
+# Device credentials reach this process sealed in the job row, to a key pair
+# only this unit holds the private half of. Create the pair once with the
+# keygen step at the top of nethub.container. The sibling refuses to start
+# without a private key, or with one that does not match the public key.
+#
+# The public key: the same value as in nethub.container.
+#Environment=NETHUB_CREDENTIAL_PUBLIC_KEY=
+#
+# The private key, as a file mounted read-only into this container only.
+# Uppercase :Z (private label) on purpose, unlike the shared volumes above:
+# no other container should be able to read this file.
+#Volume=%h/.config/nethub/credential_private_key:/run/nethub-key/credential_private_key:ro,Z
+#Environment=NETHUB_CREDENTIAL_KEY_FILE=/run/nethub-key/credential_private_key
+#
+# Or as a systemd credential named credential_private_key instead of the two
+# lines above: see the LoadCredential= line in [Service] below. The credential
+# takes priority when both are present.
 
 # No SECRET_KEY. The sibling signs no cookies and serves no requests, and it
 # loads only nethub/shared_config.py, never the web tier's config.py. Don't
@@ -90,8 +95,8 @@ Environment=NETHUB_CREDENTIAL_SOCKET=/run/nethub/credential.sock
 # re-checks the address, and it does not -- the run's own rows are what it
 # acts on (§3.5).
 
-# Writes nothing outside /app/data and /tmp. No /run tmpfs: /run/nethub is a
-# real mount and a tmpfs over its parent would shadow it.
+# Writes nothing outside /app/data and /tmp. No /run tmpfs: /run/nethub-key is
+# a real mount and a tmpfs over its parent would shadow it.
 ReadOnly=true
 Tmpfs=/tmp
 
@@ -100,9 +105,10 @@ Restart=on-failure
 RestartSec=5
 
 # A core dump would write this process's heap to /var/lib/systemd/coredump --
-# and unlike Flask, whose exposure is a credential held from approval until
-# dispatch, this process holds the live device password for the whole of a
-# phase execution, which for a stage phase is ~15 minutes per host. Confirmed
+# and unlike Flask, which holds a device password only for the request that
+# seals it, this process holds the live password for the whole of a phase
+# execution, which for a stage phase is ~15 minutes per host, and its private
+# key for as long as it runs. Confirmed
 # to reach the container process itself (/proc/self/limits reads
 # "Max core file size 0"), not merely the podman client.
 LimitCORE=0
@@ -110,6 +116,12 @@ LimitCORE=0
 # /proc of other processes is not this container's business -- the same
 # narrowing the separate PID namespaces exist to provide.
 ProtectProc=invisible
+
+# The private key as a systemd credential, instead of the file mount in
+# [Container]. Whether Podman forwards $CREDENTIALS_DIRECTORY into the
+# container depends on its version -- confirm it before relying on this (see
+# nethub.container's "Systemd credential injection" notes).
+#LoadCredential=credential_private_key:%h/.config/nethub/credential_private_key
 
 # NoNewPrivileges= and RestrictSUIDSGID= must NOT be added here. Everything in
 # [Service] sandboxes the podman client on the host, not the container, and

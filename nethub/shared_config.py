@@ -36,6 +36,12 @@ ARTIFACT_STORE = os.getenv('ARTIFACT_STORE', os.path.join(basedir, 'instance', '
 # the two constraints on `ansible_host`, the only connection var a request may
 # supply (design doc §4.3/§8.1); the other is the fail-closed host-key check.
 # Empty means no run may be submitted -- fail closed rather than open.
+# The sibling's public key (PLAN.md WS-7, nethub/sealed_credentials.py). Flask
+# seals device credentials to it; the sibling checks its private key matches
+# it before taking work. Public, so an environment variable is fine; both
+# units set it. create_app() refuses to start without it.
+NETHUB_CREDENTIAL_PUBLIC_KEY = os.getenv('NETHUB_CREDENTIAL_PUBLIC_KEY')
+
 DEVICE_TARGET_CIDRS = [
     c.strip() for c in os.getenv('DEVICE_TARGET_CIDRS', '').split(',') if c.strip()
 ]

@@ -52,6 +52,7 @@ from .models import (
     UpgradeRun,
     UpgradeRunHost,
 )
+from .sealed_credentials import CredentialError, check_credential, seal
 
 #: Wall-clock budget per phase, as (fixed seconds, seconds per host).
 #:
@@ -253,19 +254,50 @@ def _require_device_username(user):
         )
 
 
-def submit(*, user, bundle, hosts_raw, cidrs, flash_dir='flash:', platform='iosxe',
-           commit=True):
+def _check_credential(user, password):
+    """Refuse a credential the sibling would refuse, before anything is written.
+
+    The sealing step checks both again, but by then the run's rows are
+    flushed; failing here keeps a refusal a plain message with nothing to
+    undo.
+    """
+    for what, value in (('Device username', user.device_username),
+                        ('Device password', password)):
+        try:
+            check_credential(value)
+        except CredentialError as exc:
+            raise RequestError(f'{what} refused: {exc}.') from None
+
+
+def _seal_into(job, *, user, password, public_key):
+    """Seal the supplier's credential into the flushed job row (PLAN.md WS-7).
+
+    Same transaction as the row's creation, so there is no moment at which the
+    sibling can claim a `queued` job whose credential is not there yet -- the
+    race WS-1 closed by ordering, closed here by construction. It expires with
+    the job's deadline: a credential waits exactly as long as its job may.
+    """
+    job.sealed_credential = seal(
+        public_key,
+        job_id=job.id,
+        approved_by=user.id,
+        username=user.device_username,
+        password=password,
+        expires_at=job.deadline_at,
+    )
+
+
+def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
+           flash_dir='flash:', platform='iosxe'):
     """Compile a request into a run, its host rows, and a queued pre-check.
 
     Flask writes exactly one job edge in the whole system and this is it: the
     row that arrives `queued` (§7.3). Everything after dispatch is the
-    sibling's.
-
-    `commit=False` flushes instead, so the job has an id but the sibling
-    cannot see it yet. The route uses that to hold the credential *before*
-    the row becomes claimable; see `upgrade_routes._commit_holding`.
+    sibling's. Pre-check has no gate but still opens a device session, so the
+    submitter's credential is sealed into it here (§8.1: "runs on submit").
     """
     _require_device_username(user)
+    _check_credential(user, password)
     hosts = parse_hosts(hosts_raw)
     artifact = resolve_bundle(bundle, platform=platform)
     targets = []
@@ -319,14 +351,13 @@ def submit(*, user, bundle, hosts_raw, cidrs, flash_dir='flash:', platform='iosx
         deadline_at=phase_deadline('precheck', hosts=len(run.hosts)),
     )
     db.session.add(job)
-    if commit:
-        db.session.commit()
-    else:
-        db.session.flush()
+    db.session.flush()
+    _seal_into(job, user=user, password=password, public_key=public_key)
+    db.session.commit()
     return run, job
 
 
-def approve(*, run, phase, user, commit=True):
+def approve(*, run, phase, user, password, public_key):
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
@@ -340,9 +371,8 @@ def approve(*, run, phase, user, commit=True):
     that. The constraint holds either way, so two reloads were never possible;
     without the wrapper the losing admin just got a 500.
 
-    `commit=False` flushes instead, as for `submit`. The flush is where the
-    unique constraint fires, so the duplicate-approval message comes from
-    there in both modes.
+    The approval is what supplies the credential, so it is sealed into the
+    job in the same transaction (see `_seal_into`).
     """
     if run.state != 'awaiting_approval':
         raise RequestError(f'This run is {run.state}, not waiting at a gate.')
@@ -359,6 +389,7 @@ def approve(*, run, phase, user, commit=True):
         # Flask writing the expiry edge itself (§7.3 gives that to the sibling).
         raise RequestError('This gate has expired. Submit a new run.')
     _require_device_username(user)
+    _check_credential(user, password)
     attempt = 1 + (
         UpgradePhaseJob.query.filter_by(run_id=run.id, phase=phase)
         .filter(UpgradePhaseJob.status.in_(('abandoned',)))
@@ -394,8 +425,8 @@ def approve(*, run, phase, user, commit=True):
         # message instead of a 500.
         db.session.rollback()
         raise RequestError('That phase has already been approved.') from None
-    if commit:
-        db.session.commit()
+    _seal_into(job, user=user, password=password, public_key=public_key)
+    db.session.commit()
     return job
 
 
@@ -431,5 +462,12 @@ def request_cancel(*, run, user):
         run.state = 'cancelled'
         run.awaiting_phase = None
         run.finished_at = _utcnow()
+    # A queued job will now be finished `cancelled` without being claimed, so
+    # its credential will never be opened: drop the ciphertext now rather
+    # than leave it until the sibling gets there. Not a job-status edge (the
+    # sibling still writes `cancelled`), and only `queued` rows can hold one.
+    UpgradePhaseJob.query.filter_by(run_id=run.id, status='queued').update(
+        {'sealed_credential': None}, synchronize_session='fetch'
+    )
     db.session.commit()
     return run

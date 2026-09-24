@@ -92,7 +92,7 @@ class PhaseContext:
     """
 
     device_username: str
-    #: repr=False: see the note on `credential_socket._Held`. This object is
+    #: repr=False, as on `sealed_credentials.Credential`. This object is
     #: the credential's entire lifetime container, so its repr is the most
     #: likely accidental leak in the codebase.
     device_password: str = field(repr=False)
