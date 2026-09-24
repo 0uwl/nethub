@@ -2640,7 +2640,7 @@ same shape minus the three states it has no use for:
 | `queued` | `running` | sibling, conditional claim (§9.2) |
 | `queued` | `cancelled` | sibling, seeing the cancel column |
 | `queued` | `expired` | sibling, past `deadline_at` |
-| `running` | `succeeded` / `failed` | sibling, on phase completion |
+| `running` | `succeeded` / `failed` | sibling, on phase completion; `failed` also when the credential fetch fails or its own code raises |
 | `running` | `timed_out` | sibling, at `deadline_at` |
 | `running` | `cancelled` | sibling, between hosts |
 | `running` | `abandoned` | sibling's startup sweep, foreign `runner_instance_id` |
@@ -2653,29 +2653,34 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | from | to | actor |
 | --- | --- | --- |
 | — | `pre_checking` | Flask, on submit (pre-check needs no gate) |
-| `pre_checking` | `awaiting_approval` | sibling, on phase completion; sets `awaiting_phase` |
-| `pre_checking` | `failed` | sibling, on the pre-check phase job reaching a failed terminal state |
-| `pre_checking` | `cancelled` | Flask, honoring a cancel requested before any gate exists |
+| `pre_checking` | `awaiting_approval` | sibling, on pre-check succeeding; sets `awaiting_phase` and `gate_expires_at` |
+| `pre_checking` / `running` | `failed` | sibling: a phase reaching a failed terminal state, a credential it could not fetch, or an unexpected error in its own code |
+| `pre_checking` / `running` | `failed` | sibling's startup sweep, abandoning a phase nobody approves (`precheck`, `verify`) |
+| `pre_checking` / `running` | `cancelled` | sibling, seeing the cancel column before claiming the job or between hosts |
+| `pre_checking` / `running` | `expired` | sibling, finding the queued job past its `deadline_at` |
 | `awaiting_approval` | `running` | Flask, on approval (writes the phase job row) |
-| `running` | `awaiting_approval` | sibling, at the next gate |
-| `running` | `failed` | sibling, on a phase reaching a failed terminal state |
-| `awaiting_approval` | `expired` | sweep, past `gate_expires_at` |
+| `awaiting_approval` | `expired` | sibling, past `gate_expires_at` (checked every loop) |
 | `awaiting_approval` | `cancelled` / `completed` | Flask: an operator cancels, or declines the optional cleanup gate |
-| `running` | `cancelled` | sibling, honoring the cancel column |
-| `running` | `completed` | sibling, after verify with no cleanup pending |
+| `running` | `awaiting_approval` | sibling, at the next gate; or its startup sweep, parking an abandoned `stage`/`activate`/`cleanup` for re-approval |
+| `running` | `completed` | sibling, after cleanup succeeds |
 
-**`pre_checking` needed its own exit edges, not just its own entry.** It
-was given a literal distinct from `running` specifically because
-pre-check needs no gate — but that split meant `running`'s
-failure/cancel edges didn't automatically apply to it, and nothing else
-did either. A pre-check phase job that times out, crashes to
-`abandoned`, or is cancelled before any gate exists left the *run* row
-with no documented transition out of `pre_checking` at all: not
-`running`, so `running → failed` doesn't fire; not `awaiting_approval`,
-so the sweep's TTL doesn't fire either. The two edges above close it —
-a run can no longer get stuck at `pre_checking` permanently, which also
-means it no longer escapes §7.4's purge story for a state that never
-resolves.
+`activate` succeeding queues `verify` directly, so the run stays `running`
+across that boundary. Flask refuses an approval past `gate_expires_at` even
+if the sibling has not yet run its check, so the TTL holds while the sibling
+is down; it does not write the `expired` edge itself.
+
+**The job row is committed only once its credential is held.** Flask
+flushes the new `queued` row to get its id, puts the credential in the
+store under that id, and only then commits. The sibling can only see
+committed rows, so it cannot claim a job whose credential is not there
+yet. If the commit fails, the credential is discarded before the
+rollback, because the rollback frees that id for the next insert.
+
+**`pre_checking` has the same exits as `running`.** It is a distinct
+literal only because pre-check needs no gate. The table lists the two
+states together wherever the sibling treats them alike, so a pre-check
+that fails, is abandoned, cancelled or expires has a documented way out,
+and a run cannot get stuck at `pre_checking` and escape §7.4's purge.
 
 Declining cleanup is an edge rather than an absence, which is what stops
 "awaiting cleanup approval" and "finished, cleanup declined" from being

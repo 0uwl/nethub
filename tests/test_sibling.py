@@ -374,6 +374,13 @@ class TestAbandonedPhaseCanBeReApproved:
     approves.
     """
 
+    @pytest.fixture(autouse=True)
+    def one_clock(self, monkeypatch):
+        """The sweep sets `gate_expires_at` from the sibling's fixed NOW, and
+        `approve()` refuses a gate past it by the wall clock. Put both on NOW."""
+        from nethub import upgrades
+        monkeypatch.setattr(upgrades, "_utcnow", lambda: NOW)
+
     def abandon(self, app, run_id, phase):
         job = queue(run_id, phase=phase)
         job.status, job.runner_instance_id = "running", "a-dead-instance"
@@ -557,3 +564,120 @@ class TestHostKeyScanDispatch:
                                    runner_instance_id=worker.runner_instance_id)
             worker.sweep()
             assert db.session.get(HostKeyScan, scan.id).status == "running"
+
+
+class TestUnexpectedErrorDoesNotStrandTheRow:
+    """WS-1.3: an exception that escaped `run_once()` after `claim()` left the
+    job `running` under this instance's own id, which `sweep()` never matches,
+    so the run sat `running` until the sibling restarted."""
+
+    def test_a_raising_phase_fails_the_job_and_the_run(self, app, run, monkeypatch):
+        def boom(job, ctx, now):
+            raise RuntimeError("password=s3cret leaked into a message")
+        monkeypatch.setattr(phases, "execute_phase", boom)
+        with app.app_context():
+            job = queue(run)
+            assert make_sibling().tick() is None
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert row.status == "failed"
+            assert row.failure_stage == "connect"
+            assert row.finished_at is not None
+            assert "s3cret" not in row.error_summary
+            assert db.session.get(UpgradeRun, run).state == "failed"
+
+    def test_a_raising_scan_is_failed_too(self, app, run, monkeypatch):
+        def boom(host, **kw):
+            raise RuntimeError("not a DeviceConnectionError")
+        monkeypatch.setattr(connection, "scan_host_key", boom)
+        with app.app_context():
+            scan = HostKeyScan(ansible_host="192.0.2.10", status="queued",
+                               requested_by=db.session.get(UpgradeRun, run).submitted_by,
+                               created_at=NOW)
+            db.session.add(scan)
+            db.session.commit()
+            assert make_sibling().tick() is None
+            row = db.session.get(HostKeyScan, scan.id)
+            assert row.status == "failed" and row.finished_at is not None
+
+    def test_another_instances_running_row_is_not_touched(self, app, run):
+        """That row may be live under a sibling we cannot see; it is the
+        startup sweep's to judge, not ours."""
+        with app.app_context():
+            job = queue(run)
+            job.status, job.runner_instance_id = "running", "someone-else"
+            db.session.commit()
+            assert make_sibling().recover_own() == 0
+            assert db.session.get(UpgradePhaseJob, job.id).status == "running"
+
+
+class TestGateExpiry:
+    """WS-1.4: `gate_expires_at` was written in five places and read in none,
+    so a run parked at a gate stayed approvable forever."""
+
+    def park(self, run_id, expires):
+        row = db.session.get(UpgradeRun, run_id)
+        row.state, row.awaiting_phase, row.gate_expires_at = (
+            "awaiting_approval", "stage", expires)
+        db.session.commit()
+
+    def test_a_gate_past_its_ttl_expires_the_run(self, app, run):
+        with app.app_context():
+            self.park(run, NOW - timedelta(seconds=1))
+            assert make_sibling().expire_gates() == 1
+            row = db.session.get(UpgradeRun, run)
+            assert row.state == "expired"
+            assert row.awaiting_phase is None
+            assert row.finished_at is not None
+
+    def test_a_gate_inside_its_ttl_is_left_alone(self, app, run):
+        with app.app_context():
+            self.park(run, NOW + timedelta(hours=1))
+            assert make_sibling().expire_gates() == 0
+            assert db.session.get(UpgradeRun, run).state == "awaiting_approval"
+
+    def test_a_run_elsewhere_is_never_expired_by_a_stale_column(self, app, run):
+        """Only `awaiting_approval` has a gate to expire at."""
+        with app.app_context():
+            row = db.session.get(UpgradeRun, run)
+            row.state, row.gate_expires_at = "running", NOW - timedelta(days=1)
+            db.session.commit()
+            assert make_sibling().expire_gates() == 0
+            assert db.session.get(UpgradeRun, run).state == "running"
+
+    def test_the_loop_runs_the_expiry(self, app, run):
+        with app.app_context():
+            self.park(run, NOW - timedelta(seconds=1))
+            make_sibling().tick()
+            assert db.session.get(UpgradeRun, run).state == "expired"
+
+    def test_a_sweep_parked_gate_expires_on_the_same_ttl(self, app, run):
+        """`_abandon_run` sets the TTL from the sibling's clock; a week on, the
+        same sibling expires it."""
+        with app.app_context():
+            job = queue(run, phase="stage")
+            job.status, job.runner_instance_id = "running", "a-dead-instance"
+            db.session.commit()
+            make_sibling().sweep()
+            assert db.session.get(UpgradeRun, run).state == "awaiting_approval"
+            later = make_sibling(now=lambda: NOW + S.DEFAULT_GATE_TTL)
+            assert later.expire_gates() == 1
+
+    def test_an_approval_that_lands_first_is_not_overwritten(self, app, run, monkeypatch):
+        """The expiry is conditional on the run still being at the gate."""
+        with app.app_context():
+            self.park(run, NOW - timedelta(seconds=1))
+            real_update = db.session.query(UpgradeRun).__class__.update
+
+            def approve_first(query, values, **kw):
+                # Flask commits an approval between our read and our write.
+                db.session.execute(
+                    UpgradeRun.__table__.update()
+                    .where(UpgradeRun.id == run).values(state="running"))
+                return real_update(query, values, **kw)
+
+            monkeypatch.setattr(db.session.query(UpgradeRun).__class__,
+                                "update", approve_first)
+            assert make_sibling().expire_gates() == 0
+            monkeypatch.undo()
+            db.session.expire_all()
+            assert db.session.get(UpgradeRun, run).state == "running"

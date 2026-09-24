@@ -386,11 +386,13 @@ class TestApproveRace:
     def test_a_concurrent_duplicate_approval_is_a_message_not_a_500(
         self, app, user, confirmed, monkeypatch
     ):
-        """Forces the commit to raise the way a real race would.
+        """Forces the flush to raise the way a real race would.
 
         The sequential path is already covered (the check catches it); this is
         the case the check cannot see, which only became reachable when the
-        app started running more than one thread.
+        app started running more than one thread. The flush, not the commit,
+        is where the constraint fires: the route holds the credential between
+        the two.
         """
         from sqlalchemy.exc import IntegrityError
 
@@ -399,16 +401,16 @@ class TestApproveRace:
             run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
             db.session.commit()
 
-            real = db.session.commit
+            real = db.session.flush
             calls = []
 
-            def once_failing():
+            def once_failing(*a, **kw):
                 calls.append(1)
                 if len(calls) == 1:
                     raise IntegrityError('forced', None, Exception('forced'))
-                return real()
+                return real(*a, **kw)
 
-            monkeypatch.setattr(db.session, 'commit', once_failing)
+            monkeypatch.setattr(db.session, 'flush', once_failing)
             with pytest.raises(upgrades.RequestError, match='already been approved'):
                 upgrades.approve(run=run, phase='activate',
                                  user=db.session.get(User, user))
@@ -678,3 +680,136 @@ class TestHostkeyAudit:
             assert DeviceHostKeyAudit.query.filter_by(
                 ansible_host='192.0.2.10'
             ).count() == 1
+
+
+class TestCredentialHeldBeforeCommit:
+    """WS-1.1: the queued row was committed before the credential was held.
+
+    The sibling polls every 5s and claims any committed `queued` row, so it
+    could take the job in the gap, find no credential and fail the run. The
+    hook below plays the sibling at the worst moment: straight after the
+    commit that makes the job claimable.
+    """
+
+    def login(self, client):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+
+    def sibling_polls_after_commit(self, monkeypatch, app, phase, approver):
+        from nethub.credential_socket import CredentialError
+
+        store = app.extensions['credential_store']
+        real = db.session.commit
+        seen = []
+
+        def commit_then_poll():
+            real()
+            job = UpgradePhaseJob.query.filter_by(phase=phase, status='queued').first()
+            if job is not None and not seen:
+                try:
+                    seen.append(store.release(job.id, approver))
+                except CredentialError as exc:
+                    seen.append(exc)
+
+        monkeypatch.setattr(db.session, 'commit', commit_then_poll)
+        return seen
+
+    def test_a_submitted_precheck_is_claimable_only_with_its_credential(
+        self, app, client, user, confirmed, monkeypatch
+    ):
+        self.login(client)
+        seen = self.sibling_polls_after_commit(monkeypatch, app, 'precheck', user)
+        client.post('/upgrades/new', data={
+            'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
+            'device_password': PASSWORD,
+        })
+        assert seen == [('jsmith', PASSWORD)]
+
+    def test_an_approved_phase_is_claimable_only_with_its_credential(
+        self, app, client, user, confirmed, monkeypatch
+    ):
+        self.login(client)
+        client.post('/upgrades/new', data={
+            'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
+            'device_password': PASSWORD,
+        })
+        with app.app_context():
+            run = UpgradeRun.query.one()
+            run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
+            run_id = run.id
+            db.session.commit()
+        seen = self.sibling_polls_after_commit(monkeypatch, app, 'stage', user)
+        client.post(f'/upgrades/{run_id}/approve',
+                    data={'phase': 'stage', 'device_password': PASSWORD})
+        assert seen == [('jsmith', PASSWORD)]
+
+    def test_a_refused_credential_leaves_no_rows(self, app, client, user, confirmed):
+        """A rollback now, where it used to be a delete of rows the sibling
+        might already have claimed."""
+        self.login(client)
+        client.post('/upgrades/new', data={
+            'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
+            'device_password': '',
+        })
+        with app.app_context():
+            assert UpgradeRun.query.count() == 0
+            assert UpgradePhaseJob.query.count() == 0
+        assert len(app.extensions['credential_store']) == 0
+
+    def test_a_failed_commit_discards_the_held_credential(
+        self, app, client, user, confirmed, monkeypatch
+    ):
+        """The job id came from a flush the rollback undoes, so the next insert
+        can reuse it. A credential left under it would go to that job."""
+        from sqlalchemy.exc import OperationalError
+
+        self.login(client)
+
+        def failing_commit():
+            raise OperationalError('forced', None, Exception('database is locked'))
+
+        monkeypatch.setattr(db.session, 'commit', failing_commit)
+        with pytest.raises(OperationalError):
+            client.post('/upgrades/new', data={
+                'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
+                'device_password': PASSWORD,
+            })
+        monkeypatch.undo()
+        assert len(app.extensions['credential_store']) == 0
+        with app.app_context():
+            assert UpgradeRun.query.count() == 0
+
+
+class TestApproverChecks:
+    def park(self, run, phase='stage'):
+        run.state, run.awaiting_phase = 'awaiting_approval', phase
+        db.session.commit()
+
+    def test_an_approver_without_a_device_username_is_refused(
+        self, app, user, confirmed
+    ):
+        """WS-1.2: the route used to hold `None` as the username, and the
+        sibling refused it as malformed after the gate had been spent."""
+        with app.app_context():
+            run, _ = submit(user)
+            self.park(run)
+            bob = User(username='bob')
+            bob.set_password('hunter2hunter2')
+            db.session.add(bob)
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match='device username is not set'):
+                upgrades.approve(run=run, phase='stage', user=bob)
+            assert UpgradePhaseJob.query.filter_by(phase='stage').count() == 0
+
+    def test_an_expired_gate_is_refused_even_before_the_sibling_sees_it(
+        self, app, user, confirmed
+    ):
+        """WS-1.4: the TTL holds while the sibling is down. Flask refuses; it
+        does not write the `expired` edge, which is the sibling's (§7.3)."""
+        with app.app_context():
+            run, _ = submit(user)
+            run.gate_expires_at = upgrades._utcnow() - timedelta(seconds=1)
+            self.park(run)
+            with pytest.raises(upgrades.RequestError, match='expired'):
+                upgrades.approve(run=run, phase='stage',
+                                 user=db.session.get(User, user))
+            assert db.session.get(UpgradeRun, run.id).state == 'awaiting_approval'
