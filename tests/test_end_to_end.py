@@ -414,58 +414,6 @@ def state(app, run_id):
 # The scenarios
 # ---------------------------------------------------------------------------
 
-#: A real bug this test found, left unfixed because WS-4 changes no behaviour.
-#: Strict, so these start failing the moment the bug is fixed and the marker
-#: has to come off with the fix.
-VERIFY_HAS_NO_CREDENTIAL = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "verify never gets a credential: the sibling queues it after activate "
-        "with no approval, and a credential is held only at submit (pre-check) "
-        "and at approval. It fails with failure_stage='credential' right after "
-        "the switch was upgraded, so no run reaches cleanup. PLAN.md, "
-        "'Found while working'."
-    ),
-)
-
-
-class TestThroughActivate:
-    """Everything up to the bug above, which does pass today."""
-
-    def test_precheck_stage_and_activate_upgrade_the_switch(
-        self, app, web, work, switch, submitted
-    ):
-        run_id = submitted
-
-        assert work() == ["succeeded"]
-        assert state(app, run_id)["run"] == ("awaiting_approval", "stage")
-
-        approve(web, run_id, "stage")
-        assert work() == ["succeeded"]
-        assert switch.flash[IMAGE] == IMAGE_BYTES
-        assert switch.scp_server is False, "the SCP server was restored"
-
-        approve(web, run_id, "activate")
-        # Activate, then verify (queued with no gate). Verify's outcome is the
-        # xfail above; only activate's is asserted here.
-        assert work()[0] == "succeeded"
-        assert switch.version == TARGET
-        assert state(app, run_id)["jobs"][:3] == [
-            ("precheck", "succeeded"), ("stage", "succeeded"), ("activate", "succeeded"),
-        ]
-        with app.app_context():
-            stage = UpgradeHostPhaseResult.query.filter_by(run_id=run_id, phase="stage").one()
-            assert stage.scp_restore_confirmed is True
-        assert switch.saved_with_scp == [False], "write memory never saved the SCP server on"
-        assert set(switch.logins) == {(DEVICE_USER, DEVICE_PASS)}
-        assert switch.unexpected == []
-
-        path = Path(app.config["SQLALCHEMY_DATABASE_URI"].removeprefix("sqlite:///"))
-        on_disk = b"".join(p.read_bytes() for p in path.parent.glob(path.name + "*"))
-        assert on_disk and DEVICE_PASS.encode() not in on_disk
-
-
-@VERIFY_HAS_NO_CREDENTIAL
 class TestCleanRun:
     def test_every_phase_runs_and_the_run_completes(
         self, app, web, work, switch, submitted, credential_channel
@@ -483,7 +431,9 @@ class TestCleanRun:
         assert switch.scp_server is False, "the SCP server was restored"
 
         approve(web, run_id, "activate")
-        assert work() == ["succeeded", "succeeded"], "activate, then verify with no gate"
+        # One pass: verify has no gate and runs straight after activate, on the
+        # credential activate's approval supplied. Nobody holds one for it.
+        assert work() == ["succeeded"]
         assert state(app, run_id)["run"] == ("awaiting_approval", "cleanup")
         assert switch.version == TARGET
 

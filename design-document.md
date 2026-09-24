@@ -868,7 +868,13 @@ because §8.1 lets a run park at an approval gate for days, and "held for
 the life of the run" would mean a plaintext password resident in some
 process's memory across a weekend. So it is collected with each approval
 and dropped when the execution that approval released reaches a terminal
-state. §4.3.1 covers why push needs no second credential with a lifetime
+state. The one execution with no approval of its own is `verify`, which
+§8.1 runs on completion of `activate`: the sibling runs it straight after
+`activate` on the credential already in hand and drops it when `verify`
+ends, so approving the reload releases both (`sibling.run_once`). Nothing
+is ever held for `verify` separately, so if the sibling dies between the
+two, the restarted one fails `verify` with `failure_stage='credential'`
+rather than finding a password waiting. §4.3.1 covers why push needs no second credential with a lifetime
 of its own; §9.1–§9.2 cover how this one crosses from the browser to the
 sibling without touching disk, and what that costs the operator.
 
@@ -3003,7 +3009,7 @@ become approval gates in the UI between them:
 | pre-check | read-only | none; runs on submit |
 | stage | writes flash, non-disruptive | approve: copy image |
 | activate | reload, traffic loss | approve: reload |
-| verify | read-only | none; runs on completion |
+| verify | read-only | none; runs on completion, on activate's credential |
 | cleanup | removes inactive packages | approve: cleanup |
 
 An approval is a row rather than a keystroke, which is the point of
