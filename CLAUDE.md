@@ -152,6 +152,8 @@ python -m nethub.sibling           # the dispatcher; needs NETHUB_SEARCH_DIR, it
                                     # Flask process. NOTHING IS DISPATCHED WITHOUT IT:
                                     # scans and phase jobs sit at `queued` forever, with no
                                     # staleness story -- sweep() only reclaims `running`.
+                                    # Optional PHASE_CONCURRENCY (default 4): hosts per phase
+                                    # at once; activate is always one.
 
 python -m nethub.upgrade_cli --scan <host>          # the manual escape hatch: print a
 python -m nethub.upgrade_cli --host <host> --user <name> \
@@ -362,6 +364,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: the SCP push addresses it by filename. Usually a large mounted volume. |
 | `NETHUB_CREDENTIAL_PUBLIC_KEY` | none — required (both units) | The sibling's public key, base64. Flask seals device credentials to it (`nethub/sealed_credentials.py`), and `create_app()` refuses to start without a valid one, before migrating. The sibling checks its private key matches it and refuses to start otherwise. Public, so an env var is fine. Printed by `python -m nethub.sealed_credentials keygen`. |
 | `NETHUB_CREDENTIAL_KEY_FILE` | none (sibling unit only) | Path to the sibling's private key file, mounted read-only into the sibling container only. A systemd credential named `credential_private_key` takes priority. Never the key itself in an env var: `/proc/<pid>/environ` is readable and every child inherits it. |
+| `PHASE_CONCURRENCY` | `4` (sibling unit only) | Hosts pre-check, stage, verify and cleanup run at once. Activate always runs one (`phases.SERIAL_PHASES`). The sibling refuses to start on anything but a whole number ≥ 1. Stage is device-bound at ~1.4 MB/s per switch, so the cap protects NetHub's link to a narrow-link site rather than NetHub itself. |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
 | `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. An oversize request gets a real `413` page (`nethub/__init__.py`'s `too_large_error`) stating the configured limit, not Werkzeug's bare default (WS-5.6). |
@@ -663,8 +666,8 @@ Five things in §7.3 are easy to get wrong:
   vocabulary and no `failure_stage`.
 - **Cancel is a column the sibling polls** (`cancel_requested_at`), not a
   signal or a kill — §9's rule that the job row is the only control
-  channel is what forces that. Checked between hosts and at phase
-  boundaries only. `abandoned` is for crashes; `cancelled` and `expired`
+  channel is what forces that. Checked before each host starts and at
+  phase boundaries only; hosts already running finish. `abandoned` is for crashes; `cancelled` and `expired`
   are for humans and TTLs, and merging them costs the word its
   diagnostic value.
 - **The sweep keys on `runner_instance_id`** (a UUID minted per sibling
@@ -673,10 +676,11 @@ Five things in §7.3 are easy to get wrong:
 - **Nothing renders "stalled" yet.** The sweep lives in the sibling so it
   can't fire against a healthy run, which means a sibling that dies and
   stays dead is swept by nobody. The design answer is for Flask to read
-  `heartbeat_at` and show "stalled" without changing the row, but today
-  the run page only prints the raw timestamp, and the sibling updates it
-  only between hosts, so a healthy 15-minute host would look stalled
-  anyway (PLAN.md WS-9 and WS-11 build both halves).
+  `heartbeat_at` and show "stalled" without changing the row. The sibling
+  half is built (WS-9): a running phase writes `heartbeat_at` every
+  `phases.HEARTBEAT_INTERVAL` (30 s) while its hosts are in flight, not
+  only between hosts. The Flask half is not: the run page only prints the
+  raw timestamp (PLAN.md WS-11).
 - **An `abandoned` device-touching phase needs a fresh approval**, not an
   auto-retry — the approval is what supplies the credential and names the
   human. The retry is a new row with an incremented `attempt`.
@@ -953,8 +957,8 @@ migration deleted outright. The five modules:
 - `connection.py` — the only way any NetHub process opens a device session.
 - `transfer.py` — `stage_image()` plus the two transport adapters.
 - `install.py` — the activate/reload/verify/cleanup half.
-- `phases.py` — the per-host loop, the exception→`failure_stage` mapping, and
-  the rows.
+- `phases.py` — the per-host driver (hosts in parallel, WS-9), the
+  exception→`failure_stage` mapping, and the rows.
 
 `nethub/sibling.py` dispatches them and `nethub/upgrade_routes.py` creates the
 rows they work from.
@@ -1251,9 +1255,43 @@ without one (every foreign exception) contributes its type name and
 nothing more. There is a test that raises a
 `RuntimeError` containing the password and asserts it reaches no column.
 
-**Cancel and the deadline are checked between hosts, never mid-host** — there
-is no safe place to stop inside an activation, and polling more finely would
-not create one. **Be precise about what that means the deadline bounds**: not
+**Hosts run in parallel within a phase; phases do not (PLAN.md WS-9).**
+`phases.execute_phase` hands hosts to a `ThreadPoolExecutor` of
+`PHASE_CONCURRENCY` workers (sibling env var, default 4, `Sibling.phase_concurrency`);
+activate is in `phases.SERIAL_PHASES` and gets one worker, through the same
+code. The sibling still runs one phase execution at a time. What keeps this
+safe, each pinned by a test in `tests/test_phases.py`:
+
+- **Workers do device I/O only and never touch `db.session`.** They have no
+  app context, and an ORM object read after a commit reloads itself. The
+  main thread copies each host into a frozen `phases.HostTarget` (plain
+  values plus the pinned `HostKey`) and writes every row. `pinned_key`
+  queries the database, so it runs in `HostTarget.of` on the main thread,
+  and `default_connect` uses the pin the target carries — activate's
+  reconnect after the reload happens inside its worker. A fake `connect`
+  (the end-to-end test's `Sibling.connect`) receives a `HostTarget` too.
+  `test_workers_never_touch_the_database` fails if any SQL runs off the
+  main thread.
+- **`phases.LoginGate` keeps a wrong password to one login.** The first host
+  to reach its login goes ahead and the rest wait; accepted opens the gate,
+  refused shuts it (waiters become `not_attempted`), and an unreachable
+  host or host-key mismatch lets the next waiter try, since nothing was
+  learned about the password. Without it, WS-8's stop-on-credential rule
+  would still cost one refused login per host in flight.
+- **The main thread ticks every `HEARTBEAT_INTERVAL` while hosts run:** it
+  writes `heartbeat_at`, and calls `on_tick`, which the sibling uses to run
+  a queued host-key scan (`Sibling._between_hosts`) so a scan does not wait
+  behind an hour-long stage. A scan that raises there fails only itself;
+  letting it out would reach `tick()`'s `recover_own()` and fail the phase.
+- **The pool is closed before `execute_phase` returns**, so no worker
+  outlives the phase or the password `run_once` clears afterwards, and an
+  exception reaching `recover_own()` never leaves a worker running.
+
+**Cancel and the deadline stop further hosts from starting, never a host
+mid-flight** — there is no safe place to stop inside an activation, and
+polling more finely would not create one. Hosts already running finish and
+are recorded, up to `PHASE_CONCURRENCY` of them mid-transfer, each reaching
+its own SCP-restore `finally:`. **Be precise about what that means the deadline bounds**: not
 a single wedged device, which still burns `TRANSFER_READ_TIMEOUT` (7200s) with
 only that timeout above it, but the **wave** — a 40-host stage that would
 otherwise occupy the sibling's single FIFO queue with no limit of any kind.
@@ -1264,7 +1302,10 @@ unreachable states and both existing deadline tests set the column by hand —
 green over inert machinery. The budgets are derived from the hardware timings
 in "Device layer" times a safety factor of 2, and they are a first cut from
 *single-device* measurements: re-derive them from a real multi-host wave when
-there is one rather than trusting the arithmetic.
+there is one rather than trusting the arithmetic. They still assume hosts run
+one at a time, which is exact for activate and loose by up to the concurrency
+for the rest, on purpose: dividing by `PHASE_CONCURRENCY` would tie a deadline
+Flask writes at submit to a sibling setting that can change before the job runs.
 
 **`phase_activate` owns the reconnect**, not `phase_verify`: a device that
 never returns is a `reload` failure, a different `failure_stage` and a
@@ -1325,7 +1366,8 @@ Four things hold this together:
   credential` ends the wave, and the hosts it did not reach get a
   `not_attempted` row and `failed`, so they are retryable. Every host gets
   the same password, so going on would only add failed logins toward the
-  AAA server's lockout. Don't make the loop continue past it.
+  AAA server's lockout. Don't make the loop continue past it, and don't let
+  hosts in flight log in around it: that is `LoginGate`'s job (see above).
 - **Attempt numbers are `1 + max`**, not `1 + count(abandoned)`, so an
   abandoned attempt and a retry share one rule, and `UNIQUE(run_id, phase,
   attempt)` still holds. An abandoned retry of `precheck` or `verify`, which
@@ -1440,7 +1482,8 @@ longer connects with `AutoAddPolicy` either, so both of that script's
 `upgrade_cli.py`-mirroring gaps closed in the same change.
 
 The sibling is `python -m nethub.sibling`, reading `NETHUB_SEARCH_DIR`, its
-private key and `NETHUB_CREDENTIAL_PUBLIC_KEY`. It builds a bare Flask app for SQLAlchemy's context
+private key, `NETHUB_CREDENTIAL_PUBLIC_KEY` and the optional `PHASE_CONCURRENCY`
+(refused at startup unless a whole number of at least 1). It builds a bare Flask app for SQLAlchemy's context
 rather than calling `create_app()` — that would register routes and run the
 first-boot admin bootstrap, and the sibling must do neither.
 
@@ -1679,9 +1722,9 @@ same `upgrades.check_target()` the submit path uses, inserts a `queued`
 `host_key_scans` row, and redirects to `GET /hostkeys/scan/<id>` — a plain
 "reload to check" result page, since this app has no client-side polling
 anywhere else. The sibling's dispatch loop checks for a queued scan *before*
-a queued phase job on every iteration (`sibling.py`'s `main()`): an admin
-watching a confirm screen shouldn't queue behind a phase job that might be a
-15-minute stage already in flight. `confirm_hostkey` takes a `scan_id`
+a queued phase job on every iteration (`Sibling.tick()`), and a phase that is
+already running takes one on each heartbeat tick (WS-9): an admin watching a
+confirm screen shouldn't queue behind a stage that may run for an hour. `confirm_hostkey` takes a `scan_id`
 rather than raw `key_type`/`fingerprint_sha256` form fields — those two, and
 the address, now come from the referenced `host_key_scans` row, never from
 the request body, and the route refuses unless the scan `succeeded`, was

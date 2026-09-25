@@ -63,8 +63,8 @@ from .sealed_credentials import CredentialError, check_credential, seal
 #: execution had no wall-clock bound at all.
 #:
 #: Be precise about what this does and does not bound. The deadline is checked
-#: **between hosts**, never mid-host (§7.3 -- there is no safe place to stop
-#: inside an activation), so it does *not* rescue a single wedged device: one
+#: before each host starts, never mid-host (§7.3 -- there is no safe place to
+#: stop inside an activation), so it does *not* rescue a single wedged device: one
 #: host that answers SSH and never finishes its SCP put still burns
 #: `TRANSFER_READ_TIMEOUT`, which is 7200s, and that timeout is the only thing
 #: bounding it. What the deadline bounds is the **wave** -- a 40-host stage
@@ -83,6 +83,14 @@ from .sealed_credentials import CredentialError, check_credential, seal
 #:   cleanup   `install remove inactive` ~5s
 #:   precheck  three reads
 #:   verify    one read after the reload
+#:
+#: The per-host term assumes hosts run one at a time, and stays that way now
+#: that every phase but activate runs `PHASE_CONCURRENCY` hosts at once
+#: (PLAN.md WS-9). Activate is still serial, so for it the sum is exact. For
+#: the others it is an upper bound, loose by up to the concurrency, which is
+#: the direction this budget is meant to err in. Dividing by the concurrency
+#: would tie a deadline Flask writes at submit to a sibling setting that can
+#: change before the job runs, and would be too tight if it were lowered.
 PHASE_BUDGET_SECONDS = {
     'precheck': (300, 120),
     'stage': (600, 300),
@@ -109,8 +117,9 @@ STAGE_SECONDS_PER_MB = 1.3
 def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
     """When a phase execution stops being allowed to run.
 
-    Scales with host count because a phase walks hosts one at a time, and --
-    for `stage` only -- with image size, which is the term that actually
+    Scales with host count as if hosts ran one at a time (see
+    `PHASE_BUDGET_SECONDS` for why, now that most phases do not), and -- for
+    `stage` only -- with image size, which is the term that actually
     dominates. Returns an aware datetime; `phases._aware()` and
     `sibling._aware()` exist because SQLite hands these back naive.
     """

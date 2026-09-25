@@ -66,6 +66,13 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # a second copy of anything.
 Environment=NETHUB_SEARCH_DIR=/app/artifacts
 
+# Optional. How many hosts pre-check, stage, verify and cleanup run at once
+# (default 4). Activate reloads switches and always runs one at a time. Stage
+# is device-bound at ~1.4 MB/s per switch, so four at once cost NetHub's own
+# link little; lower it for a site behind a narrow link. The sibling refuses
+# to start on anything but a whole number of at least 1.
+#Environment=PHASE_CONCURRENCY=4
+
 # --- Required: the key pair (nethub/sealed_credentials.py) ---
 # Device credentials reach this process sealed in the job row, to a key pair
 # only this unit holds the private half of. Create the pair once with the
