@@ -570,3 +570,125 @@ class TestWebRestart:
         assert work() == ["succeeded"]
         assert state(app, submitted)["run"] == ("awaiting_approval", "activate")
         assert switch.flash[IMAGE] == IMAGE_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Two switches: one host failing a phase (PLAN.md WS-8)
+# ---------------------------------------------------------------------------
+
+ADDRESS2 = "192.0.2.11"
+HOSTNAME2 = "sw02"
+
+
+class Fleet:
+    """Two `FakeSwitch`es behind one `connect`, picked by address."""
+
+    def __init__(self):
+        self.switches = {ADDRESS: FakeSwitch(), ADDRESS2: FakeSwitch()}
+
+    def __getitem__(self, address):
+        return self.switches[address]
+
+    def scan(self, host: str) -> connection.HostKey:
+        return self.switches[host].key
+
+    def connect(self, host: UpgradeRunHost, username: str, password: str):
+        return self.switches[host.ansible_host].connect(host, username, password)
+
+
+class TestOneHostFailing:
+    @pytest.fixture
+    def switch(self, monkeypatch):
+        fleet = Fleet()
+        monkeypatch.setattr(connection, "scan_host_key", fleet.scan)
+        monkeypatch.setattr(transfer, "_scp_put", _scp_put)
+        return fleet
+
+    @pytest.fixture
+    def run_id(self, web, work):
+        for address in (ADDRESS, ADDRESS2):
+            scan_id = _location_id(web.post("/hostkeys/scan", data={"address": address}))
+            assert work() == ["succeeded"]
+            web.post("/hostkeys/confirm", data={"scan_id": str(scan_id)})
+        publish_image(web)
+        run_id = _location_id(web.post("/upgrades/new", data={
+            "bundle": BUNDLE,
+            "hosts": f"{HOSTNAME}, {ADDRESS}\n{HOSTNAME2}, {ADDRESS2}",
+            "device_password": DEVICE_PASS,
+        }))
+        assert work() == ["succeeded"]
+        return run_id
+
+    @staticmethod
+    def hosts(app, run_id):
+        with app.app_context():
+            return {h.hostname: h.state for h in db.session.get(UpgradeRun, run_id).hosts}
+
+    def test_a_host_that_failed_stage_is_retried_and_the_run_completes(
+        self, app, web, work, switch, run_id, credential_channel
+    ):
+        switch[ADDRESS2].down_for = 1  # unreachable for the stage session only
+        approve(web, run_id, "stage")
+        assert work() == ["partial"]
+        assert state(app, run_id)["run"] == ("awaiting_approval", "activate")
+        assert self.hosts(app, run_id) == {HOSTNAME: "staged", HOSTNAME2: "failed"}
+        assert "Retry stage on 1 host(s)" in web.get(f"/upgrades/{run_id}").get_data(
+            as_text=True)
+
+        web.post(f"/upgrades/{run_id}/retry",
+                 data={"phase": "stage", "device_password": DEVICE_PASS})
+        assert work() == ["succeeded"]
+        assert state(app, run_id)["run"] == ("awaiting_approval", "activate")
+        assert self.hosts(app, run_id) == {HOSTNAME: "staged", HOSTNAME2: "staged"}
+
+        approve(web, run_id, "activate")
+        assert work() == ["succeeded"]
+        approve(web, run_id, "cleanup")
+        assert work() == ["succeeded"]
+
+        final = state(app, run_id)
+        assert final["run"] == ("completed", None)
+        assert final["jobs"] == [
+            ("precheck", "succeeded"),
+            ("stage", "partial"),
+            ("stage", "succeeded"),
+            ("activate", "succeeded"),
+            ("verify", "succeeded"),
+            ("cleanup", "succeeded"),
+        ]
+        assert self.hosts(app, run_id) == {HOSTNAME: "verified", HOSTNAME2: "verified"}
+        for address in (ADDRESS, ADDRESS2):
+            assert switch[address].version == TARGET
+            assert switch[address].unexpected == []
+            assert switch[address].saved_with_scp == [False]
+        assert credential_channel.held() == 0
+
+    def test_without_a_retry_the_others_finish_and_the_failed_host_is_left_alone(
+        self, app, web, work, switch, run_id
+    ):
+        switch[ADDRESS2].down_for = 1
+        approve(web, run_id, "stage")
+        assert work() == ["partial"]
+        approve(web, run_id, "activate")
+        assert work() == ["succeeded"]
+        approve(web, run_id, "cleanup")
+        assert work() == ["succeeded"]
+
+        assert state(app, run_id)["run"] == ("completed", None)
+        assert self.hosts(app, run_id) == {HOSTNAME: "verified", HOSTNAME2: "failed"}
+        assert switch[ADDRESS].version == TARGET
+        assert switch[ADDRESS2].version == "17.12.06", "never reloaded"
+        assert not any(c.startswith("install add") for c in switch[ADDRESS2].commands)
+
+    def test_a_mistyped_password_is_tried_on_one_switch_not_every_one(
+        self, app, web, work, switch, run_id
+    ):
+        """Each refused login counts toward the AAA server's lockout."""
+        web.post(f"/upgrades/{run_id}/approve",
+                 data={"phase": "stage", "device_password": "typo"})
+        assert work() == ["failed"]
+        wrong = [login for address in (ADDRESS, ADDRESS2)
+                 for login in switch[address].logins if login[1] == "typo"]
+        assert wrong == [(DEVICE_USER, "typo")]
+        assert state(app, run_id)["failure"] == [("stage", "credential")]
+        assert switch[ADDRESS2].flash == {}

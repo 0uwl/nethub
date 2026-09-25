@@ -56,6 +56,29 @@
 </div>
 {% endif %}
 
+{% for phase, failed in retryable %}
+<div class="alert alert-block">
+  <h4>Retry: {{ phase }}</h4>
+  <p>{{ failed|length }} host(s) failed {{ phase }}: {{ failed|join(', ') }}.
+  Retrying runs {{ phase }} again on those hosts only. The run then comes back
+  to the {{ run.awaiting_phase }} gate.</p>
+  {% if phase == 'activate' %}
+  <p><strong>This reloads the hosts listed and drops their traffic.</strong></p>
+  {% endif %}
+  <form method="post" action="{{ url_for('upgrades.retry', run_id=run.id) }}"
+        onsubmit="return confirm('Retry {{ phase }} on {{ failed|length }} device(s)? This releases your device credential against each of them.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+    <input type="hidden" name="phase" value="{{ phase }}"/>
+    <label class="sr-only" for="retry_{{ phase }}_device_password">Your device password</label>
+    <input type="password" id="retry_{{ phase }}_device_password" name="device_password"
+           placeholder="Your device password"
+           class="form-control" required autocomplete="off"/>
+    <br/>
+    <button type="submit" class="btn btn-default">Retry {{ phase }} on {{ failed|length }} host(s)</button>
+  </form>
+</div>
+{% endfor %}
+
 {% if run.state not in ('completed', 'failed', 'cancelled', 'expired') %}
 <form method="post" action="{{ url_for('upgrades.cancel', run_id=run.id) }}"
       onsubmit="return confirm('Request cancel? A running phase stops between hosts, not mid-host.');">
@@ -67,7 +90,7 @@
 <h3>Hosts</h3>
 <div class="table-responsive">
 <table class="table table-striped">
-  <thead><tr><th>Host</th><th>Address</th><th>Image</th><th>Target</th><th>State</th><th>Was</th><th>Now</th><th>Error</th></tr></thead>
+  <thead><tr><th>Host</th><th>Address</th><th>Image</th><th>Target</th><th>State</th><th>Last phase</th><th>Was</th><th>Now</th><th>Error</th></tr></thead>
   <tbody>
   {% for h in run.hosts %}
     <tr>
@@ -76,6 +99,7 @@
       <td><code>{{ h.filename }}</code></td>
       <td>{{ h.version }}</td>
       <td>{{ h.state }}</td>
+      <td>{{ h.last_phase or '' }}</td>
       <td>{{ h.reported_version_pre or '' }}</td>
       <td>{{ h.reported_version_post or '' }}</td>
       <td>{{ h.error_summary or '' }}</td>

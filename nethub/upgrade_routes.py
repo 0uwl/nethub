@@ -246,6 +246,7 @@ def show_run(run_id):
     return render_template(
         'pages/upgrade_detail.html', run=run, jobs=jobs, results=results,
         approvable=upgrades.APPROVABLE,
+        retryable=upgrades.retryable_phases(run),
         users={u.id: u.username for u in User.query.all()},
     )
 
@@ -265,6 +266,29 @@ def approve(run_id):
             public_key=current_app.extensions['credential_public_key'],
         )
         flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
+    except upgrades.RequestError as exc:
+        flash(str(exc))
+    return redirect(url_for('upgrades.show_run', run_id=run_id))
+
+
+@upgrade_bp.route('/upgrades/<int:run_id>/retry', methods=['POST'])
+@login_required
+def retry(run_id):
+    """Run a phase again on the hosts that failed it (PLAN.md WS-8). An
+    approval like any other: it collects the retrier's device credential."""
+    run = db.session.get(UpgradeRun, run_id)
+    phase = request.form.get('phase', '')
+    password = request.form.get('device_password', '')
+    if run is None:
+        flash('No such run.')
+        return redirect(url_for('upgrades.list_runs'))
+    try:
+        job = upgrades.retry(
+            run=run, phase=phase, user=current_user, password=password,
+            public_key=current_app.extensions['credential_public_key'],
+        )
+        flash(f'Retrying {phase} on the hosts that failed it; queued as job #{job.id}.',
+              'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))

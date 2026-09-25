@@ -20,7 +20,7 @@ from nethub import models, schema
 from nethub.extensions import db
 
 FIXTURES = Path(__file__).parent / "fixtures" / "schemas"
-HEAD = "0003_sealed_credential"
+HEAD = "0004_partial_and_retry"
 
 
 def url(path):
@@ -169,6 +169,55 @@ class TestUpgradeDatabase:
         before = schema.describe(url(path))
         with pytest.raises(Exception, match="CHECK constraint failed"):
             command.downgrade(schema.alembic_config(url(path)), schema.BASELINE)
+        assert version(path) == HEAD
+        assert schema.differences(schema.describe(url(path)), before) == []
+
+    @staticmethod
+    def seed_run(c):
+        c.execute("INSERT INTO user (id, username, password_hash, failed_logins) "
+                  "VALUES (1, 'a', 'x', 0)")
+        c.execute("INSERT INTO upgrade_runs (id, platform, submitted_by, "
+                  "device_username_used, request_document, request_sha512, state, "
+                  "created_at) VALUES (1, 'iosxe', 1, 'j', '{}', 'x', 'running', 'x')")
+
+    def test_0004_keeps_existing_jobs_and_marks_none_a_retry(self, tmp_path):
+        path = tmp_path / "a.db"
+        migrate_to(path, "0003_sealed_credential")
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, status, "
+                      "created_at) VALUES (1, 1, 'stage', 1, 'succeeded', 'x')")
+        assert schema.upgrade_database(url(path)) == HEAD
+        with raw(path) as c:
+            assert c.execute("SELECT id, status, is_retry FROM upgrade_phase_jobs"
+                             ).fetchall() == [(1, "succeeded", 0)]
+
+    def test_0004_accepts_partial_as_a_terminal_status(self, tmp_path):
+        path = tmp_path / "a.db"
+        schema.upgrade_database(url(path))
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, status, "
+                      "created_at) VALUES (1, 1, 'stage', 1, 'partial', 'x')")
+            with pytest.raises(sqlite3.IntegrityError, match="terminal"):
+                c.execute("UPDATE upgrade_phase_jobs SET status = 'queued' WHERE id = 1")
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, "
+                          "status, created_at) VALUES (2, 1, 'stage', 2, 'partly', 'x')")
+
+    def test_0004_downgrades_only_while_nothing_is_partial(self, tmp_path):
+        path = tmp_path / "a.db"
+        schema.upgrade_database(url(path))
+        command.downgrade(schema.alembic_config(url(path)), "0003_sealed_credential")
+        assert version(path) == "0003_sealed_credential"
+        schema.upgrade_database(url(path))
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, status, "
+                      "created_at) VALUES (1, 1, 'stage', 1, 'partial', 'x')")
+        before = schema.describe(url(path))
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            command.downgrade(schema.alembic_config(url(path)), "0003_sealed_credential")
         assert version(path) == HEAD
         assert schema.differences(schema.describe(url(path)), before) == []
 

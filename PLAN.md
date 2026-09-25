@@ -67,8 +67,8 @@ function name.
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | merged |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | merged |
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | merged |
-| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | in review |
-| 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | todo |
+| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | merged |
+| 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | in review |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | todo |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | todo |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
@@ -673,4 +673,16 @@ a one-line description and the workstream it was found in.
   first credential failure and skip the remaining hosts, since the same
   password will fail on them too. Belongs in WS-8, which rewrites this loop
   to continue past per-host failures and must make this the exception. WS-14
-  depends on it. Found in WS-7.
+  depends on it. Found in WS-7; done in WS-8: the phase stops at the first
+  credential failure and the hosts it did not reach are recorded as
+  `not_attempted` and failed, so a retry picks them up.
+- **A mistyped password at a gate still fails the whole run.** With the
+  credential stop above, the first host is refused and every other host is
+  recorded failed, so no host is left to carry on and `_advance_run` fails
+  the run: the operator has to submit again, pre-check included. Parking the
+  run at the same gate with the phase retryable would be kinder, and matters
+  more for WS-14, where the mistake is found in the window. Found in WS-8.
+- `design-document.md` still described the WS-7 socket in two places: §7.3
+  ("The job row is committed only once its credential is held ... puts the
+  credential in the store") and §8.1 ("§9.1 does open a second channel").
+  Found and fixed in WS-8.

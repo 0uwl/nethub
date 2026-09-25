@@ -108,6 +108,11 @@ Once you're logged in as an admin:
    phase starts; never in the clear in a row, a log, or the session.
    Activate reloads the device; verify runs after it comes back, on the
    password the activate approval supplied.
+   A host that fails a phase does not stop the others: the run carries on
+   with the hosts that passed, and the next gate offers to **retry** the
+   failed ones (collecting your password again). If your password is
+   refused, the phase stops at that host instead of trying it on every
+   device, so a typo cannot lock your account out.
 6. `flask --app nethub check-store` re-hashes every published image against
    what is on disk and flags a missing file or a digest that no longer
    matches. It is a command rather than a page, because it hashes

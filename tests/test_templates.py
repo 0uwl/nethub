@@ -26,7 +26,7 @@ def make_run(app, make_user):
     Built here rather than in conftest.py: only these tests need it, and
     conftest is the one file every parallel branch would otherwise touch.
     """
-    def _make(state='awaiting_approval', awaiting_phase='activate'):
+    def _make(state='awaiting_approval', awaiting_phase='activate', failed_phase=None):
         with app.app_context():
             user = User.query.filter_by(username='alice').first()
             if user is None:
@@ -49,6 +49,16 @@ def make_run(app, make_user):
                 filename='cat9k_lite_iosxe.17.12.06.SPA.bin',
                 sha512='a' * 128, version='17.12.06', file_size=1234,
             ))
+            if failed_phase:
+                # A second host that failed `failed_phase`, so the run page
+                # has something to offer a retry for (PLAN.md WS-8).
+                db.session.add(UpgradeRunHost(
+                    run_id=run.id, hostname='sw02', ansible_host='192.0.2.11',
+                    filename='cat9k_lite_iosxe.17.12.06.SPA.bin',
+                    sha512='a' * 128, version='17.12.06', file_size=1234,
+                    state='failed', last_phase=failed_phase,
+                    error_summary='digest mismatch',
+                ))
             db.session.commit()
             return run.id
     return _make
@@ -163,6 +173,55 @@ def test_the_confirmation_names_the_host_count(logged_in_client, make_run):
     body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
     # One host in the fixture, so the copy has to say 1 rather than a blank.
     assert 'Reload 1 device(s)' in body
+
+
+# --- Retrying the hosts that failed a phase (PLAN.md WS-8) --------------------
+
+def test_a_host_that_failed_stage_offers_a_retry_at_the_activate_gate(
+    logged_in_client, make_run
+):
+    run = make_run(awaiting_phase='activate', failed_phase='stage')
+    body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
+    form = _form_containing(body, f'/upgrades/{run}/retry')
+    assert form, 'no retry form'
+    assert 'name="phase" value="stage"' in form
+    assert 'name="device_password"' in form
+    assert 'name="csrf_token"' in form
+    assert 'confirm(' in form
+    assert 'Retry stage on 1 host(s)' in form
+    assert 'sw02' in body
+    # The approve form is still there: retrying is an option, not a detour.
+    assert _form_containing(body, f'/upgrades/{run}/approve')
+    assert '{{' not in body and '{%' not in body
+
+
+def test_no_retry_is_offered_without_a_failed_host(logged_in_client, make_run):
+    run = make_run(awaiting_phase='activate')
+    body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert f'/upgrades/{run}/retry' not in body
+
+
+def test_no_retry_is_offered_for_a_phase_from_before_the_previous_gate(
+    logged_in_client, make_run
+):
+    """A host that failed pre-check is not retryable at the activate gate:
+    only the phases that ran since the gate before it are."""
+    run = make_run(awaiting_phase='activate', failed_phase='precheck')
+    body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert f'/upgrades/{run}/retry' not in body
+
+
+def test_a_retry_of_activate_warns_about_the_reload(logged_in_client, make_run):
+    run = make_run(awaiting_phase='cleanup', failed_phase='activate')
+    body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
+    form_start = body.index('Retry: activate')
+    assert 'reloads the hosts listed' in body[form_start:]
+
+
+def test_the_hosts_table_shows_the_last_phase(logged_in_client, make_run):
+    run = make_run(awaiting_phase='activate', failed_phase='stage')
+    body = logged_in_client.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert '<th>Last phase</th>' in body
 
 
 def _form_containing(body, needle):
