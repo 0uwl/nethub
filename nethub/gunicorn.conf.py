@@ -1,9 +1,11 @@
 import os
 
-# Fixed at 1, not a WORKERS knob -- unlike a Postgres-backed app, NetHub's
-# SQLite store (design-document.md §5) and the single-worker hard rule in
-# CLAUDE.md both assume exactly one process. Don't add a WORKERS env var
-# without revisiting that.
+# Fixed at 1 because of SQLite (design-document.md §5): the web process and the
+# sibling already share one file, and more writers means more lock waits. Since
+# PLAN.md WS-7 this is a tuning choice rather than a correctness rule -- device
+# credentials travel sealed in the job row, so nothing is held in one worker's
+# memory that another worker would need. Don't add a WORKERS env var without
+# measuring that SQLite copes.
 workers = 1
 
 # The other half of the one-worker rule, and required rather than optional
@@ -12,12 +14,9 @@ workers = 1
 # unset made production single-threaded: a 1.5 GB upload plus its SHA-512 pass
 # would hold the whole server for the entire window, which is the failure
 # design-document.md §3.2 legislates against (2 s p99 on phone-home), arriving
-# through ingest instead of through a dispatch call. The credential socket is
-# served on its own thread for the same reason and also needs this.
+# through ingest instead of through a dispatch call.
 #
-# Not a tuning knob to raise for throughput: one process is fixed above because
-# the in-memory CredentialStore and SQLite both assume it, and these threads
-# exist so that one process is not also one request at a time.
+# These threads exist so that one process is not also one request at a time.
 worker_class = 'gthread'
 threads = 4
 

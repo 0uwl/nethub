@@ -9,7 +9,9 @@ being stored.
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from flask import current_app
 
+from nethub import sealed_credentials as SC
 from nethub import upgrades
 from nethub.extensions import db
 from nethub.models import (
@@ -65,7 +67,16 @@ def submit(user_id, hosts="sw01, 192.0.2.10", bundle="iosxe-17-12-06", cidrs=Non
         bundle=bundle,
         hosts_raw=hosts,
         cidrs=["192.0.2.0/24"] if cidrs is None else cidrs,
+        password=PASSWORD,
+        public_key=current_app.extensions["credential_public_key"],
     )
+
+
+def approve(**kwargs):
+    """upgrades.approve with the device password and the app's public key."""
+    kwargs.setdefault("password", PASSWORD)
+    kwargs.setdefault("public_key", current_app.extensions["credential_public_key"])
+    return upgrades.approve(**kwargs)
 
 
 class TestTargetValidation:
@@ -178,7 +189,7 @@ class TestGates:
             run, _ = submit(user)
             self.park(run, "stage")
             with pytest.raises(upgrades.RequestError, match="waiting at the stage gate"):
-                upgrades.approve(run=run, phase="activate",
+                approve(run=run, phase="activate",
                                  user=db.session.get(User, user))
 
     def test_a_second_approval_of_the_same_gate_is_refused(self, app, user, confirmed):
@@ -187,17 +198,17 @@ class TestGates:
             run, _ = submit(user)
             self.park(run, "activate")
             alice = db.session.get(User, user)
-            upgrades.approve(run=run, phase="activate", user=alice)
+            approve(run=run, phase="activate", user=alice)
             self.park(run, "activate")  # pretend the gate reopened
             with pytest.raises(upgrades.RequestError, match="already been approved"):
-                upgrades.approve(run=run, phase="activate", user=alice)
+                approve(run=run, phase="activate", user=alice)
             assert UpgradePhaseJob.query.filter_by(phase="activate").count() == 1
 
     def test_approval_records_who_and_when(self, app, user, confirmed):
         with app.app_context():
             run, _ = submit(user)
             self.park(run, "stage")
-            job = upgrades.approve(run=run, phase="stage",
+            job = approve(run=run, phase="stage",
                                    user=db.session.get(User, user))
             assert job.approved_by == user and job.approved_at is not None
             assert run.state == "running" and run.awaiting_phase is None
@@ -213,7 +224,7 @@ class TestGates:
         with app.app_context():
             run, _ = submit(user)
             with pytest.raises(upgrades.RequestError, match="not waiting at a gate"):
-                upgrades.approve(run=run, phase="stage",
+                approve(run=run, phase="stage",
                                  user=db.session.get(User, user))
 
     def test_cancelling_at_a_gate_closes_the_run_immediately(self, app, user, confirmed):
@@ -259,55 +270,52 @@ class TestThroughTheClient:
             assert resp.status_code in (302, 401), path
 
 
-class TestCredentialInterlock:
-    """The identity cross-check has to accept the one phase with no approver."""
+class TestSealedAtSubmitAndApprove:
+    """PLAN.md WS-7: the credential is sealed into the job row it was
+    collected for, to the sibling's public key. These open it with the
+    private half, as the sibling would."""
 
-    def verify(self, app):
-        """The production wiring, reached without socket activation."""
-        from nethub.credential_socket import CredentialError
-        from nethub.models import UpgradePhaseJob
+    @staticmethod
+    def open_as_sibling(key, job, approved_by, now=None):
+        return SC.open_sealed(key, job.sealed_credential, job_id=job.id,
+                              approved_by=approved_by, now=now or datetime.now(timezone.utc))
 
-        def _verify(job_id):
-            with app.app_context():
-                job = db.session.get(UpgradePhaseJob, job_id)
-                if job is None or job.status != 'running':
-                    raise CredentialError("no running execution with that id")
-                return (job.approved_by if job.approved_by is not None
-                        else job.run.submitted_by)
-        return _verify
-
-    def test_precheck_verifies_against_the_submitter(self, app, user, confirmed):
-        """Pre-check has no gate, so `approved_by` is null by design."""
+    def test_precheck_is_sealed_for_the_submitter(
+            self, app, user, confirmed, credential_private_key):
+        """Pre-check has no gate, so the identity that supplied the credential
+        is the submitter -- the rule the socket interlock once got wrong."""
         with app.app_context():
             _run, job = submit(user)
             assert job.approved_by is None
-            job.status = 'running'
-            db.session.commit()
-            assert self.verify(app)(job.id) == user
+            credential = self.open_as_sibling(credential_private_key, job, user)
+            assert (credential.username, credential.password) == ('jsmith', PASSWORD)
 
-    def test_a_gated_phase_verifies_against_its_approver(self, app, user, confirmed):
+    def test_a_gated_phase_is_sealed_for_its_approver(
+            self, app, user, confirmed, credential_private_key):
         with app.app_context():
             run, _ = submit(user)
             run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
             db.session.commit()
-            job = upgrades.approve(run=run, phase='stage',
-                                   user=db.session.get(User, user))
-            job.status = 'running'
-            db.session.commit()
-            assert self.verify(app)(job.id) == user
+            job = approve(run=run, phase='stage', user=db.session.get(User, user))
+            assert self.open_as_sibling(credential_private_key, job, user).password == PASSWORD
+            with pytest.raises(SC.CredentialError, match='different identity'):
+                self.open_as_sibling(credential_private_key, job, user + 1)
 
-    def test_the_store_and_the_interlock_agree_for_precheck(self, app, user, confirmed):
-        """What the route holds under must be what the socket checks against."""
-        from nethub.credential_socket import CredentialStore
+    def test_it_expires_with_the_jobs_deadline(
+            self, app, user, confirmed, credential_private_key):
         with app.app_context():
             _run, job = submit(user)
-            job.status = 'running'
-            db.session.commit()
-            store = CredentialStore()
-            # The route holds under `job.approved_by or current_user.id`.
-            store.hold(job.id, 'jsmith', PASSWORD,
-                       approved_by=job.approved_by or user)
-            assert store.release(job.id, self.verify(app)(job.id)) == ('jsmith', PASSWORD)
+            deadline = job.deadline_at.replace(tzinfo=timezone.utc)
+            self.open_as_sibling(credential_private_key, job, user,
+                                 now=deadline - timedelta(seconds=1))
+            with pytest.raises(SC.CredentialError, match='expired'):
+                self.open_as_sibling(credential_private_key, job, user, now=deadline)
+
+    def test_the_password_is_not_in_the_row_in_the_clear(self, app, user, confirmed):
+        with app.app_context():
+            _run, job = submit(user)
+            assert PASSWORD.encode() not in job.sealed_credential
+            assert b'jsmith' not in job.sealed_credential
 
 
 class TestPhaseDeadlines:
@@ -327,7 +335,7 @@ class TestPhaseDeadlines:
             run, _ = submit(user)
             run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
             db.session.commit()
-            job = upgrades.approve(
+            job = approve(
                 run=run, phase='stage', user=db.session.get(User, user))
             assert job.deadline_at is not None
 
@@ -410,7 +418,7 @@ class TestApproveRace:
 
             monkeypatch.setattr(db.session, 'flush', once_failing)
             with pytest.raises(upgrades.RequestError, match='already been approved'):
-                upgrades.approve(run=run, phase='activate',
+                approve(run=run, phase='activate',
                                  user=db.session.get(User, user))
 
     def test_the_constraint_still_forbids_two_rows(self, app, user, confirmed):
@@ -421,7 +429,7 @@ class TestApproveRace:
             run, _ = submit(user)
             run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
             db.session.commit()
-            upgrades.approve(run=run, phase='activate',
+            approve(run=run, phase='activate',
                              user=db.session.get(User, user))
             db.session.add(UpgradePhaseJob(
                 run_id=run.id, phase='activate', attempt=1, status='queued',
@@ -432,18 +440,15 @@ class TestApproveRace:
 
 
 class TestCancelDropsTheCredential:
-    """WS-2.1: `discard()` had no callers anywhere in nethub/ before this.
-
-    A cancelled job's credential will never be fetched, so without this it sat
-    in the gunicorn worker -- the one that also serves the only
-    unauthenticated route -- until its TTL or a process restart.
-    """
+    """A cancelled queued job will be finished `cancelled` without a claim, so
+    its credential will never be opened: cancel drops the ciphertext at once
+    instead of leaving it until the sibling gets there."""
 
     def login(self, client):
         client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
         return client
 
-    def test_cancelling_discards_a_queued_jobs_credential(
+    def test_cancelling_clears_a_queued_jobs_ciphertext(
         self, app, client, user, confirmed
     ):
         self.login(client)
@@ -453,42 +458,16 @@ class TestCancelDropsTheCredential:
         }, follow_redirects=True)
         assert resp.status_code == 200
 
-        store = app.extensions['credential_store']
-        assert len(store) == 1, "submit holds pre-check's credential"
-
         with app.app_context():
             run = UpgradeRun.query.one()
             run_id = run.id
+            assert UpgradePhaseJob.query.one().sealed_credential is not None
         client.post(f'/upgrades/{run_id}/cancel', follow_redirects=True)
-        assert len(store) == 0
-
-    def test_a_running_jobs_credential_is_left_alone(
-        self, app, client, user, confirmed
-    ):
-        """`release()` pops before validating, so a running job's entry is
-        already gone -- and discarding by run would be the keying mistake
-        §9.1 forbids. Only `queued` rows are swept.
-        """
-        from nethub.models import UpgradePhaseJob
-
-        self.login(client)
-        client.post('/upgrades/new', data={
-            'bundle': 'iosxe-17-12-06',
-            'hosts': 'sw01, 192.0.2.10', 'device_password': PASSWORD,
-        }, follow_redirects=True)
-
-        store = app.extensions['credential_store']
         with app.app_context():
-            run = UpgradeRun.query.one()
-            run_id = run.id
-            job = UpgradePhaseJob.query.filter_by(run_id=run_id).one()
-            job.status = 'running'
-            db.session.commit()
-
-        client.post(f'/upgrades/{run_id}/cancel', follow_redirects=True)
-        # Untouched: the sibling may be mid-fetch, and release() is what
-        # consumes it.
-        assert len(store) == 1
+            job = UpgradePhaseJob.query.one()
+            # Cleared, but still `queued`: the sibling writes `cancelled`,
+            # since Flask writes no job-status edge after creation (§7.3).
+            assert (job.status, job.sealed_credential) == ('queued', None)
 
 
 class TestHostkeyScanDispatch:
@@ -680,22 +659,17 @@ class TestHostkeyAudit:
             ).count() == 1
 
 
-class TestCredentialHeldBeforeCommit:
-    """WS-1.1: the queued row was committed before the credential was held.
-
-    The sibling polls every 5s and claims any committed `queued` row, so it
-    could take the job in the gap, find no credential and fail the run. The
-    hook below plays the sibling at the worst moment: straight after the
-    commit that makes the job claimable.
-    """
+class TestSealedInTheSameTransaction:
+    """WS-1.1's race, closed by construction. The queued row used to be
+    committed before its credential was held, so the sibling could claim it
+    in the gap and fail the run. Now the ciphertext is part of the row: the
+    hook below plays the sibling at the worst moment, straight after the
+    commit that makes the job claimable, and finds it already there."""
 
     def login(self, client):
         client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
 
-    def sibling_polls_after_commit(self, monkeypatch, app, phase, approver):
-        from nethub.credential_socket import CredentialError
-
-        store = app.extensions['credential_store']
+    def sibling_polls_after_commit(self, monkeypatch, phase):
         real = db.session.commit
         seen = []
 
@@ -703,26 +677,23 @@ class TestCredentialHeldBeforeCommit:
             real()
             job = UpgradePhaseJob.query.filter_by(phase=phase, status='queued').first()
             if job is not None and not seen:
-                try:
-                    seen.append(store.release(job.id, approver))
-                except CredentialError as exc:
-                    seen.append(exc)
+                seen.append(job.sealed_credential)
 
         monkeypatch.setattr(db.session, 'commit', commit_then_poll)
         return seen
 
-    def test_a_submitted_precheck_is_claimable_only_with_its_credential(
+    def test_a_submitted_precheck_is_never_claimable_without_its_credential(
         self, app, client, user, confirmed, monkeypatch
     ):
         self.login(client)
-        seen = self.sibling_polls_after_commit(monkeypatch, app, 'precheck', user)
+        seen = self.sibling_polls_after_commit(monkeypatch, 'precheck')
         client.post('/upgrades/new', data={
             'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
             'device_password': PASSWORD,
         })
-        assert seen == [('jsmith', PASSWORD)]
+        assert len(seen) == 1 and seen[0] is not None
 
-    def test_an_approved_phase_is_claimable_only_with_its_credential(
+    def test_an_approved_phase_is_never_claimable_without_its_credential(
         self, app, client, user, confirmed, monkeypatch
     ):
         self.login(client)
@@ -735,29 +706,38 @@ class TestCredentialHeldBeforeCommit:
             run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
             run_id = run.id
             db.session.commit()
-        seen = self.sibling_polls_after_commit(monkeypatch, app, 'stage', user)
+        seen = self.sibling_polls_after_commit(monkeypatch, 'stage')
         client.post(f'/upgrades/{run_id}/approve',
                     data={'phase': 'stage', 'device_password': PASSWORD})
-        assert seen == [('jsmith', PASSWORD)]
+        assert len(seen) == 1 and seen[0] is not None
 
-    def test_a_refused_credential_leaves_no_rows(self, app, client, user, confirmed):
-        """A rollback now, where it used to be a delete of rows the sibling
-        might already have claimed."""
+    @pytest.mark.parametrize('password', ['', 'tab\there', 'x' * 129],
+                             ids=['empty', 'control-character', 'over-the-cap'])
+    def test_a_refused_password_leaves_no_rows(self, app, client, user, confirmed, password):
+        """Checked against the sibling's allowlist before anything is written,
+        so a refusal is a message, not a rollback."""
         self.login(client)
-        client.post('/upgrades/new', data={
+        resp = client.post('/upgrades/new', data={
             'bundle': 'iosxe-17-12-06', 'hosts': 'sw01, 192.0.2.10',
-            'device_password': '',
-        })
+            'device_password': password,
+        }, follow_redirects=True)
+        assert b'Device password refused' in resp.data
         with app.app_context():
             assert UpgradeRun.query.count() == 0
             assert UpgradePhaseJob.query.count() == 0
-        assert len(app.extensions['credential_store']) == 0
 
-    def test_a_failed_commit_discards_the_held_credential(
+    def test_a_device_username_the_sibling_would_refuse_is_refused_first(
+            self, app, user, confirmed):
+        with app.app_context():
+            db.session.get(User, user).device_username = 'j\u00e9r\u00f4me'
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match='Device username refused'):
+                submit(user)
+            assert UpgradeRun.query.count() == 0
+
+    def test_a_failed_commit_leaves_no_rows(
         self, app, client, user, confirmed, monkeypatch
     ):
-        """The job id came from a flush the rollback undoes, so the next insert
-        can reuse it. A credential left under it would go to that job."""
         from sqlalchemy.exc import OperationalError
 
         self.login(client)
@@ -772,7 +752,6 @@ class TestCredentialHeldBeforeCommit:
                 'device_password': PASSWORD,
             })
         monkeypatch.undo()
-        assert len(app.extensions['credential_store']) == 0
         with app.app_context():
             assert UpgradeRun.query.count() == 0
 
@@ -795,7 +774,7 @@ class TestApproverChecks:
             db.session.add(bob)
             db.session.commit()
             with pytest.raises(upgrades.RequestError, match='device username is not set'):
-                upgrades.approve(run=run, phase='stage', user=bob)
+                approve(run=run, phase='stage', user=bob)
             assert UpgradePhaseJob.query.filter_by(phase='stage').count() == 0
 
     def test_an_expired_gate_is_refused_even_before_the_sibling_sees_it(
@@ -808,7 +787,7 @@ class TestApproverChecks:
             run.gate_expires_at = upgrades._utcnow() - timedelta(seconds=1)
             self.park(run)
             with pytest.raises(upgrades.RequestError, match='expired'):
-                upgrades.approve(run=run, phase='stage',
+                approve(run=run, phase='stage',
                                  user=db.session.get(User, user))
             assert db.session.get(UpgradeRun, run.id).state == 'awaiting_approval'
 

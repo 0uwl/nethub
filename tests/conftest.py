@@ -1,9 +1,11 @@
+import base64
 import os
 import shutil
 import tempfile
 from types import SimpleNamespace
 
 import pytest
+from nacl.public import PrivateKey
 
 # Config reads these env vars at import time, so they must be set before
 # `nethub` (or anything under it) is ever imported.
@@ -11,6 +13,13 @@ _tmp_dir = tempfile.mkdtemp()
 os.environ['SECRET_KEY'] = 'test-secret-key-not-for-production-use'
 os.environ['DATABASE_PATH'] = os.path.join(_tmp_dir, 'test.db')
 os.environ['ARTIFACT_STORE'] = os.path.join(_tmp_dir, 'artifacts')
+
+# The sibling's key pair (nethub/sealed_credentials.py). create_app() refuses
+# to start without the public half; tests that open a sealed credential take
+# the private half from the `credential_private_key` fixture.
+_CREDENTIAL_PRIVATE_KEY = PrivateKey.generate()
+os.environ['NETHUB_CREDENTIAL_PUBLIC_KEY'] = base64.b64encode(
+    bytes(_CREDENTIAL_PRIVATE_KEY.public_key)).decode()
 
 from nethub import create_app
 from nethub.extensions import db
@@ -50,6 +59,12 @@ def drop_database_fixture():
     loaded as `conftest`, and importing it as `tests.conftest` would run its
     module-level environment setup a second time."""
     return drop_database
+
+
+@pytest.fixture
+def credential_private_key():
+    """The private half of the key pair the test app seals credentials to."""
+    return _CREDENTIAL_PRIVATE_KEY
 
 
 @pytest.fixture

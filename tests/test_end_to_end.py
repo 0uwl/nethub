@@ -2,33 +2,32 @@
 
 Everything is real except the switch. The web requests go through Flask's test
 client. The sibling is the real `Sibling` on the app `main()` builds
-(`_database_app()`, shared settings only). The credential goes through the real
-`CredentialStore` over a real socket pair, and every command goes through the
-real device layer. The switch is `FakeSwitch`, which sits behind
+(`_database_app()`, shared settings only). The credential is really sealed
+into the job row by the web side and really opened by the sibling with the
+test key pair's private half (PLAN.md WS-7), and every command goes through
+the real device layer. The switch is `FakeSwitch`, which sits behind
 `Sibling.connect` and keeps its state across sessions, so a reload, the SCP
 bracket and the staged bytes carry from one phase to the next the way they do
 on hardware.
 
-This is the safety net for PLAN.md WS-7, WS-8 and WS-9, which rewrite the
-dispatch path. Only the `credential_channel` fixture knows how a credential
-gets from Flask to the sibling, so WS-7 swaps that fixture and leaves the
-scenarios alone.
+This is the safety net for the workstreams that rewrite the dispatch path
+(PLAN.md WS-7, WS-8, WS-9). Only the `credential_channel` fixture knows how a
+credential gets from Flask to the sibling; WS-7 swapped it from the socket to
+the sealed column, and the scenarios stayed apart from the ones about the
+socket's own behaviour.
 """
 
 import hashlib
 import io
 import logging
 import re
-import socket
-import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from nethub import artifacts, verify_running_for
+from nethub import artifacts
 from nethub import sibling as S
-from nethub.credential_socket import DEFAULT_TTL, CredentialStore, serve_once
 from nethub.devices import connection, install, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
@@ -246,7 +245,7 @@ def _scp_put(conn, *, source, image, file_system):
 # ---------------------------------------------------------------------------
 
 class Clock:
-    """The credential store's clock. Wall time plus however far a test moves it."""
+    """The sibling's clock. Wall time plus however far a test moves it."""
 
     def __init__(self):
         self.offset = timedelta(0)
@@ -256,31 +255,18 @@ class Clock:
 
 
 @pytest.fixture
-def credential_channel(app):
-    """The credential path between Flask and the sibling: the real store,
-    served with the real interlock over a real socket pair.
+def credential_channel(app, credential_private_key):
+    """How a credential gets from Flask to the sibling: sealed into the job
+    row to the app's public key (conftest's key pair), opened by the sibling
+    with the private half. `held()` counts rows still carrying ciphertext.
+    `clock` is the sibling's, so a scenario can move it past a deadline."""
+    def held():
+        with app.app_context():
+            return UpgradePhaseJob.query.filter(
+                UpgradePhaseJob.sealed_credential.isnot(None)).count()
 
-    WS-7 replaces this fixture and nothing else. The store is swapped in only
-    to give it a clock the expiry scenario can move.
-    """
-    clock = Clock()
-    store = CredentialStore(now=clock)
-    app.extensions["credential_store"] = store
-    verify = verify_running_for(app)
-    threads = []
-
-    def connect_socket():
-        sibling_end, flask_end = socket.socketpair()
-        thread = threading.Thread(target=serve_once, args=(flask_end, store, verify),
-                                  daemon=True)
-        thread.start()
-        threads.append(thread)
-        return sibling_end
-
-    yield type("Channel", (), {"store": store, "clock": clock,
-                               "connect_socket": staticmethod(connect_socket)})
-    for thread in threads:
-        thread.join(timeout=5)
+    return type("Channel", (), {"private_key": credential_private_key,
+                                "clock": Clock(), "held": staticmethod(held)})
 
 
 @pytest.fixture
@@ -297,7 +283,8 @@ def sibling(app, credential_channel, switch):
     against the same database file, swept once at start."""
     sibling_app = S._database_app()
     worker = S.Sibling(
-        connect_socket=credential_channel.connect_socket,
+        private_key=credential_channel.private_key,
+        now=credential_channel.clock,
         search_dir=artifacts.store_dir(app.config),
         reload_wait=install.ReloadWait(delay=0, interval=0, timeout=10),
         connect=switch.connect,
@@ -464,7 +451,7 @@ class TestCleanRun:
         # Each phase logged in once with the submitter's credential, apart from
         # activate, which logs in again after the reload.
         assert set(switch.logins) == {(DEVICE_USER, DEVICE_PASS)}
-        assert len(credential_channel.store) == 0, "every held credential was released"
+        assert credential_channel.held() == 0, "every sealed credential was taken off its row"
 
         assert web.get(f"/upgrades/{run_id}").status_code == 200
 
@@ -525,11 +512,11 @@ class TestCancel:
     ):
         assert work() == ["succeeded"]
         approve(web, submitted, "stage")
-        assert len(credential_channel.store) == 1
+        assert credential_channel.held() == 1
         seen = len(switch.commands)
 
         web.post(f"/upgrades/{submitted}/cancel")
-        assert len(credential_channel.store) == 0, "cancel discarded the held credential"
+        assert credential_channel.held() == 0, "cancel dropped the ciphertext"
 
         assert work() == ["cancelled"]
         final = state(app, submitted)
@@ -539,25 +526,47 @@ class TestCancel:
 
 
 class TestExpiredCredential:
-    def test_a_credential_past_its_ttl_fails_the_phase_without_touching_the_device(
+    def test_a_phase_not_started_by_its_deadline_expires_without_touching_the_device(
         self, app, web, work, switch, submitted, credential_channel
     ):
-        """The row cannot say "expired": `fetch_credential` never copies Flask's
-        reason, since the sibling treats the reply as untrusted. What shows it
-        was the TTL is that the same steps succeed in TestCleanRun."""
+        """A sealed credential lives exactly as long as its job may wait, so
+        there is no separate TTL to run out: the job reaches its deadline
+        unclaimed and ends `expired`. It records failure_stage='credential'
+        (maintainer decision, PLAN.md WS-7), so the run page says the
+        approval's credential was never used."""
         assert work() == ["succeeded"]
         approve(web, submitted, "stage")
         seen = len(switch.commands)
 
-        # The sibling does not get to this job until the held credential has
-        # expired -- a long phase ahead of it in the queue, say.
-        credential_channel.clock.offset = DEFAULT_TTL + timedelta(minutes=1)
+        # The sibling does not get to this job until well past its deadline --
+        # down for a day, say.
+        credential_channel.clock.offset = timedelta(days=1)
 
-        assert work() == ["failed"]
+        assert work() == ["expired"]
         final = state(app, submitted)
-        assert final["run"] == ("failed", None)
-        assert final["jobs"] == [("precheck", "succeeded"), ("stage", "failed")]
+        assert final["run"] == ("expired", None)
+        assert final["jobs"] == [("precheck", "succeeded"), ("stage", "expired")]
         assert final["failure"] == [("stage", "credential")]
         assert switch.commands[seen:] == []
-        assert len(credential_channel.store) == 0, "the expired credential was destroyed"
+        assert credential_channel.held() == 0, "the unused ciphertext was dropped"
 
+
+class TestWebRestart:
+    def test_a_web_restart_between_approval_and_claim_costs_nothing(
+        self, app, web, work, switch, submitted, credential_channel
+    ):
+        """PLAN.md WS-7's done-when. Under the socket the approved credential
+        lived only in the web process's memory, so a restart before the
+        sibling claimed the job failed the phase with `credential`. Now it is
+        in the row: a fresh web app over the same database is all a restart
+        is, and the phase still runs."""
+        from nethub import create_app
+
+        assert work() == ["succeeded"]
+        approve(web, submitted, "stage")
+        restarted = create_app()  # the old app's memory is gone as far as this run knows
+        assert restarted is not app
+
+        assert work() == ["succeeded"]
+        assert state(app, submitted)["run"] == ("awaiting_approval", "activate")
+        assert switch.flash[IMAGE] == IMAGE_BYTES

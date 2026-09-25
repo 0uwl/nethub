@@ -1,17 +1,17 @@
 """Checks for the dispatcher: the claim, the sweep, and the run state machine.
 
-No device and no socket -- `connect_socket` and the phase runners are both
-injected. What is under test is §7.3's tables: who writes which edge, and what
-the queue does under contention.
+No device -- the phase runners are injected, and the sealed credentials are
+real ones made with this module's own key pair. What is under test is §7.3's
+tables: who writes which edge, and what the queue does under contention.
 """
 
-import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from nacl.public import PrivateKey
 
+from nethub import sealed_credentials as SC
 from nethub import sibling as S
-from nethub import verify_running_for
 from nethub.devices import connection, install, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
@@ -27,26 +27,20 @@ NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
 DIGEST = "a" * 128
 
 
-def credential_socket(username="jsmith", password="s3cret", ok=True):
-    class FakeSock:
-        def settimeout(self, _):
-            pass
+#: The sibling's key pair for these tests.
+KEY = PrivateKey.generate()
+PASSWORD = "s3cret"
 
-        def sendall(self, _):
-            pass
 
-        def recv(self, _):
-            if getattr(self, "done", False):
-                return b""
-            self.done = True
-            body = ({"ok": True, "username": username, "password": password}
-                    if ok else {"ok": False, "error": "no credential held"})
-            return json.dumps(body).encode() + b"\n"
-
-        def close(self):
-            pass
-
-    return lambda: FakeSock()
+def sealed_for(job, *, password=PASSWORD, username="jsmith", approved_by=None,
+               expires_at=None, key=KEY):
+    """What Flask would have sealed into this job's row."""
+    return SC.seal(
+        key.public_key, job_id=job.id,
+        approved_by=approved_by if approved_by is not None else S.Sibling._supplier(job),
+        username=username, password=password,
+        expires_at=expires_at or NOW + timedelta(hours=1),
+    )
 
 
 @pytest.fixture
@@ -74,18 +68,29 @@ def run(app):
 
 
 def make_sibling(**kw):
-    kw.setdefault("connect_socket", credential_socket())
+    kw.setdefault("private_key", KEY)
     kw.setdefault("search_dir", "/images")
     kw.setdefault("now", lambda: NOW)
     return S.Sibling(**kw)
 
 
-def queue(run_id, phase="precheck", **kw):
+def queue(run_id, phase="precheck", sealed=True, **kw):
+    """A queued job carrying a sealed credential, as submit/approve leave it.
+    `sealed=False` for a job nothing was sealed for (a crash-orphaned verify)."""
     job = UpgradePhaseJob(run_id=run_id, phase=phase, attempt=1, status="queued",
                           created_at=NOW, **kw)
     db.session.add(job)
+    db.session.flush()
+    if sealed:
+        job.sealed_credential = sealed_for(job)
     db.session.commit()
     return job
+
+
+def pretend_claimed(job, runner_id):
+    """Put a job in the state a claim leaves it: running, and no ciphertext
+    (the table's CHECK constraint refuses a running job that still has one)."""
+    job.status, job.runner_instance_id, job.sealed_credential = "running", runner_id, None
 
 
 def succeed(monkeypatch, phase):
@@ -138,7 +143,7 @@ class TestSweep:
     def test_a_foreign_running_row_is_abandoned(self, app, run):
         with app.app_context():
             job = queue(run)
-            job.status, job.runner_instance_id = "running", "a-dead-instance"
+            pretend_claimed(job, "a-dead-instance")
             db.session.commit()
 
             assert make_sibling().sweep() == 1
@@ -149,7 +154,7 @@ class TestSweep:
         with app.app_context():
             worker = make_sibling()
             job = queue(run)
-            job.status, job.runner_instance_id = "running", worker.runner_instance_id
+            pretend_claimed(job, worker.runner_instance_id)
             db.session.commit()
             assert worker.sweep() == 0
             assert db.session.get(UpgradePhaseJob, job.id).status == "running"
@@ -157,7 +162,7 @@ class TestSweep:
     def test_abandoned_stays_distinct_from_cancelled(self, app, run):
         with app.app_context():
             job = queue(run)
-            job.status, job.runner_instance_id = "running", "gone"
+            pretend_claimed(job, "gone")
             db.session.commit()
             make_sibling().sweep()
             assert db.session.get(UpgradePhaseJob, job.id).status == "abandoned"
@@ -166,11 +171,11 @@ class TestSweep:
 class TestCredentialFailure:
     def test_no_credential_fails_the_phase_at_stage_credential(self, app, run):
         with app.app_context():
-            job = queue(run)
-            worker = make_sibling(connect_socket=credential_socket(ok=False))
-            assert worker.run_once() == "failed"
+            job = queue(run, sealed=False)
+            assert make_sibling().run_once() == "failed"
             job = db.session.get(UpgradePhaseJob, job.id)
             assert job.failure_stage == "credential"
+            assert job.error_summary == "no credential was sealed for this execution"
             assert db.session.get(UpgradeRun, run).state == "failed"
 
 
@@ -257,101 +262,127 @@ class TestQueueGuards:
             assert make_sibling().run_once() is None
 
 
-class TestEndToEndOverTheSocket:
-    """The two halves joined: Flask holds, the sibling fetches, a phase runs."""
+class TestSealedCredential:
+    """PLAN.md WS-7: the credential travels sealed in the job row, and the
+    claim is what takes it off the row."""
 
-    def test_a_phase_runs_with_a_credential_fetched_over_a_real_socket(
-        self, app, run, monkeypatch, tmp_path
-    ):
-        import os
-        import socket
-        import threading
+    @staticmethod
+    def capture(monkeypatch, phase="precheck"):
+        seen = {}
 
-        from nethub import credential_socket as CS
+        def runner(conn, host, ctx):
+            seen["username"], seen["password"] = ctx.device_username, ctx.device_password
+            return phases.HostOutcome(host.hostname, "ok")
+        monkeypatch.setitem(phases.PHASE_RUNNERS, phase, runner)
+        return seen
 
-        path = str(tmp_path / "cred.sock")
-        listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listening.bind(path)
-        os.chmod(path, 0o600)
-        listening.listen(4)
-        store = CS.CredentialStore()
-        stop = threading.Event()
-
+    def test_the_phase_gets_the_credential_that_was_sealed(self, app, run, monkeypatch):
+        seen = self.capture(monkeypatch)
         with app.app_context():
-            job = queue(run, "stage")
-            approver = db.session.get(UpgradeRun, run).submitted_by
-            job.approved_by = approver
-            db.session.commit()
-            job_id, run_id = job.id, run
+            queue(run)
+            assert make_sibling().run_once() == "succeeded"
+        assert seen == {"username": "jsmith", "password": PASSWORD}
 
-            # The production interlock, not a copy of it. It opens its own app
-            # context because it runs on the serving thread and
-            # Flask-SQLAlchemy's session is thread-local -- without that, every
-            # request fails with a generic refusal.
-            thread = threading.Thread(
-                target=CS.serve, args=(listening, store, verify_running_for(app)),
-                kwargs={"stop": stop}, daemon=True)
-            thread.start()
-            try:
-                store.hold(job_id, "jsmith", "d3vice-pass", approved_by=approver)
-                seen = {}
-
-                def runner(conn, host, ctx):
-                    seen["password"] = ctx.device_password
-                    seen["username"] = ctx.device_username
-                    return phases.HostOutcome(host.hostname, "image_copied")
-
-                monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-                worker = S.Sibling(connect_socket=CS.connect_to(path),
-                                   search_dir="/images", now=lambda: NOW)
-                assert worker.run_once() == "succeeded"
-
-                assert seen == {"password": "d3vice-pass", "username": "jsmith"}
-                assert len(store) == 0, "released once, and not held afterwards"
-                assert db.session.get(UpgradeRun, run_id).awaiting_phase == "activate"
-            finally:
-                stop.set()
-                thread.join(timeout=3)
-                listening.close()
-
-    def test_a_credential_approved_by_someone_else_is_refused(
-        self, app, run, monkeypatch, tmp_path
-    ):
-        """Keying by job and cross-checking the approver is what stops one
-        person's password serving another person's approved execution."""
-        import socket
-        import threading
-
-        from nethub import credential_socket as CS
-
-        path = str(tmp_path / "cred.sock")
-        listening = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listening.bind(path)
-        listening.listen(4)
-        store = CS.CredentialStore()
-        stop = threading.Event()
-
+    def test_the_claim_takes_the_ciphertext_off_the_row(self, app, run):
         with app.app_context():
-            job = queue(run, "stage")
-            job.approved_by = db.session.get(UpgradeRun, run).submitted_by
-            db.session.commit()
+            job = queue(run)
+            assert db.session.get(UpgradePhaseJob, job.id).sealed_credential is not None
+            worker = make_sibling()
+            assert worker._claim(job.id)[0] is True
+            row = db.session.get(UpgradePhaseJob, job.id)
+            db.session.refresh(row)
+            assert (row.status, row.sealed_credential) == ("running", None)
+
+    def test_a_second_claim_gets_nothing(self, app, run):
+        with app.app_context():
+            job = queue(run)
+            first, second = make_sibling(), make_sibling()
+            assert first._claim(job.id)[0] is True
+            assert second._claim(job.id) == (False, None)
+
+    def test_a_restart_of_the_web_process_costs_nothing(self, app, run, monkeypatch):
+        """The WS-7 done-when. Under the socket the credential lived in the web
+        process's memory, so a restart between approval and claim failed the
+        phase. Now it is in the row; a fresh app over the same database is
+        all the "restart" there is, and the phase still gets its credential."""
+        from nethub import create_app
+        seen = self.capture(monkeypatch)
+        with app.app_context():
+            job = queue(run)
             job_id = job.id
+        restarted = create_app()
+        with restarted.app_context():
+            assert make_sibling().run_once() == "succeeded"
+            assert db.session.get(UpgradePhaseJob, job_id).status == "succeeded"
+        assert seen["password"] == PASSWORD
 
-            thread = threading.Thread(
-                target=CS.serve, args=(listening, store, verify_running_for(app)),
-                kwargs={"stop": stop}, daemon=True)
-            thread.start()
-            try:
-                # Held under a different approver than the job records.
-                store.hold(job_id, "mallory", "other-pass", approved_by=9999)
-                worker = S.Sibling(connect_socket=CS.connect_to(path),
-                                   search_dir="/images", now=lambda: NOW)
-                assert worker.run_once() == "failed"
-                assert db.session.get(UpgradePhaseJob, job_id).failure_stage == "credential"
-            finally:
-                stop.set()
-                thread.join(timeout=3)
-                listening.close()
+    @pytest.mark.parametrize("tamper, summary", [
+        (lambda job: b"\x00" * len(sealed_for(job)), "could not be opened"),
+        (lambda job: sealed_for(job, key=PrivateKey.generate()), "could not be opened"),
+        (lambda job: sealed_for(job, approved_by=9999), "different identity"),
+        (lambda job: sealed_for(job, expires_at=NOW - timedelta(seconds=1)), "expired"),
+    ], ids=["garbage", "sealed-to-another-key", "wrong-approver", "expired"])
+    def test_a_credential_that_does_not_open_or_check_fails_the_phase(
+            self, app, run, monkeypatch, tamper, summary):
+        ran = []
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "precheck",
+                            lambda conn, host, ctx: ran.append(1))
+        with app.app_context():
+            job = queue(run, sealed=False)
+            job.sealed_credential = tamper(job)
+            db.session.commit()
+            assert make_sibling().run_once() == "failed"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert row.failure_stage == "credential"
+            assert summary in row.error_summary
+            assert row.sealed_credential is None
+            assert db.session.get(UpgradeRun, run).state == "failed"
+        assert ran == [], "no device was touched"
+
+    def test_a_credential_sealed_for_another_job_is_refused(self, app, run, monkeypatch):
+        """Copying one job's ciphertext onto another row is exactly what
+        binding the job id stops."""
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "precheck",
+                            lambda conn, host, ctx: pytest.fail("device touched"))
+        with app.app_context():
+            other = queue(run, phase="stage")
+            job = queue(run, sealed=False)
+            job.sealed_credential = other.sealed_credential
+            job.created_at = NOW - timedelta(minutes=1)  # first in the queue
+            db.session.commit()
+            assert make_sibling().run_once() == "failed"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert "different execution" in row.error_summary
+
+    def test_a_job_that_expires_unclaimed_says_its_credential_was_discarded(self, app, run):
+        """Maintainer decision (PLAN.md WS-7): an expired job that carried a
+        credential records failure_stage='credential', so the run page says
+        why, and the ciphertext goes in the same update."""
+        with app.app_context():
+            job = queue(run, deadline_at=NOW - timedelta(hours=1))
+            assert make_sibling().run_once() == "expired"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert (row.status, row.failure_stage) == ("expired", "credential")
+            assert "discarded unused" in row.error_summary
+            assert row.sealed_credential is None
+
+    def test_a_cancelled_job_drops_its_ciphertext_without_a_failure_stage(self, app, run):
+        with app.app_context():
+            job = queue(run)
+            db.session.get(UpgradeRun, run).cancel_requested_at = NOW
+            db.session.commit()
+            assert make_sibling().run_once() == "cancelled"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert (row.sealed_credential, row.failure_stage) == (None, None)
+
+    def test_the_table_refuses_ciphertext_on_a_job_that_is_not_queued(self, app, run):
+        from sqlalchemy.exc import IntegrityError
+        with app.app_context():
+            job = queue(run)
+            job.status = "running"
+            with pytest.raises(IntegrityError, match="ck_sealed_credential_only_while_queued"):
+                db.session.commit()
+            db.session.rollback()
 
 
 class TestVerifyRunsOnActivatesCredential:
@@ -360,17 +391,14 @@ class TestVerifyRunsOnActivatesCredential:
     how every app-driven run used to end -- failed right after the switch
     was upgraded. It runs on the credential activate's approval supplied."""
 
-    @staticmethod
-    def counting_socket(fetched):
-        inner = credential_socket(password="act1vate-pass")
+    def test_one_credential_covers_activate_and_verify(self, app, run, monkeypatch):
+        seen, opened = {}, []
+        real_open = S.open_sealed
 
-        def connect():
-            fetched.append(1)
-            return inner()
-        return connect
-
-    def test_one_fetch_covers_activate_and_verify(self, app, run, monkeypatch):
-        seen, fetched = {}, []
+        def counting_open(*args, **kwargs):
+            opened.append(kwargs["job_id"])
+            return real_open(*args, **kwargs)
+        monkeypatch.setattr(S, "open_sealed", counting_open)
 
         def verify(conn, host, ctx):
             seen["password"] = ctx.device_password
@@ -378,13 +406,14 @@ class TestVerifyRunsOnActivatesCredential:
             return phases.HostOutcome(host.hostname, "verified")
 
         with app.app_context():
-            queue(run, "activate")
+            job_id = queue(run, "activate",
+                           approved_by=db.session.get(UpgradeRun, run).submitted_by).id
             succeed(monkeypatch, "activate")
             monkeypatch.setitem(phases.PHASE_RUNNERS, "verify", verify)
-            make_sibling(connect_socket=self.counting_socket(fetched)).run_once()
+            make_sibling().run_once()
 
-        assert fetched == [1], "one credential fetch, for activate's job"
-        assert seen["password"] == "act1vate-pass"
+        assert opened == [job_id], "one credential opened, activate's"
+        assert seen["password"] == PASSWORD
         assert seen["ctx"].device_password == "", "cleared once verify ended"
 
     def test_a_failed_activate_queues_no_verify(self, app, run, monkeypatch):
@@ -424,9 +453,8 @@ class TestVerifyRunsOnActivatesCredential:
         finds a queued verify with no credential held for it. That fails
         with failure_stage='credential' -- visible, not stuck."""
         with app.app_context():
-            queue(run, "verify")
-            worker = make_sibling(connect_socket=credential_socket(ok=False))
-            assert worker.run_once() == "failed"
+            queue(run, "verify", sealed=False)
+            assert make_sibling().run_once() == "failed"
             job = UpgradePhaseJob.query.filter_by(phase="verify").one()
             assert job.failure_stage == "credential"
 
@@ -452,7 +480,7 @@ class TestAbandonedPhaseCanBeReApproved:
 
     def abandon(self, app, run_id, phase):
         job = queue(run_id, phase=phase)
-        job.status, job.runner_instance_id = "running", "a-dead-instance"
+        pretend_claimed(job, "a-dead-instance")
         db.session.commit()
         assert make_sibling().sweep() == 1
         return job
@@ -480,7 +508,8 @@ class TestAbandonedPhaseCanBeReApproved:
 
             self.abandon(app, run, "activate")
             row = db.session.get(UpgradeRun, run)
-            job = upgrades.approve(run=row, phase="activate", user=user)
+            job = upgrades.approve(run=row, phase="activate", user=user,
+                                   password=PASSWORD, public_key=KEY.public_key)
             assert job.attempt == 2, "1 + count(abandoned)"
             assert job.status == "queued"
             assert job.approved_by == user.id
@@ -498,13 +527,15 @@ class TestAbandonedPhaseCanBeReApproved:
 
             self.abandon(app, run, "activate")
             second = upgrades.approve(
-                run=db.session.get(UpgradeRun, run), phase="activate", user=user)
-            second.status, second.runner_instance_id = "running", "another-dead-one"
+                run=db.session.get(UpgradeRun, run), phase="activate", user=user,
+                password=PASSWORD, public_key=KEY.public_key)
+            pretend_claimed(second, "another-dead-one")
             db.session.commit()
             assert make_sibling().sweep() == 1
 
             third = upgrades.approve(
-                run=db.session.get(UpgradeRun, run), phase="activate", user=user)
+                run=db.session.get(UpgradeRun, run), phase="activate", user=user,
+                password=PASSWORD, public_key=KEY.public_key)
             assert third.attempt == 3
 
     def test_an_abandoned_precheck_still_fails_the_run(self, app, run):
@@ -533,7 +564,7 @@ class TestSweepPredicate:
         """
         with app.app_context():
             job = queue(run, phase="stage")
-            job.status, job.runner_instance_id = "running", None
+            pretend_claimed(job, None)
             db.session.commit()
             assert make_sibling().sweep() == 1
             assert db.session.get(UpgradePhaseJob, job.id).status == "abandoned"
@@ -673,7 +704,7 @@ class TestUnexpectedErrorDoesNotStrandTheRow:
         startup sweep's to judge, not ours."""
         with app.app_context():
             job = queue(run)
-            job.status, job.runner_instance_id = "running", "someone-else"
+            pretend_claimed(job, "someone-else")
             db.session.commit()
             assert make_sibling().recover_own() == 0
             assert db.session.get(UpgradePhaseJob, job.id).status == "running"
@@ -724,7 +755,7 @@ class TestGateExpiry:
         same sibling expires it."""
         with app.app_context():
             job = queue(run, phase="stage")
-            job.status, job.runner_instance_id = "running", "a-dead-instance"
+            pretend_claimed(job, "a-dead-instance")
             db.session.commit()
             make_sibling().sweep()
             assert db.session.get(UpgradeRun, run).state == "awaiting_approval"
@@ -766,7 +797,7 @@ class TestNoSecretKey:
         import sys
         env = {k: v for k, v in os.environ.items()
                if k not in ("SECRET_KEY", "CREDENTIALS_DIRECTORY",
-                            "NETHUB_CREDENTIAL_SOCKET", "NETHUB_SEARCH_DIR")}
+                            "NETHUB_CREDENTIAL_KEY_FILE", "NETHUB_SEARCH_DIR")}
         env["DATABASE_PATH"] = str(tmp_path / "sibling.db")
         return subprocess.run([sys.executable, "-c", code], env=env, cwd=os.getcwd(),
                               capture_output=True, text=True, timeout=60, check=False)
@@ -782,18 +813,28 @@ class TestNoSecretKey:
         assert key == "None"
         assert uri.endswith("sibling.db")
 
-    def test_the_sibling_starts_without_a_key(self, tmp_path):
+    @staticmethod
+    def sibling_env(tmp_path, private_key):
+        """What the sibling unit sets: no SECRET_KEY, a search dir, and the
+        private key as a file (the public key comes from conftest's env)."""
+        import os
+        key_file = tmp_path / "credential_private_key"
+        key_file.write_text(SC.encode_key(private_key))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SECRET_KEY", "CREDENTIALS_DIRECTORY")}
+        env.update(DATABASE_PATH=str(tmp_path / "sibling.db"),
+                   NETHUB_SEARCH_DIR=str(tmp_path),
+                   NETHUB_CREDENTIAL_KEY_FILE=str(key_file))
+        return env
+
+    def test_the_sibling_starts_without_a_key(self, tmp_path, credential_private_key):
         """PLAN.md WS-3's done-when: `python -m nethub.sibling` starts. It
         gets as far as its sweep and start-up log line, then is stopped."""
         import os
         import subprocess
         import sys
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("SECRET_KEY", "CREDENTIALS_DIRECTORY")}
-        env.update(DATABASE_PATH=str(tmp_path / "sibling.db"),
-                   NETHUB_CREDENTIAL_SOCKET=str(tmp_path / "absent.sock"),
-                   NETHUB_SEARCH_DIR=str(tmp_path))
-        # The web tier creates the schema; the sibling expects it to exist.
+        env = self.sibling_env(tmp_path, credential_private_key)
+        # The web tier creates the schema; the sibling waits for it.
         subprocess.run(
             [sys.executable, "-c", "from nethub import create_app; create_app()"],
             env={**env, "SECRET_KEY": "k" * 64}, cwd=os.getcwd(),
@@ -807,6 +848,31 @@ class TestNoSecretKey:
         finally:
             proc.kill()
             proc.wait(timeout=10)
+
+    def test_the_sibling_refuses_a_private_key_that_does_not_match(self, tmp_path):
+        """Otherwise every job would fail one at a time with a credential
+        error that says nothing about keys."""
+        import os
+        import subprocess
+        import sys
+        env = self.sibling_env(tmp_path, PrivateKey.generate())
+        result = subprocess.run([sys.executable, "-m", "nethub.sibling"], env=env,
+                                cwd=os.getcwd(), capture_output=True, text=True,
+                                timeout=60, check=False)
+        assert result.returncode != 0
+        assert "does not match NETHUB_CREDENTIAL_PUBLIC_KEY" in result.stderr
+
+    def test_the_sibling_refuses_to_start_with_no_private_key(self, tmp_path):
+        import os
+        import subprocess
+        import sys
+        env = self.sibling_env(tmp_path, PrivateKey.generate())
+        del env["NETHUB_CREDENTIAL_KEY_FILE"]
+        result = subprocess.run([sys.executable, "-m", "nethub.sibling"], env=env,
+                                cwd=os.getcwd(), capture_output=True, text=True,
+                                timeout=60, check=False)
+        assert result.returncode != 0
+        assert "no private key" in result.stderr
 
     def test_the_web_tier_still_refuses_to_start_without_one(self, tmp_path):
         result = self.run("from nethub import create_app; create_app()", tmp_path)

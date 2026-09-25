@@ -66,18 +66,20 @@ function name.
 | 3 | `fix/deployment-units` | `:Z` on shared volumes, sibling needing `SECRET_KEY` | none | merged |
 | 4 | `test/end-to-end` | Automated Flask + sibling + fake device test | none | merged |
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | merged |
-| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | in review |
-| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | todo |
+| 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | merged |
+| 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | in review |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | todo |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | todo |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | todo |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
+| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9 | todo |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
 before 7, 8 and 9: those three rewrite the dispatch path and need the
-end-to-end test as a safety net.
+end-to-end test as a safety net. WS-14 was added after the plan was
+written; it still comes before WS-13, which stays last.
 
 ## Decisions this plan makes
 
@@ -109,6 +111,13 @@ halfway through a branch.
     WS-7 that is a tuning choice, not a correctness rule.
 11. **Day-0 phone-home will be a separate service** (WS-13 records this in
     the design doc). Nothing in this plan builds day-0.
+12. **A scheduled upgrade is an approval with a start time** (WS-14), not a
+    run that holds one credential from scheduling until it finishes. The
+    credential stays per phase, so it is stored sealed for hours rather than
+    days, a person still reviews each phase's result before approving the
+    next, and only Flask creates queued rows. A fully non-interactive run is
+    recorded in design doc §10 as possible future work. Decided by the
+    maintainer on 2026-09-24.
 
 ## Workstreams
 
@@ -549,6 +558,71 @@ of the docs.
 **Done when:** `CLAUDE.md` is under 300 lines, every claim in it is true of
 the code, and this file is gone.
 
+### WS-14: Scheduled approvals
+
+Branch `feat/scheduled-approvals`. After WS-8 and WS-9: WS-8 changes what a
+finished phase means, and WS-9 changes how the sibling picks the next job.
+
+**Why.** Upgrades run in maintenance windows. Today an approval queues its
+phase immediately, so reloading a fleet at 02:00 needs someone awake at 02:00
+to approve it. With the credential sealed in the job row (WS-7), an approval
+can wait for a start time without anything held in memory.
+
+**Design.**
+- Add a nullable `upgrade_phase_jobs.not_before` (migration). The approve
+  form gets an optional "start at". Empty means now, as today. The form
+  says which time zone the time is in, and the run page shows the stored
+  time in UTC. Decide the time zone at the start of the branch: a
+  deployment setting, or UTC throughout.
+- Only gated phases (stage, activate, cleanup) can be scheduled. Pre-check
+  still runs at submit, so a wrong password or an unreachable device shows
+  up when the run is created, not in the window.
+- Refuse a start time in the past, later than `gate_expires_at`, or further
+  ahead than a cap (`MAX_SCHEDULE_AHEAD`, default 72 hours). The cap bounds
+  how long a sealed password is stored.
+- `deadline_at` is `not_before` plus `upgrades.phase_deadline()`'s budget,
+  so the sealed `expires_at` follows it and a job that could not start in
+  its window ends `expired` with `failure_stage='credential'` (the WS-7
+  path).
+- The sibling never claims a job before its `not_before`, and a scheduled
+  job does not block the queue: pick the next job ordered by
+  `coalesce(not_before, created_at)`, skipping any not yet due. A due job
+  still waits for whatever is running (activate stays serial after WS-9);
+  the deadline covers that wait.
+- `verify` keeps running straight after `activate` on the same credential.
+  Nothing new is sealed for it.
+- Cancel already clears the credential of queued jobs. Changing a start
+  time means cancelling the run; rescheduling without cancelling would have
+  Flask change a queued job, which §7.3's actor table does not allow, so it
+  is out of scope.
+- The run page shows "scheduled for <time>" on a queued job, beside who
+  approved it and when. `approved_at`, `not_before` and `started_at`
+  together are the audit record that the phase ran on a scheduled approval
+  rather than with someone at the gate.
+- Requires the "stop the wave on a credential failure" item in "Found while
+  working" (WS-8). A mistyped password on a scheduled approval is not found
+  until the window, and must fail on one host, not lock the account out
+  across all of them.
+- Update design doc §7.3 (the `queued` → `running` edge waits for
+  `not_before`), §8.1 (an approval may carry a start time) and §9.1 (how
+  long a credential can be stored). Add a §10 entry for the fully
+  non-interactive run (decision 12) with what it would need: a rule for
+  continuing without review after WS-8, the sibling creating queued rows,
+  a run-level ciphertext rule to replace "only while queued", and an audit
+  column saying no person was at the gate.
+
+**Tests:** a scheduled job is not claimed before its time and is claimed
+after; a later scheduled job does not block an earlier unscheduled one; a
+start time past the cap, past `gate_expires_at` or in the past is refused;
+a scheduled job that cannot start before its deadline ends `expired` with
+`failure_stage='credential'` and its column cleared; cancel before the start
+time clears the credential; an end-to-end run with the clock advanced to the
+window completes activate and verify.
+
+**Done when:** an admin can stage a fleet during the day, approve the reload
+for a start time that night, and the end-to-end test runs it at that time
+with no further input.
+
 ## Maintainer actions (no branch)
 
 - **Host key across upgrades.** `install.wait_for_device` deliberately retries
@@ -584,3 +658,19 @@ a one-line description and the workstream it was found in.
   Found in WS-4, fixed on `fix/verification-credential`: `sibling.run_once`
   now runs `verify` straight after `activate` on the same credential, as
   design doc §9.1 already said it should.
+- `README.md` "Using it" said the store-drift check was a web page; it has
+  been the `flask --app nethub check-store` command since WS-2. Found and
+  fixed in WS-7.
+- The WS-4 end-to-end test changed beyond its credential fixture in WS-7:
+  its expired-credential scenario now tests a job that reaches its deadline
+  unclaimed (the 30-minute TTL it tested is gone), and a web-restart
+  scenario was added. Per the maintainer's decision recorded in WS-7.
+- **A wrong device password is tried on every host in the wave.**
+  `nethub/devices/phases.py` `execute_phase` continues to the next host after
+  any per-host failure, `failure_stage='credential'` included. A mistyped
+  password at an approval therefore fails a login on each of 40 switches,
+  enough to trip a TACACS+/RADIUS account lockout. Stop the phase at the
+  first credential failure and skip the remaining hosts, since the same
+  password will fail on them too. Belongs in WS-8, which rewrites this loop
+  to continue past per-host failures and must make this the exception. WS-14
+  depends on it. Found in WS-7.

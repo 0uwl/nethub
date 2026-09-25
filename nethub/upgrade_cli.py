@@ -6,7 +6,7 @@ entirely. Folding device work into `nethub/devices/` took that away -- an
 accepted loss, not an unnoticed one. This restores it, at the smallest scope
 that is honest.
 
-It needs **no Flask app, no sibling, no credential socket and no job rows** --
+It needs **no Flask app, no sibling, no sealed credential and no job rows** --
 `nethub/devices/` never depended on any of them, which is why this is a few
 hundred lines rather than a parallel implementation. It will read a pinned
 host key out of the database if one is reachable, and otherwise makes the

@@ -1,17 +1,20 @@
 # Reference Quadlet unit for NetHub.
 #
-# To install by hand, rootless as the user that will run the container. All
-# THREE units are needed -- this one serves the UI, nethub-sibling.container
-# does every piece of device work, and nethub-credential.socket is the channel
-# between them. Note the socket is a plain systemd unit and goes somewhere
-# different from the two Quadlet ones:
+# To install by hand, rootless as the user that will run the container. Both
+# units are needed -- this one serves the UI, nethub-sibling.container does
+# every piece of device work. They share the database and nothing else; device
+# credentials travel sealed in the job row (nethub/sealed_credentials.py).
 #   cp quadlet/nethub.container quadlet/nethub-sibling.container \
 #        ~/.config/containers/systemd/
-#   cp quadlet/nethub-credential.socket ~/.config/systemd/user/
-#   # fill in SECRET_KEY and ADMIN_PASSWORD (or LoadCredential=) below; the
-#   # sibling unit needs no SECRET_KEY
+#   # create the sibling's key pair (prints the public key to set below):
+#   mkdir -p ~/.config/nethub
+#   podman run --rm --userns=keep-id:uid=1000,gid=1000 \
+#        -v ~/.config/nethub:/keys:z --entrypoint python \
+#        localhost/nethub:latest -m nethub.sealed_credentials keygen \
+#        --out /keys/credential_private_key
+#   # fill in SECRET_KEY and ADMIN_PASSWORD (or LoadCredential=) and
+#   # NETHUB_CREDENTIAL_PUBLIC_KEY below, and the key lines in the sibling unit
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now nethub-credential.socket
 #   systemctl --user start nethub nethub-sibling
 #
 # Running this unit alone gets you a UI that accepts work and never performs
@@ -26,14 +29,6 @@
 Description=NetHub software lifecycle server
 After=network-online.target
 Wants=network-online.target
-
-# The credential channel (§9.1). This unit is the one that gets handed the
-# listening descriptor -- Flask serves, the sibling connects -- so the socket
-# has to exist before gunicorn starts. See the Sockets= line in [Service],
-# which is what actually causes the hand-over, and entrypoint.sh, which is
-# what stops gunicorn from misreading it.
-Requires=nethub-credential.socket
-After=nethub-credential.socket
 
 [Container]
 Image=localhost/nethub:latest
@@ -98,6 +93,16 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # LoadCredential= line in [Service] and leave the Environment= line above
 # commented out. The credential takes priority over the env var either way.
 
+# --- Required ---
+# The sibling's public key: device credentials are sealed to it before they
+# are stored in the job row, and only the sibling's private key can open them
+# (nethub/sealed_credentials.py). Public, so an Environment= line is fine; the
+# same value goes in nethub-sibling.container. NetHub refuses to start
+# without it. Printed by `python -m nethub.sealed_credentials keygen` (see the
+# top of this file), or recovered from the private key with `... public-key
+# --key <file>`.
+#Environment=NETHUB_CREDENTIAL_PUBLIC_KEY=
+
 # --- Required before any upgrade can be submitted ---
 # Comma-separated CIDRs a submitted target address must fall inside. This is
 # fail-closed and has no default: while it is unset, every submit is refused.
@@ -146,21 +151,10 @@ Tmpfs=/run
 [Service]
 Restart=on-failure
 
-# Hand this service the descriptor nethub-credential.socket is listening on.
-# Required rather than implied: systemd pairs a socket with a service
-# automatically only when the two unit names share a prefix, and these do not.
-#
-# The descriptor arrives as $LISTEN_FDS/$LISTEN_PID, which gunicorn's arbiter
-# also reads -- and, left alone, it would clear the configured bind and serve
-# HTTP on the credential socket instead, so NetHub would answer no requests at
-# all. The image's entrypoint renames those variables before gunicorn sees
-# them; read entrypoint.sh before changing either side.
-Sockets=nethub-credential.socket
-
-# A core dump would write this process's heap -- which holds submitted device
-# passwords for the life of a phase execution -- to /var/lib/systemd/coredump,
-# where it outlives the credential by however long the retention allows. See
-# CLAUDE.md's note that this was a known-open item.
+# A core dump would write this process's heap -- which holds a submitted
+# device password for the length of the request that seals it -- to
+# /var/lib/systemd/coredump, where it outlives the credential by however long
+# the retention allows. See CLAUDE.md's note that this was a known-open item.
 LimitCORE=0
 
 # /proc of other processes is not this container's business.

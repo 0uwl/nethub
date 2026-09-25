@@ -38,6 +38,21 @@ podman build -f Containerfile.dev -t "$IMAGE" .
 # instance/registries, which went with REGISTRIES_ROOT at build step 7.
 mkdir -p ./instance/artifacts
 
+# The sibling's key pair (nethub/sealed_credentials.py). create_app() refuses
+# to start without the public half. Made once, into the gitignored instance/
+# directory, so a sibling run by hand against this checkout can use the same
+# pair (NETHUB_CREDENTIAL_KEY_FILE=instance/credential_private_key).
+KEY_FILE=./instance/credential_private_key
+keytool() {
+    podman run --rm -v "$PWD:/app:Z" --entrypoint python "$IMAGE" \
+        -m nethub.sealed_credentials "$@"
+}
+if [[ ! -f "$KEY_FILE" ]]; then
+    echo "==> Creating a dev key pair in $KEY_FILE"
+    keytool keygen --out /app/instance/credential_private_key >/dev/null
+fi
+export NETHUB_CREDENTIAL_PUBLIC_KEY="${NETHUB_CREDENTIAL_PUBLIC_KEY:-$(keytool public-key --key /app/instance/credential_private_key)}"
+
 echo "==> Starting dev container (Flask debug/reload on :$NETHUB_PORT)"
 podman run --rm --name "$CONTAINER" \
     -p "${NETHUB_PORT}:${NETHUB_PORT}" \
@@ -51,4 +66,5 @@ podman run --rm --name "$CONTAINER" \
     -e ARTIFACT_STORE \
     -e SESSION_COOKIE_INSECURE \
     -e DEVICE_TARGET_CIDRS \
+    -e NETHUB_CREDENTIAL_PUBLIC_KEY \
     "$IMAGE" --port "$NETHUB_PORT"
