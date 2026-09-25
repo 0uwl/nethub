@@ -168,9 +168,14 @@ PHASES = ('precheck', 'stage', 'activate', 'verify', 'cleanup')
 APPROVABLE = ('stage', 'activate', 'cleanup')
 
 #: §7.3 job status, shared by every job kind so one sweep serves them all.
+#: `succeeded` means every host the phase ran on, `failed` means none of them,
+#: and `partial` is the rest (PLAN.md WS-8): the run carries on with the hosts
+#: that passed, and the failed ones can be retried. Changing this tuple
+#: changes a CHECK constraint and the terminal-status trigger, so it needs a
+#: migration (see 0004).
 JOB_STATUSES = (
     'queued', 'running',
-    'succeeded', 'failed', 'timed_out', 'abandoned', 'cancelled', 'expired',
+    'succeeded', 'partial', 'failed', 'timed_out', 'abandoned', 'cancelled', 'expired',
 )
 TERMINAL_JOB_STATUSES = frozenset(JOB_STATUSES[2:])
 
@@ -187,6 +192,27 @@ HOST_STATES = (
     'pending', 'precheck_ok', 'staged', 'activated', 'verified',
     'failed', 'skipped',
 )
+
+#: The cursor a host must be at for a phase to run on it, and the one a retry
+#: puts a failed host back to (PLAN.md WS-8). Cleanup does not advance the
+#: cursor, so it runs on, and leaves hosts at, `verified`.
+STATE_BEFORE = {
+    'precheck': 'pending',
+    'stage': 'precheck_ok',
+    'activate': 'staged',
+    'verify': 'activated',
+    'cleanup': 'verified',
+}
+
+#: Which phases a retry may name while the run waits at a gate: the ones that
+#: ran since the previous gate (PLAN.md WS-8). A retry then carries on exactly
+#: as the phase did the first time and lands back at the same gate. Nothing
+#: follows cleanup, so there is no gate at which to retry it.
+RETRYABLE_AT = {
+    'stage': ('precheck',),
+    'activate': ('stage',),
+    'cleanup': ('activate', 'verify'),
+}
 
 #: §7.3 failure_stage, phase-job vocabulary. Deliberately *not* shared with the
 #: publish side: a publish stops at promote/render/commit, and §8.1's phases are
@@ -421,6 +447,10 @@ class UpgradePhaseJob(db.Model):
     approved_at = db.Column(db.DateTime)
 
     status = db.Column(_enum(JOB_STATUSES, 'job_status'), nullable=False, default='queued')
+    #: A retry of this phase on the hosts that failed it (PLAN.md WS-8). The
+    #: sibling puts those hosts' cursors back when it starts the job, because
+    #: §7.3 gives every per-host edge to the sibling and none to Flask.
+    is_retry = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
     failure_stage = db.Column(_enum(PHASE_FAILURE_STAGES, 'phase_failure_stage'))
     error_summary = db.Column(db.String(500))
 

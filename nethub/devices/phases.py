@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from nethub.devices import connection, facts, install, transfer
 from nethub.extensions import db
 from nethub.models import (
+    STATE_BEFORE,
     DeviceHostKey,
     UpgradeHostPhaseResult,
     UpgradePhaseJob,
@@ -343,6 +344,43 @@ def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
         host.reported_version_post = outcome.version_post
 
 
+def eligible_hosts(job: UpgradePhaseJob) -> list[UpgradeRunHost]:
+    """The hosts `job`'s phase runs on: those whose cursor sits just before it.
+
+    Not "every host that has not failed". A phase re-approved after it was
+    abandoned would otherwise run again on hosts it had already finished --
+    a second `install add` on a switch that has just reloaded -- and a retry
+    would sweep in hosts that are already past it (PLAN.md WS-8).
+    """
+    before = STATE_BEFORE[job.phase]
+    return [h for h in job.run.hosts if h.state == before]
+
+
+def reset_for_retry(job: UpgradePhaseJob) -> None:
+    """Put the hosts that failed this phase back to where it starts.
+
+    A retry names a phase; this is what makes it run on the hosts that failed
+    that phase and on nothing else. Done here, by the sibling, when the job
+    starts: §7.3 gives every per-host cursor edge to the sibling. The result
+    rows of earlier attempts stay as they were, so the failure is still on
+    record.
+    """
+    for host in job.run.hosts:
+        if host.state == 'failed' and host.last_phase == job.phase:
+            host.state = STATE_BEFORE[job.phase]
+            host.error_summary = None
+
+
+def _not_attempted(host: UpgradeRunHost, job: UpgradePhaseJob, after: str,
+                   when: datetime) -> None:
+    """Record a host the phase stopped before reaching, as failed and retryable."""
+    record(host, job, HostOutcome(
+        host.hostname, 'not_attempted', failure_stage='credential',
+        error_summary=(f"not attempted: the phase stopped after the credential "
+                       f"was refused on {after}"),
+    ), when)
+
+
 def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
                   now: Callable[[], datetime] = _utcnow) -> str:
     """Run `job`'s phase across every eligible host. Returns the job's status.
@@ -350,14 +388,24 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     The caller has already claimed the job and set it `running`; this writes
     the terminal edge and the per-host rows, and nothing else touches the job.
 
+    `succeeded` means every host the phase ran on passed, `failed` none, and
+    `partial` the rest (PLAN.md WS-8). A host that fails does not stop the
+    others -- except on a refused credential. The same password goes to every
+    host, so it would be refused on each of them in turn, and enough failed
+    logins lock the account out of TACACS+/RADIUS for the whole fleet. So the
+    phase stops there, and the hosts it did not reach are recorded as failed
+    (`not_attempted`) so a retry with the right password picks them up.
+
     Cancel and the deadline are checked *between hosts* and not mid-host
     (§7.3): there is no safe place to stop inside an activation, and a job row
     polled more finely would still not give one.
     """
-    hosts = [h for h in job.run.hosts if h.state not in ('failed', 'skipped')]
+    if job.is_retry:
+        reset_for_retry(job)
+    hosts = eligible_hosts(job)
     stopped = None
 
-    for host in hosts:
+    for index, host in enumerate(hosts):
         if job.run.cancel_requested_at is not None:
             stopped = 'cancelled'
             break
@@ -369,16 +417,22 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
         started = now()
         outcome = run_host(host, job, ctx)
         record(host, job, outcome, started)
+        if outcome.failure_stage == 'credential':
+            for rest in hosts[index + 1:]:
+                _not_attempted(rest, job, host.hostname, now())
         job.heartbeat_at = now()
         db.session.commit()
+        if outcome.failure_stage == 'credential':
+            break
 
     if stopped is None:
-        failed = any(h.state == 'failed' for h in hosts)
-        stopped = 'failed' if failed else 'succeeded'
-        if failed:
-            first = next(h for h in hosts if h.state == 'failed')
-            job.failure_stage = _last_failure_stage(job, first.hostname)
-            job.error_summary = first.error_summary
+        failed = [h for h in hosts if h.state == 'failed']
+        if not failed:
+            stopped = 'succeeded'
+        else:
+            stopped = 'partial' if len(failed) < len(hosts) else 'failed'
+            job.failure_stage = _last_failure_stage(job, failed[0].hostname)
+            job.error_summary = failed[0].error_summary
 
     job.status = stopped
     job.finished_at = now()

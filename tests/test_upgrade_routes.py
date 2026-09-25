@@ -72,6 +72,18 @@ def submit(user_id, hosts="sw01, 192.0.2.10", bundle="iosxe-17-12-06", cidrs=Non
     )
 
 
+def at_gate(run, phase):
+    """Park `run` at `phase`'s gate the way the sibling leaves it: nothing of
+    the run's queued or running any more (the sibling finished pre-check
+    before parking it), so an approval is the only live job."""
+    for job in UpgradePhaseJob.query.filter(
+            UpgradePhaseJob.run_id == run.id,
+            UpgradePhaseJob.status.in_(("queued", "running"))):
+        job.status, job.sealed_credential = "succeeded", None
+    run.state, run.awaiting_phase = "awaiting_approval", phase
+    db.session.commit()
+
+
 def approve(**kwargs):
     """upgrades.approve with the device password and the app's public key."""
     kwargs.setdefault("password", PASSWORD)
@@ -181,8 +193,7 @@ class TestSubmit:
 
 class TestGates:
     def park(self, run, phase):
-        run.state, run.awaiting_phase = "awaiting_approval", phase
-        db.session.commit()
+        at_gate(run, phase)
 
     def test_approving_the_wrong_phase_is_refused(self, app, user, confirmed):
         with app.app_context():
@@ -199,8 +210,11 @@ class TestGates:
             self.park(run, "activate")
             alice = db.session.get(User, user)
             approve(run=run, phase="activate", user=alice)
-            self.park(run, "activate")  # pretend the gate reopened
-            with pytest.raises(upgrades.RequestError, match="already been approved"):
+            # Pretend the gate reopened while the approved activate is still
+            # queued: the queued job, not the state column, is what refuses.
+            run.state, run.awaiting_phase = "awaiting_approval", "activate"
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="already been acted on"):
                 approve(run=run, phase="activate", user=alice)
             assert UpgradePhaseJob.query.filter_by(phase="activate").count() == 1
 
@@ -294,8 +308,7 @@ class TestSealedAtSubmitAndApprove:
             self, app, user, confirmed, credential_private_key):
         with app.app_context():
             run, _ = submit(user)
-            run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
-            db.session.commit()
+            at_gate(run, 'stage')
             job = approve(run=run, phase='stage', user=db.session.get(User, user))
             assert self.open_as_sibling(credential_private_key, job, user).password == PASSWORD
             with pytest.raises(SC.CredentialError, match='different identity'):
@@ -333,8 +346,7 @@ class TestPhaseDeadlines:
     def test_approve_writes_a_deadline(self, app, user, confirmed):
         with app.app_context():
             run, _ = submit(user)
-            run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
-            db.session.commit()
+            at_gate(run, 'stage')
             job = approve(
                 run=run, phase='stage', user=db.session.get(User, user))
             assert job.deadline_at is not None
@@ -386,6 +398,177 @@ class TestPhaseDeadlines:
         assert budget > 370 * 4, f"only {budget / 370:.1f}x the measured time"
 
 
+class TestRetry:
+    """PLAN.md WS-8: retrying the hosts that failed a phase, from the gate the
+    run moved on to."""
+
+    @pytest.fixture
+    def partial_stage(self, app, user, confirmed):
+        """A two-host run at the activate gate: sw01 staged, sw02 failed stage."""
+        with app.app_context():
+            db.session.add(DeviceHostKey(
+                ansible_host="192.0.2.11", key_type="ssh-rsa",
+                fingerprint_sha256="SHA256:y", confirmed_by=user, confirmed_at=NOW))
+            db.session.commit()
+            run, _ = submit(user, hosts="sw01, 192.0.2.10\nsw02, 192.0.2.11")
+            db.session.add(UpgradePhaseJob(
+                run_id=run.id, phase="stage", attempt=1, status="partial",
+                created_at=NOW))
+            sw01, sw02 = sorted(run.hosts, key=lambda h: h.hostname)
+            sw01.state, sw01.last_phase = "staged", "stage"
+            sw02.state, sw02.last_phase = "failed", "stage"
+            at_gate(run, "activate")
+            return run.id
+
+    def retry(self, run_id, phase="stage", user_id=None, **kwargs):
+        run = db.session.get(UpgradeRun, run_id)
+        kwargs.setdefault("password", PASSWORD)
+        kwargs.setdefault("public_key", current_app.extensions["credential_public_key"])
+        return upgrades.retry(
+            run=run, phase=phase,
+            user=db.session.get(User, user_id or run.submitted_by), **kwargs)
+
+    def test_a_retry_queues_the_next_attempt_marked_as_a_retry(
+            self, app, partial_stage, credential_private_key):
+        with app.app_context():
+            job = self.retry(partial_stage)
+            assert (job.phase, job.attempt, job.is_retry, job.status) == (
+                "stage", 2, True, "queued")
+            run = db.session.get(UpgradeRun, partial_stage)
+            assert (run.state, run.awaiting_phase) == ("running", None)
+            assert job.approved_by == run.submitted_by and job.approved_at
+            credential = SC.open_sealed(
+                credential_private_key, job.sealed_credential, job_id=job.id,
+                approved_by=run.submitted_by, now=upgrades._utcnow())
+            assert credential.password == PASSWORD
+
+    def test_flask_leaves_the_host_cursors_to_the_sibling(self, app, partial_stage):
+        """§7.3: every per-host edge is the sibling's."""
+        with app.app_context():
+            self.retry(partial_stage)
+            states = {h.hostname: h.state
+                      for h in db.session.get(UpgradeRun, partial_stage).hosts}
+            assert states == {"sw01": "staged", "sw02": "failed"}
+
+    def test_the_deadline_is_sized_for_the_failed_hosts(self, app, partial_stage):
+        with app.app_context():
+            job = self.retry(partial_stage)
+            one_host = upgrades.phase_deadline(
+                "stage", hosts=1, image_bytes=471084127, now=upgrades._utcnow())
+            assert abs((upgrades._aware(job.deadline_at) - one_host).total_seconds()) < 5
+
+    def test_a_phase_that_did_not_run_since_the_last_gate_is_refused(
+            self, app, partial_stage):
+        with app.app_context(), pytest.raises(upgrades.RequestError,
+                                              match="cannot be retried"):
+            self.retry(partial_stage, phase="precheck")
+
+    def test_a_phase_with_no_failed_host_is_refused(self, app, partial_stage):
+        with app.app_context():
+            run = db.session.get(UpgradeRun, partial_stage)
+            for host in run.hosts:
+                host.state = "staged"
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="nothing to retry"):
+                self.retry(partial_stage)
+
+    def test_a_run_not_at_a_gate_is_refused(self, app, partial_stage):
+        with app.app_context():
+            db.session.get(UpgradeRun, partial_stage).state = "running"
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="not waiting at a gate"):
+                self.retry(partial_stage)
+
+    def test_an_expired_gate_is_refused(self, app, partial_stage):
+        with app.app_context():
+            run = db.session.get(UpgradeRun, partial_stage)
+            run.gate_expires_at = upgrades._utcnow() - timedelta(minutes=1)
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="expired"):
+                self.retry(partial_stage)
+
+    def test_a_retrier_without_a_device_username_is_refused(self, app, partial_stage):
+        with app.app_context():
+            bob = User(username="bob")
+            bob.set_password("hunter2hunter2")
+            db.session.add(bob)
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="device username"):
+                self.retry(partial_stage, user_id=bob.id)
+            assert UpgradePhaseJob.query.filter_by(phase="stage", attempt=2).count() == 0
+
+    def test_an_approval_after_a_retry_is_refused_and_so_is_the_reverse(
+            self, app, partial_stage):
+        with app.app_context():
+            self.retry(partial_stage)
+            # The retry took the run off the gate; put the column back as if a
+            # stale page submitted, so the queued retry is what refuses.
+            run = db.session.get(UpgradeRun, partial_stage)
+            run.state, run.awaiting_phase = "awaiting_approval", "activate"
+            db.session.commit()
+            with pytest.raises(upgrades.RequestError, match="already been acted on"):
+                approve(run=run, phase="activate", user=db.session.get(User, run.submitted_by))
+
+    def test_leaving_the_gate_is_conditional_on_still_being_at_it(
+            self, app, partial_stage, monkeypatch):
+        """Two requests at one gate both pass the checks; the conditional
+        update is what lets only one take the run off it."""
+        with app.app_context():
+            run = db.session.get(UpgradeRun, partial_stage)
+            db.session.execute(db.text(
+                "UPDATE upgrade_runs SET state = 'running', awaiting_phase = NULL "
+                "WHERE id = :id"), {"id": run.id})
+            monkeypatch.setattr(upgrades, "_check_gate", lambda run: None)
+            with pytest.raises(upgrades.RequestError, match="already been acted on"):
+                upgrades.retry(run=run, phase="stage",
+                               user=db.session.get(User, run.submitted_by),
+                               password=PASSWORD,
+                               public_key=current_app.extensions["credential_public_key"])
+            assert UpgradePhaseJob.query.filter_by(phase="stage", attempt=2).count() == 0
+
+    def test_the_route_queues_a_retry(self, app, client, partial_stage):
+        client.post("/login", data={"username": "alice", "password": "hunter2"})
+        response = client.post(f"/upgrades/{partial_stage}/retry",
+                               data={"phase": "stage", "device_password": PASSWORD},
+                               follow_redirects=True)
+        assert "Retrying stage" in response.get_data(as_text=True)
+        with app.app_context():
+            job = UpgradePhaseJob.query.filter_by(phase="stage", attempt=2).one()
+            assert job.is_retry
+
+    def test_the_route_reports_a_refusal(self, app, client, partial_stage):
+        client.post("/login", data={"username": "alice", "password": "hunter2"})
+        response = client.post(f"/upgrades/{partial_stage}/retry",
+                               data={"phase": "cleanup", "device_password": PASSWORD},
+                               follow_redirects=True)
+        assert "cannot be retried" in response.get_data(as_text=True)
+
+
+class TestAttempts:
+    def test_an_approval_after_an_abandoned_attempt_takes_the_next_number(
+            self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            db.session.add(UpgradePhaseJob(
+                run_id=run.id, phase="stage", attempt=1, status="abandoned",
+                created_at=NOW))
+            at_gate(run, "stage")
+            job = approve(run=run, phase="stage", user=db.session.get(User, user))
+            assert (job.attempt, job.is_retry) == (2, False)
+
+    def test_numbers_follow_the_highest_attempt_not_the_count(self, app, user, confirmed):
+        """A retried and then abandoned phase must not reuse a number."""
+        with app.app_context():
+            run, _ = submit(user)
+            for attempt, status in ((1, "partial"), (3, "abandoned")):
+                db.session.add(UpgradePhaseJob(
+                    run_id=run.id, phase="stage", attempt=attempt, status=status,
+                    created_at=NOW))
+            at_gate(run, "stage")
+            job = approve(run=run, phase="stage", user=db.session.get(User, user))
+            assert job.attempt == 4
+
+
 class TestApproveRace:
     """WS-5.2: check-then-insert, and the check is not the thing that holds."""
 
@@ -404,8 +587,7 @@ class TestApproveRace:
 
         with app.app_context():
             run, _ = submit(user)
-            run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
-            db.session.commit()
+            at_gate(run, 'activate')
 
             real = db.session.flush
             calls = []
@@ -417,7 +599,7 @@ class TestApproveRace:
                 return real(*a, **kw)
 
             monkeypatch.setattr(db.session, 'flush', once_failing)
-            with pytest.raises(upgrades.RequestError, match='already been approved'):
+            with pytest.raises(upgrades.RequestError, match='already been acted on'):
                 approve(run=run, phase='activate',
                                  user=db.session.get(User, user))
 
@@ -427,8 +609,7 @@ class TestApproveRace:
 
         with app.app_context():
             run, _ = submit(user)
-            run.state, run.awaiting_phase = 'awaiting_approval', 'activate'
-            db.session.commit()
+            at_gate(run, 'activate')
             approve(run=run, phase='activate',
                              user=db.session.get(User, user))
             db.session.add(UpgradePhaseJob(
@@ -703,9 +884,8 @@ class TestSealedInTheSameTransaction:
         })
         with app.app_context():
             run = UpgradeRun.query.one()
-            run.state, run.awaiting_phase = 'awaiting_approval', 'stage'
+            at_gate(run, 'stage')
             run_id = run.id
-            db.session.commit()
         seen = self.sibling_polls_after_commit(monkeypatch, 'stage')
         client.post(f'/upgrades/{run_id}/approve',
                     data={'phase': 'stage', 'device_password': PASSWORD})
@@ -758,8 +938,7 @@ class TestSealedInTheSameTransaction:
 
 class TestApproverChecks:
     def park(self, run, phase='stage'):
-        run.state, run.awaiting_phase = 'awaiting_approval', phase
-        db.session.commit()
+        at_gate(run, phase)
 
     def test_an_approver_without_a_device_username_is_refused(
         self, app, user, confirmed

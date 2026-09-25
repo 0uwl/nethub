@@ -12,6 +12,7 @@ import pytest
 from nethub.devices import connection, facts, install, phases, transfer
 from nethub.extensions import db
 from nethub.models import (
+    STATE_BEFORE,
     DeviceHostKey,
     UpgradeHostPhaseResult,
     UpgradePhaseJob,
@@ -54,9 +55,19 @@ def run(app):
         yield run.id
 
 
+
+def at_phase(job):
+    """Move fresh hosts to where a run reaching `job`'s phase has them: a phase
+    runs only on hosts whose cursor sits just before it (PLAN.md WS-8)."""
+    for host in job.run.hosts:
+        if host.state == "pending":
+            host.state = STATE_BEFORE[job.phase]
+
 def job_for(run_id, phase="stage", **kw):
     job = UpgradePhaseJob(run_id=run_id, phase=phase, attempt=1, status="running", **kw)
     db.session.add(job)
+    db.session.flush()
+    at_phase(job)
     db.session.commit()
     return job
 
@@ -180,7 +191,7 @@ class TestExecutePhase:
         with app.app_context():
             job = job_for(run)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(job, ctx_returning(None)) == "failed"
+            assert phases.execute_phase(job, ctx_returning(None)) == "partial"
 
             assert UpgradeHostPhaseResult.query.count() == 2, "both hosts recorded"
             sw01 = UpgradeRunHost.query.filter_by(hostname="sw01").one()

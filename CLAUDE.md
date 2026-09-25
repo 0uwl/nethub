@@ -1300,6 +1300,38 @@ with the other vocabularies so the sibling can read it without importing
 `upgrades` (and the artifact store behind it); `upgrades.APPROVABLE` still
 resolves, by import.
 
+**One host failing a phase does not fail the run (PLAN.md WS-8).** A phase
+ends `succeeded` (every host it ran on passed), `partial` (some did) or
+`failed` (none did), and `_advance_run` carries the run on after `partial`,
+and after `failed` too while hosts that passed earlier phases are still in
+the run (a retry that got nowhere). A run fails only when no host is left.
+Four things hold this together:
+
+- **A phase runs on the hosts whose cursor sits just before it**
+  (`models.STATE_BEFORE`, `phases.eligible_hosts`), never "every host that
+  has not failed". That is also what stops a re-approved abandoned phase
+  from issuing a second `install add` to a switch that already reloaded.
+- **A retry is an approval with `is_retry` set, and the sibling does the
+  reset.** `upgrades.retry` (route `POST /upgrades/<id>/retry`) may name
+  only a phase that ran since the previous gate (`models.RETRYABLE_AT`),
+  collects the retrier's credential and records `approved_by`.
+  `phases.reset_for_retry` puts the hosts that failed that phase back to the
+  cursor before it when the job starts, because §7.3 gives every per-host
+  edge to the sibling; Flask must not write `upgrade_run_hosts.state`. The
+  run then carries on as it did the first time and lands back at the same
+  gate. A chained `verify` after a retried activate takes the next attempt
+  number, and is skipped when nothing was activated.
+- **A refused credential stops the phase.** The first `failure_stage:
+  credential` ends the wave, and the hosts it did not reach get a
+  `not_attempted` row and `failed`, so they are retryable. Every host gets
+  the same password, so going on would only add failed logins toward the
+  AAA server's lockout. Don't make the loop continue past it.
+- **Attempt numbers are `1 + max`**, not `1 + count(abandoned)`, so an
+  abandoned attempt and a retry share one rule, and `UNIQUE(run_id, phase,
+  attempt)` still holds. An abandoned retry of `precheck` or `verify`, which
+  nobody approves, goes back to the gate it was made from
+  (`Sibling._return_to_gate`) rather than failing the run.
+
 **A credential failure is finished in `run_once`, never left to the loop.**
 The claim has already committed `running` under this instance's own
 `runner_instance_id` by the time the credential is opened, and `sweep()` only
@@ -1608,6 +1640,10 @@ Things that are refusals rather than validation niceties:
 - **A second approval of the same gate is refused** before it reaches
   `UNIQUE(run_id, phase, attempt)`, so two admins clicking "approve: reload"
   get a message rather than an `IntegrityError` — and never two reloads.
+  Since retries (WS-8) two requests at one gate can name *different*
+  phases, which the constraint cannot see, so `upgrades._queue_from_gate`
+  takes the run off its gate with a conditional update (the claim pattern)
+  and refuses while any job of the run is queued or running.
 
 **Pre-check is the phase with no approver, and that broke the credential
 check once.** The sibling matches the identity sealed with a credential

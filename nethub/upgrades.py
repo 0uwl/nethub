@@ -47,6 +47,7 @@ from . import artifacts as artifact_store
 from .extensions import db
 from .models import (
     APPROVABLE,
+    RETRYABLE_AT,
     DeviceHostKey,
     UpgradePhaseJob,
     UpgradeRun,
@@ -362,69 +363,128 @@ def approve(*, run, phase, user, password, public_key):
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
     §8.1's serialization is scoped to *execution*, so it would otherwise queue
-    two reloads that then run one after the other. `UNIQUE(run_id, phase,
-    attempt)` is where that collision is caught.
-
-    The check below is a check-then-insert, so it turns the *sequential* case
-    into a message and loses the concurrent one -- which matters now that
-    `gunicorn.conf.py` runs more than one thread. The flush is wrapped for
-    that. The constraint holds either way, so two reloads were never possible;
-    without the wrapper the losing admin just got a 500.
+    two reloads that then run one after the other. The check below turns the
+    sequential case into a message; `_queue_from_gate` catches the concurrent
+    one, and `UNIQUE(run_id, phase, attempt)` holds either way.
 
     The approval is what supplies the credential, so it is sealed into the
     job in the same transaction (see `_seal_into`).
     """
-    if run.state != 'awaiting_approval':
-        raise RequestError(f'This run is {run.state}, not waiting at a gate.')
+    _check_gate(run)
     if phase not in APPROVABLE:
         raise RequestError(f'"{phase}" is not a phase anyone approves.')
     if run.awaiting_phase != phase:
         raise RequestError(
             f'This run is waiting at the {run.awaiting_phase} gate, not {phase}.'
         )
+    return _queue_from_gate(run=run, phase=phase, user=user, password=password,
+                            public_key=public_key, is_retry=False,
+                            hosts=len(run.hosts))
+
+
+def retryable_phases(run):
+    """What a retry may name at the run's current gate, with the hosts it would
+    run on: `[(phase, [hostname, ...]), ...]`, phases with no failed host left
+    out (PLAN.md WS-8)."""
+    if run.state != 'awaiting_approval':
+        return []
+    out = []
+    for phase in RETRYABLE_AT.get(run.awaiting_phase, ()):
+        failed = [h.hostname for h in run.hosts
+                  if h.state == 'failed' and h.last_phase == phase]
+        if failed:
+            out.append((phase, failed))
+    return out
+
+
+def retry(*, run, phase, user, password, public_key):
+    """Run a phase again on the hosts that failed it (PLAN.md WS-8).
+
+    Allowed while the run waits at a gate, for a phase that ran since the gate
+    before it (`models.RETRYABLE_AT`). It is an approval like any other: it
+    collects the retrier's credential and records who approved it. The job is
+    marked `is_retry`, and the sibling puts the failed hosts' cursors back when
+    it starts it -- Flask writes no per-host state (§7.3). When the retry ends,
+    the run carries on from that phase as it did the first time, which lands
+    it back at the same gate.
+    """
+    _check_gate(run)
+    allowed = dict(retryable_phases(run))
+    if phase not in allowed:
+        if phase in RETRYABLE_AT.get(run.awaiting_phase, ()):
+            raise RequestError(f'No host has failed {phase}; there is nothing to retry.')
+        raise RequestError(
+            f'{phase} cannot be retried while the run waits at the '
+            f'{run.awaiting_phase} gate.'
+        )
+    return _queue_from_gate(run=run, phase=phase, user=user, password=password,
+                            public_key=public_key, is_retry=True,
+                            hosts=len(allowed[phase]))
+
+
+def _check_gate(run):
+    if run.state != 'awaiting_approval':
+        raise RequestError(f'This run is {run.state}, not waiting at a gate.')
     expires = _aware(run.gate_expires_at)
     if expires is not None and _utcnow() >= expires:
         # The sibling moves the run to `expired` on its next loop. Refusing
         # here too means the TTL holds even while the sibling is down, without
         # Flask writing the expiry edge itself (§7.3 gives that to the sibling).
         raise RequestError('This gate has expired. Submit a new run.')
+
+
+def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts):
+    """Queue `phase` from the gate the run is waiting at, and take it off the gate.
+
+    The attempt is one past the highest so far for this phase, so an abandoned
+    attempt and a retry follow the same rule (PLAN.md WS-8).
+
+    Leaving the gate is a conditional update, the claim pattern: two requests
+    at one gate -- an approval and a retry, or two approvals under
+    `gunicorn.conf.py`'s threads -- both pass the checks above, and only one
+    may take the run off it. The loser gets a message, not a second job.
+    """
     _require_device_username(user)
     _check_credential(user, password)
-    attempt = 1 + (
-        UpgradePhaseJob.query.filter_by(run_id=run.id, phase=phase)
-        .filter(UpgradePhaseJob.status.in_(('abandoned',)))
-        .count()
-    )
-    if UpgradePhaseJob.query.filter_by(
-        run_id=run.id, phase=phase, attempt=attempt
-    ).first():
-        raise RequestError('That phase has already been approved.')
+    if UpgradePhaseJob.query.filter(
+            UpgradePhaseJob.run_id == run.id,
+            UpgradePhaseJob.status.in_(('queued', 'running'))).first():
+        # A run at a gate has nothing queued or running; one that does was
+        # already acted on, whatever its state column says.
+        raise RequestError('That gate has already been acted on.')
+    previous = (db.session.query(db.func.max(UpgradePhaseJob.attempt))
+                .filter_by(run_id=run.id, phase=phase).scalar())
 
     # The run's own rows carry the image size -- read from there rather than
     # from `artifacts`, which is what keeps a run self-contained and stops a
     # mid-run supersede re-targeting it (§5).
     job = UpgradePhaseJob(
-        run_id=run.id, phase=phase, attempt=attempt, status='queued',
-        approved_by=user.id, approved_at=_utcnow(), created_at=_utcnow(),
+        run_id=run.id, phase=phase, attempt=(previous or 0) + 1, status='queued',
+        is_retry=is_retry, approved_by=user.id, approved_at=_utcnow(),
+        created_at=_utcnow(),
         deadline_at=phase_deadline(
-            phase, hosts=len(run.hosts),
+            phase, hosts=hosts,
             image_bytes=max((h.file_size or 0) for h in run.hosts) if run.hosts else 0,
         ),
     )
+    left = (
+        db.session.query(UpgradeRun)
+        .filter(UpgradeRun.id == run.id, UpgradeRun.state == 'awaiting_approval',
+                UpgradeRun.awaiting_phase == run.awaiting_phase)
+        .update({'state': 'running', 'awaiting_phase': None, 'gate_expires_at': None},
+                synchronize_session='fetch')
+    )
+    if left != 1:
+        db.session.rollback()
+        raise RequestError('That gate has already been acted on.')
     db.session.add(job)
-    run.state = 'running'
-    run.awaiting_phase = None
-    run.gate_expires_at = None
     try:
         db.session.flush()
     except IntegrityError:
-        # The check above is a check-then-insert, so under the threads
-        # `gunicorn.conf.py` runs, two approvals can both pass it.
-        # UNIQUE(run_id, phase, attempt) holds either way, so there is never a
-        # risk of two reloads; this turns the loser's IntegrityError into a
-        # message instead of a 500.
+        # UNIQUE(run_id, phase, attempt): the same phase queued by a request
+        # that left the gate first. Never two reloads either way.
         db.session.rollback()
-        raise RequestError('That phase has already been approved.') from None
+        raise RequestError('That gate has already been acted on.') from None
     _seal_into(job, user=user, password=password, public_key=public_key)
     db.session.commit()
     return job

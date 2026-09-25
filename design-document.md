@@ -1745,7 +1745,9 @@ described there are `upgrade_phase_jobs`-only now.
   `error_summary`, `created_at`, `started_at`, `heartbeat_at`,
   `deadline_at`, `finished_at`, `runner_instance_id`, `log_path`,
   `sealed_credential` (the approval's device credential, sealed to the
-  sibling's key and non-null only while `queued`, by CHECK; §9.1). One row
+  sibling's key and non-null only while `queued`, by CHECK; §9.1),
+  `is_retry` (the job re-runs its phase on the hosts that failed it;
+  §8.1). One row
   per phase execution, reusing the same status vocabulary and startup
   sweep (§7.3) a publish job would need if one still existed as a
   dispatched job kind — it no longer does (above), so this table is the
@@ -1764,8 +1766,13 @@ described there are `upgrade_phase_jobs`-only now.
     them one after the other — the fleet reloads twice. §8.1 says an
     approval is a row rather than a keystroke, so the row is where the
     collision has to be refused. `attempt` exists because §7.3 grants an
-    `abandoned` phase a fresh, separately-approved retry; without it the
-    constraint would forbid the retry along with the double-click.
+    `abandoned` phase a fresh, separately-approved retry, and §8.1 lets
+    the hosts that failed a phase be retried; without it the constraint
+    would forbid both along with the double-click. A new attempt is
+    always one past the highest so far for that phase.
+  - `status` carries §7.3's vocabulary plus `partial`: `succeeded` means
+    every host the phase ran on passed, `failed` none of them, `partial`
+    the rest.
 - `allowlist_entries` table, the day-0 side's central record: `id`,
   `serial`, `mac`, `platform`, `config_artifact_id`,
   `image_artifact_id`, `script_artifact_id`, `state`, `expires_at`,
@@ -2361,7 +2368,8 @@ Several rules fall out of this:
   `approved_by`. Auto-retrying would attribute a machine decision to
   whoever last clicked, which is the attribution property in reverse.
   The retry is a new row with an incremented `attempt` (§5), so the
-  history shows both.
+  history shows both. The same holds for retrying the hosts that failed a
+  phase (§8.1): an approval, a new attempt, never automatic.
 - **A cancel is a request in a column, not a signal.** §9 makes the job
   row the only control channel, so stopping something is
   `cancel_requested_at` being set by Flask and polled by the sibling
@@ -2418,7 +2426,7 @@ same shape minus the three states it has no use for:
 | `queued` | `running` | sibling, conditional claim that also clears the sealed credential (§9.1) |
 | `queued` | `cancelled` | sibling, seeing the cancel column |
 | `queued` | `expired` | sibling, past `deadline_at` |
-| `running` | `succeeded` / `failed` | sibling, on phase completion; `failed` also when the credential fetch fails or its own code raises |
+| `running` | `succeeded` / `partial` / `failed` | sibling, on phase completion (every host passed / some did / none did); `failed` also when the credential cannot be opened or its own code raises |
 | `running` | `timed_out` | sibling, at `deadline_at` |
 | `running` | `cancelled` | sibling, between hosts |
 | `running` | `abandoned` | sibling's startup sweep, foreign `runner_instance_id` |
@@ -2432,14 +2440,14 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | --- | --- | --- |
 | — | `pre_checking` | Flask, on submit (pre-check needs no gate) |
 | `pre_checking` | `awaiting_approval` | sibling, on pre-check succeeding; sets `awaiting_phase` and `gate_expires_at` |
-| `pre_checking` / `running` | `failed` | sibling: a phase reaching a failed terminal state, a credential it could not fetch, or an unexpected error in its own code |
+| `pre_checking` / `running` | `failed` | sibling: a phase leaving no host able to carry on, a credential it could not open, or an unexpected error in its own code |
 | `pre_checking` / `running` | `failed` | sibling's startup sweep, abandoning a phase nobody approves (`precheck`, `verify`) |
 | `pre_checking` / `running` | `cancelled` | sibling, seeing the cancel column before claiming the job or between hosts |
 | `pre_checking` / `running` | `expired` | sibling, finding the queued job past its `deadline_at` |
-| `awaiting_approval` | `running` | Flask, on approval (writes the phase job row) |
+| `awaiting_approval` | `running` | Flask, on approval or on a retry of failed hosts (writes the phase job row; leaving the gate is a conditional update, so only one request can) |
 | `awaiting_approval` | `expired` | sibling, past `gate_expires_at` (checked every loop) |
 | `awaiting_approval` | `cancelled` / `completed` | Flask: an operator cancels, or declines the optional cleanup gate |
-| `running` | `awaiting_approval` | sibling, at the next gate; or its startup sweep, parking an abandoned `stage`/`activate`/`cleanup` for re-approval |
+| `running` | `awaiting_approval` | sibling, at the next gate, including after a `partial` phase or a retry that failed again while other hosts carry on; or its startup sweep, parking an abandoned `stage`/`activate`/`cleanup` for re-approval, or an abandoned retry of `precheck`/`verify` back at the gate it was made from |
 | `running` | `completed` | sibling, after cleanup succeeds |
 
 `activate` succeeding queues `verify` directly, so the run stays `running`
@@ -2447,12 +2455,11 @@ across that boundary. Flask refuses an approval past `gate_expires_at` even
 if the sibling has not yet run its check, so the TTL holds while the sibling
 is down; it does not write the `expired` edge itself.
 
-**The job row is committed only once its credential is held.** Flask
-flushes the new `queued` row to get its id, puts the credential in the
-store under that id, and only then commits. The sibling can only see
-committed rows, so it cannot claim a job whose credential is not there
-yet. If the commit fails, the credential is discarded before the
-rollback, because the rollback frees that id for the next insert.
+**The job row is created with its credential already in it.** Flask
+flushes the new `queued` row to get its id, seals the credential into it
+(§9.1), and commits both at once. The sibling can only see committed rows,
+so there is no moment at which it can claim a job whose credential is not
+there yet, and a failed commit takes the ciphertext with it.
 
 **`pre_checking` has the same exits as `running`.** It is a distinct
 literal only because pre-check needs no gate. The table lists the two
@@ -2470,6 +2477,15 @@ of them and `skipped` for a host excluded by a pre-check assertion. The
 sibling owns every edge; Flask never writes this table after the run's
 host rows are created. The per-phase detail lives in
 `upgrade_host_phase_results` (§5), because this column is a cursor.
+
+A phase runs on the hosts whose cursor sits just before it (`pending` for
+pre-check, `precheck_ok` for stage, and so on; cleanup runs on and leaves
+hosts at `verified`), not on "every host that has not failed". So a phase
+re-approved after it was abandoned skips the hosts it had already
+finished, rather than issuing a second `install add` to a switch that has
+just reloaded. A retry adds one edge, `failed` → the cursor before the
+retried phase, which the sibling writes for the hosts that failed that
+phase when it starts the retry job (`is_retry`, §5).
 
 ### 7.4 Retention, and what staleness means here
 
@@ -2760,10 +2776,9 @@ prompting for confirmation before every phase in its own `MUTATING` set.
 Dispatched out-of-band by the sibling on behalf of a web session, there is
 no stdin to answer on. Streaming a PTY to the browser would buy the
 interactivity back at the cost of a general-purpose IPC channel between
-Flask and the sibling, which §9 rules out. §9.1 does open a second
-channel, but a deliberately narrow one carrying secrets in one direction
-and no control at all; a PTY stream fits through neither it nor the job
-row. So the interactivity is a UI concept instead: the run is split into
+Flask and the sibling, which §9 rules out: the job row is the only
+channel, credentials included (§9.1), and a PTY stream does not fit
+through it. So the interactivity is a UI concept instead: the run is split into
 phases, each dispatched as its own phase execution, and the confirmations
 become approval gates in the UI between them:
 
@@ -2781,7 +2796,7 @@ doing it this way rather than with a terminal. "Who authorized the
 reload of this device, and when" is a question the phase model answers
 by construction; a terminal transcript is not an audit record.
 
-Five things follow from the split:
+What follows from the split:
 
 - **The plan phase dissolves into the UI.** There is no `plan` value in
   the `PHASES` vocabulary at all (§5) — the request is validated and
@@ -2854,7 +2869,33 @@ Five things follow from the split:
   — the fleet reloads twice. `UNIQUE(run_id, phase, attempt)` (§5) is
   what makes the second click a refusal instead of a queue entry. An
   approval being a row rather than a keystroke is the reason this works:
-  a keystroke has nothing to collide with.
+  a keystroke has nothing to collide with. With retries (below) two
+  requests at one gate can name *different* phases, which the constraint
+  cannot see, so leaving a gate is also a conditional update on the run
+  (`... WHERE state='awaiting_approval' AND awaiting_phase=:gate`, one
+  changed row or a refusal), and a gate action is refused while any job
+  of the run is queued or running.
+- **A host that fails a phase does not fail the run** (PLAN.md WS-8).
+  The phase ends `partial`, the run moves on with the hosts that passed,
+  and the failed ones stay at `failed` with their result rows. At the
+  next gate an operator can **retry** the phases that ran since the
+  previous one (pre-check at the stage gate, stage at the activate gate,
+  activate or verify at the cleanup gate) on the hosts that failed them.
+  A retry is an approval like any other: it collects the retrier's
+  credential and records `approved_by`, under the next `attempt`. The run
+  then carries on from that phase as it did the first time — a retried
+  activate is verified again, on the hosts it activated — and lands back
+  at the same gate. A retry that fails again changes nothing else; the
+  hosts stay retryable. A run fails only when a phase leaves no host able
+  to carry on. There is no retry of cleanup, since no gate follows it;
+  a cleanup failure on one host completes the run with that host marked.
+- **A refused credential stops the phase at once.** Every host in a
+  phase gets the same password, so a refusal on one is a refusal on all,
+  and each attempt counts toward the AAA server's lockout: a mistyped
+  password across a 40-host wave could lock the account out fleet-wide.
+  The phase stops at the first `credential` failure, and the hosts it did
+  not reach are recorded as failed (`not_attempted`, `failure_stage:
+  credential`) so a retry with the right password picks them up.
 - **Cancelling means different things at different phases, and the UI
   says which.** `cancel_requested_at` (§5) is polled by the sibling
   between hosts. Cancelling a `queued` phase stops it before it starts.

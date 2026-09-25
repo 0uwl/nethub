@@ -26,7 +26,13 @@ from sqlalchemy import or_
 
 from nethub.devices import connection, install, phases
 from nethub.extensions import db
-from nethub.models import APPROVABLE, HostKeyScan, UpgradePhaseJob, UpgradeRun
+from nethub.models import (
+    APPROVABLE,
+    STATE_BEFORE,
+    HostKeyScan,
+    UpgradePhaseJob,
+    UpgradeRun,
+)
 from nethub.sealed_credentials import CredentialError, open_sealed
 
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
@@ -158,11 +164,34 @@ class Sibling:
         terminal, and a fresh submit is the honest answer for them.
         """
         if job.phase not in APPROVABLE:
+            if job.is_retry:
+                self._return_to_gate(job)
+                return
             self._fail_run(job.run)
             return
         run = job.run
         run.state = 'awaiting_approval'
         run.awaiting_phase = job.phase
+        run.gate_expires_at = self.now() + self.gate_ttl
+        run.finished_at = None
+
+    def _return_to_gate(self, job: UpgradePhaseJob) -> None:
+        """Undo an abandoned retry of `precheck` or `verify` (PLAN.md WS-8).
+
+        Nobody approves either phase, so there is no gate of its own to park
+        it at; failing the run would throw away every host that had passed.
+        The hosts the retry had reset and not reached go back to `failed`, so
+        they can be retried again, and the run returns to the gate the retry
+        was made from.
+        """
+        for host in job.run.hosts:
+            if host.state == STATE_BEFORE[job.phase] and host.last_phase == job.phase:
+                host.state = 'failed'
+                host.error_summary = 'runner exited while this phase was being retried'
+        following, _gated = NEXT_PHASE[job.phase]
+        run = job.run
+        run.state = 'awaiting_approval'
+        run.awaiting_phase = following
         run.gate_expires_at = self.now() + self.gate_ttl
         run.finished_at = None
 
@@ -492,16 +521,31 @@ class Sibling:
 
         Returns the job queued for a phase with no gate, which the caller runs
         on the same credential (see `run_once`); None otherwise.
+
+        A `partial` phase moves the run on with the hosts that passed (PLAN.md
+        WS-8). So does a `failed` one while hosts that passed earlier phases
+        are still in the run: that is a retry, or a re-approved abandoned
+        phase, that got nowhere, and the run goes back to the gate it was at
+        with those hosts intact. On a first attempt `failed` means every host
+        in the run has failed, and the run fails.
         """
         run = job.run
         if status == 'cancelled':
             run.state, run.finished_at = 'cancelled', self.now()
             return None
-        if status != 'succeeded':
+        carries_on = status in ('succeeded', 'partial') or (
+            status == 'failed' and any(h.state not in ('failed', 'skipped') for h in run.hosts)
+        )
+        if not carries_on:
             self._fail_run(run)
             return None
 
         following, gated = NEXT_PHASE[job.phase]
+        while following is not None and not gated and not any(
+                h.state == STATE_BEFORE[following] for h in run.hosts):
+            # Nothing to run it on: a retried activate that activated nothing
+            # has nothing for verify to check. Go to where verify would lead.
+            following, gated = NEXT_PHASE[following]
         if following is None:
             run.state = 'completed'
             run.awaiting_phase = None
@@ -520,8 +564,12 @@ class Sibling:
         run.state = 'running'
         run.awaiting_phase = None
         run.gate_expires_at = None
+        # Not always 1: a retried activate is followed by verify again, on the
+        # hosts it activated, and UNIQUE(run_id, phase, attempt) holds.
+        previous = (db.session.query(db.func.max(UpgradePhaseJob.attempt))
+                    .filter_by(run_id=run.id, phase=following).scalar())
         queued = UpgradePhaseJob(
-            run_id=run.id, phase=following, attempt=1, status='queued',
+            run_id=run.id, phase=following, attempt=(previous or 0) + 1, status='queued',
             created_at=self.now(),
         )
         db.session.add(queued)
