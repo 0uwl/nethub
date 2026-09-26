@@ -74,12 +74,14 @@ function name.
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
-| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9 | todo |
+| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
+| 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | todo |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
 before 7, 8 and 9: those three rewrite the dispatch path and need the
-end-to-end test as a safety net. WS-14 was added after the plan was
-written; it still comes before WS-13, which stays last.
+end-to-end test as a safety net. WS-14 and WS-15 were added after the plan
+was written. Do WS-15 before WS-14, which relies on its stop-and-return-to-
+the-gate rule; both still come before WS-13, which stays last.
 
 ## Decisions this plan makes
 
@@ -96,8 +98,12 @@ halfway through a branch.
 4. **`check_store` becomes a CLI command** (WS-2), not a web button.
 5. **A phase can end `partial`** (WS-8). The run continues with the hosts
    that succeeded, and an operator can retry the failed ones.
-6. **Pre-check, stage, verify and cleanup run in parallel; activate stays
-   serial** (WS-9). Default concurrency 4.
+6. **Pre-check, stage, verify and cleanup run in parallel** (WS-9), default
+   concurrency 4. WS-9 keeps activate serial; **WS-15 replaces that**: activate
+   upgrades one canary host alone, and once it is verified, the rest run as
+   many at a time as the approver chooses (default 1), under a clear warning.
+   NetHub does not know which devices back each other up and does not refuse
+   on the user's behalf. Decided by the maintainer on 2026-09-25.
 7. **The frontend has no JavaScript** (WS-11).
 8. **`ADMIN_USERNAME` has no default** (WS-10), so the first admin is not
    always called `admin`.
@@ -118,6 +124,13 @@ halfway through a branch.
     next, and only Flask creates queued rows. A fully non-interactive run is
     recorded in design doc §10 as possible future work. Decided by the
     maintainer on 2026-09-24.
+13. **A wave stops only on NetHub's own faults, and on a failed canary**
+    (WS-15). A refused credential or an error in NetHub's code (`internal`)
+    will repeat on every host, so the phase stops there; a device's own
+    failure (`connect`, `reload`, `postcheck` and the rest) affects that
+    device, so the others carry on. A stopped phase leaves the hosts it did
+    not reach where they were and returns the run to the same gate, rather
+    than failing them. Decided by the maintainer on 2026-09-25.
 
 ## Workstreams
 
@@ -587,8 +600,8 @@ can wait for a start time without anything held in memory.
 - The sibling never claims a job before its `not_before`, and a scheduled
   job does not block the queue: pick the next job ordered by
   `coalesce(not_before, created_at)`, skipping any not yet due. A due job
-  still waits for whatever is running (activate stays serial after WS-9);
-  the deadline covers that wait.
+  still waits for whatever is running (an activate runs its canary first
+  after WS-15); the deadline covers that wait.
 - `verify` keeps running straight after `activate` on the same credential.
   Nothing new is sealed for it.
 - Cancel already clears the credential of queued jobs. Changing a start
@@ -600,9 +613,10 @@ can wait for a start time without anything held in memory.
   together are the audit record that the phase ran on a scheduled approval
   rather than with someone at the gate.
 - Requires the "stop the wave on a credential failure" item in "Found while
-  working" (WS-8). A mistyped password on a scheduled approval is not found
-  until the window, and must fail on one host, not lock the account out
-  across all of them.
+  working" (done in WS-8) and WS-15's return to the gate. A mistyped password
+  on a scheduled approval is not found until the window: it must fail on one
+  host, not lock the account out across all of them, and leave the run at
+  the gate for a fresh approval rather than failing it.
 - Update design doc §7.3 (the `queued` → `running` edge waits for
   `not_before`), §8.1 (an approval may carry a start time) and §9.1 (how
   long a credential can be stored). Add a §10 entry for the fully
@@ -622,6 +636,102 @@ window completes activate and verify.
 **Done when:** an admin can stage a fleet during the day, approve the reload
 for a start time that night, and the end-to-end test runs it at that time
 with no further input.
+
+### WS-15: Canary activation, parallel reloads, stop only on NetHub's faults
+
+Branch `feat/canary-activation`. After WS-9, which builds the parallel host
+driver (`HostTarget`, `LoginGate`, the heartbeat tick) and pins activate to
+one worker through `phases.SERIAL_PHASES`. This workstream changes that rule
+(decisions 6 and 13) and must update `CLAUDE.md`'s "Hosts run in parallel
+within a phase" paragraph and design doc §8.1 in the same branch.
+
+**Why.** Activating 20 switches one at a time takes about 4.7 hours. Keeping
+it serial protects a network whose redundancy NetHub cannot see, but that is
+the operator's knowledge and the operator's decision; NetHub should warn and
+let them choose. What a serial wave did buy is a first device that fails
+before the rest reload, and since WS-8 it does not even buy that: a wave
+continues past every device failure, so a bad image reloads every host in
+turn. A canary gives that protection back explicitly, at the cost of one
+serial activation (about 14 minutes; 20 switches four at a time then take
+about 84 minutes).
+
+**Design.**
+
+1. **The canary.** When activate has more than one eligible host, the first
+   in request order is upgraded alone: `install add`, reload, reconnect, and
+   the same version check `phase_verify` makes (`install.verify_upgrade`).
+   Only when it is on the target version do the rest start, at the approved
+   concurrency. The later `verify` phase still checks every host, the canary
+   included. A retry of activate (at the cleanup gate) uses a canary too.
+   Request order is not stored today: `upgrade_run_hosts` has only
+   `(run_id, hostname)` as its key. Add a `position` column, set at submit
+   from the request's line order (migration); don't read it back out of
+   `request_document`, since phases read rows, not documents.
+2. **Reload count, chosen at approval.** The activate approve form (and the
+   activate retry form) gets "Reload N devices at a time after the first",
+   default 1, capped at `PHASE_CONCURRENCY`. Stored on the job as
+   `upgrade_phase_jobs.concurrency` (migration), so the audit trail shows who
+   chose to reload several at once; the sibling uses
+   `min(job.concurrency, PHASE_CONCURRENCY)` and `SERIAL_PHASES` goes. Flask
+   renders the cap, so `PHASE_CONCURRENCY` moves to `shared_config.py` and
+   both Quadlet units set it. The form states, next to the field:
+   - the first host listed is upgraded alone first; list a representative
+     one, and split mixed hardware (stacks and standalone switches) into
+     separate runs, because the canary only speaks for devices like itself;
+   - NetHub does not know which devices back each other up, so reloading
+     both halves of a redundant pair at once drops service;
+   - cancel stops further reloads from starting, not ones in progress;
+   - after the canary, a device that fails its reload does not stop the
+     others.
+3. **Stop only on NetHub's own faults.** `phases.failure_stage_for` falls back
+   to `connect` for any exception it does not recognise, which records a bug
+   in NetHub's code as a network problem. Narrow it: netmiko's and paramiko's
+   exceptions and `OSError` stay `connect`, anything else is `internal`. An
+   unrecognised device-side exception therefore stops the wave, which errs
+   the safe way. The phase stops on `credential` or `internal` (and on a
+   failed canary); every other `failure_stage` fails that host alone.
+4. **A stopped phase returns to its gate instead of failing hosts.** Today
+   the credential stop marks every host it did not reach `failed`
+   (`not_attempted`), and when that is every host the run fails (the
+   "mistyped password" item in "Found while working"). Instead, for a phase
+   with a gate of its own (stage, activate, cleanup): the hosts not reached
+   keep their cursor and get a `not_attempted` result row; the host whose
+   credential was refused, or that hit `internal`, keeps its cursor too,
+   since the fault was not the device's; a failed canary is marked `failed`,
+   since that one was. The job ends `partial` if any host passed and
+   `failed` otherwise, and the run returns to that phase's gate with a fresh
+   `gate_expires_at`. Approving again runs a new attempt on the hosts still
+   eligible (a re-approved activate picks a new canary). Pre-check has no
+   gate, so a stop there keeps today's behaviour: unreached hosts are failed
+   and retryable at the stage gate, or the run fails if none passed. A stop
+   in `verify` does the same, retryable at the cleanup gate.
+5. **Check the source image once, before the stage wave.** A missing or
+   altered file in the artifact store fails every host, each only after a
+   transfer of up to 15 minutes, and as `transfer` or `checksum`, which reads
+   as a device fault. Before handing out any stage host, the main thread
+   hashes the file under `search_dir` and compares it with the hosts'
+   snapshotted `sha512` (seconds for 1.2 GB). A mismatch or a missing file
+   stops the phase before any device is touched, with a new `failure_stage`
+   `store` telling the operator to run `flask --app nethub check-store`
+   (vocabulary change: migration, and the trigger rebuild that goes with it).
+
+**Tests:** the canary runs alone and the rest start only after it verifies;
+a canary that fails its reload, its reconnect or the version check leaves
+every other host `staged` and the run at the activate gate, and approving
+again uses the next host as the canary; the chosen concurrency is honoured,
+capped at `PHASE_CONCURRENCY`, and recorded on the job; a device failure
+after the canary does not stop the others; an unexpected exception inside a
+phase is recorded as `internal` and stops the wave, while a netmiko timeout
+stays `connect` and does not; a mistyped password at the activate gate
+leaves every host `staged` and the run at the gate, and approving again with
+the right password completes it; a missing or altered source image stops
+stage before any device is contacted; an end-to-end run with three fake
+switches reloads the canary first and the other two together.
+
+**Done when:** an approver can reload a fleet several at a time after one
+verified canary, with the warning on the form; a refused password or a
+NetHub fault returns the run to its gate instead of failing it; and the
+"mistyped password" item in "Found while working" is marked done.
 
 ## Maintainer actions (no branch)
 
@@ -681,7 +791,8 @@ a one-line description and the workstream it was found in.
   recorded failed, so no host is left to carry on and `_advance_run` fails
   the run: the operator has to submit again, pre-check included. Parking the
   run at the same gate with the phase retryable would be kinder, and matters
-  more for WS-14, where the mistake is found in the window. Found in WS-8.
+  more for WS-14, where the mistake is found in the window. Found in WS-8;
+  belongs in WS-15 (design point 4).
 - `design-document.md` still described the WS-7 socket in two places: §7.3
   ("The job row is committed only once its credential is held ... puts the
   credential in the store") and §8.1 ("§9.1 does open a second channel").
