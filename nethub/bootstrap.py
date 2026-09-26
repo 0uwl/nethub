@@ -4,7 +4,7 @@ import string
 
 from .credentials import read_credential
 from .extensions import db
-from .models import User
+from .models import User, record_user_action
 
 ADMIN_CREDENTIAL_NAME = 'admin_password'
 ADMIN_PASSWORD_LENGTH = 12
@@ -37,19 +37,33 @@ def _initial_admin_password():
 
 
 def bootstrap_admin():
-    """Create the first login user if the database has none yet. Everyone
-    who can log in is an admin in this alpha -- there are no roles to pick
-    between (see CLAUDE.md).
+    """Create the first login user if the database has none yet, named by
+    ADMIN_USERNAME.
+
+    There is no default name (PLAN.md WS-10): a well-known `admin` plus the
+    login lockout let anyone on the network keep the first account locked
+    out. With no users and no ADMIN_USERNAME, NetHub starts anyway and says
+    how to create one. Everyone who can log in is an admin in this alpha --
+    there are no roles to pick between (see CLAUDE.md).
     """
     if User.query.count() > 0:
         return
 
-    username = os.getenv('ADMIN_USERNAME', 'admin')
+    username = os.getenv('ADMIN_USERNAME', '').strip()
+    if not username:
+        print(
+            "NetHub: there are no users yet. Set ADMIN_USERNAME to create the "
+            "first one at startup, or run `flask --app nethub create-admin <username>`."
+        )
+        return
+
     password, source = _initial_admin_password()
 
     user = User(username=username)
     user.set_password(password)
     db.session.add(user)
+    db.session.flush()
+    record_user_action('created', user, detail='first-boot bootstrap')
     db.session.commit()
 
     if source == 'credential':

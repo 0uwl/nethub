@@ -1,0 +1,23 @@
+{% extends 'layouts/main.html' %}
+{% block title %}User history{% endblock %}
+{% block content %}
+<div class="page-header"><h1>History for {{ user.username }}</h1></div>
+{% if entries %}
+<div class="table-responsive">
+<table class="table table-striped">
+  <thead><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for e in entries %}
+    <tr>
+      <td>{{ e.occurred_at }}</td>
+      <td>{{ e.action }}</td>
+      <td>{% if e.actor_user_id %}{{ users.get(e.actor_user_id, '?') }}{% else %}command line{% endif %}</td>
+      <td>{{ e.detail or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p>No history for this user.</p>{% endif %}
+<p><a href="{{ url_for('auth.list_users') }}">Back to users</a></p>
+{% endblock %}

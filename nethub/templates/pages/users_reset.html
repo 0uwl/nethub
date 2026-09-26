@@ -1,0 +1,25 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Reset password{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h1>Reset password for {{ user.username }}</h1>
+</div>
+
+<p>This sets a new password and ends every session {{ user.username }} has open.
+Give them the new password by a channel you trust, and have them change it on
+their profile page.</p>
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="form-group">
+    <label for="password">New password</label>
+    <input type="password" class="form-control" id="password" name="password"
+           required autocomplete="new-password" autofocus>
+  </div>
+  <button type="submit" class="btn btn-primary">Reset password</button>
+</form>
+
+<p><a href="{{ url_for('auth.list_users') }}">Back to users</a></p>
+
+{% endblock %}

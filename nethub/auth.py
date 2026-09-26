@@ -12,10 +12,11 @@ from flask import (
     url_for,
 )
 from flask_login import current_user, login_required, login_user, logout_user
+from sqlalchemy.orm import aliased
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
-from .models import User
+from .models import User, UserAdminAudit, record_user_action
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -68,7 +69,8 @@ def login():
             correct = user.check_password(password)
 
         locked = user is not None and user.is_locked()
-        if correct and not locked:
+        inactive = user is not None and not user.is_active
+        if correct and not locked and not inactive:
             user.clear_failed_logins()
             db.session.commit()
             # Marks the session for PERMANENT_SESSION_LIFETIME. Flask applies
@@ -96,15 +98,20 @@ def login():
                 'login attempt for locked account %r from %s',
                 username, request.remote_addr,
             )
+        elif inactive:
+            current_app.logger.warning(
+                'login attempt for disabled account %r from %s',
+                username, request.remote_addr,
+            )
         else:
             current_app.logger.warning(
                 'failed login for unknown username %r from %s',
                 username, request.remote_addr,
             )
 
-        # One message for every failure, including a locked account: saying
-        # "locked" would confirm the username exists and hand back the oracle
-        # the constant-time path above just closed.
+        # One message for every failure, including a locked or disabled
+        # account: saying either would confirm the username exists and hand
+        # back the oracle the constant-time path above just closed.
         flash('Invalid username or password.')
 
     return render_template('pages/login.html')
@@ -120,7 +127,7 @@ def logout():
 @auth_bp.route('/users')
 @login_required
 def list_users():
-    users = User.query.all()
+    users = User.query.order_by(User.username).all()
     return render_template('pages/users_list.html', users=users)
 
 
@@ -143,11 +150,169 @@ def new_user():
         user = User(username=username)
         user.set_password(password)
         db.session.add(user)
+        db.session.flush()
+        record_user_action('created', user, actor=current_user)
         db.session.commit()
         flash('User created.', 'success')
         return redirect(url_for('auth.list_users'))
 
     return render_template('pages/users_new.html')
+
+
+def _target(user_id):
+    user = db.session.get(User, user_id)
+    if user is None:
+        flash('No such user.')
+    return user
+
+
+@auth_bp.route('/users/<int:user_id>/reset-password', methods=['GET', 'POST'])
+@login_required
+def reset_password(user_id):
+    """Set another user's password. It ends every session they hold, since a
+    reset is what an admin does when an account may be in the wrong hands.
+    Your own password is changed on your profile, which asks for the current
+    one; this page does not."""
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    if user.id == current_user.id:
+        flash('Change your own password on your profile page.')
+        return redirect(url_for('upgrades.profile'))
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if _password_too_short(password):
+            flash(f'Password must be at least {MIN_PASSWORD_LENGTH} characters.')
+            return render_template('pages/users_reset.html', user=user)
+        user.set_password(password)
+        user.clear_failed_logins()
+        user.revoke_sessions()
+        record_user_action('password_reset', user, actor=current_user)
+        db.session.commit()
+        flash(f'Password for {user.username} reset; their sessions are ended.', 'success')
+        return redirect(url_for('auth.list_users'))
+    return render_template('pages/users_reset.html', user=user)
+
+
+@auth_bp.route('/users/<int:user_id>/disable', methods=['POST'])
+@login_required
+def disable_user(user_id):
+    """Disable an account and end its sessions.
+
+    Never yourself, and never the last active user, or nobody could log in
+    to undo it. The last-user check is part of the UPDATE itself (the claim
+    pattern again): two people disabling each other at the same moment both
+    pass a check made beforehand, and the database serialises the two
+    statements, so the second one finds nobody else active and changes
+    nothing.
+    """
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    if user.id == current_user.id:
+        flash('You cannot disable your own account.')
+        return redirect(url_for('auth.list_users'))
+    other = aliased(User)
+    others = (db.session.query(db.func.count(other.id))
+              .filter(other.is_active.is_(True), other.id != user_id)
+              .correlate(None).scalar_subquery())
+    changed = (
+        db.session.query(User)
+        .filter(User.id == user_id, User.is_active.is_(True), others > 0)
+        .update({'is_active': False, 'session_epoch': User.session_epoch + 1},
+                synchronize_session='fetch')
+    )
+    if changed != 1:
+        db.session.rollback()
+        flash(f'{user.username} is already disabled, or is the last active user.')
+        return redirect(url_for('auth.list_users'))
+    record_user_action('disabled', user, actor=current_user)
+    db.session.commit()
+    flash(f'Disabled {user.username}; their sessions are ended.', 'success')
+    return redirect(url_for('auth.list_users'))
+
+
+@auth_bp.route('/users/<int:user_id>/enable', methods=['POST'])
+@login_required
+def enable_user(user_id):
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    if user.is_active:
+        flash(f'{user.username} is already active.')
+        return redirect(url_for('auth.list_users'))
+    user.is_active = True
+    record_user_action('enabled', user, actor=current_user)
+    db.session.commit()
+    flash(f'Enabled {user.username}.', 'success')
+    return redirect(url_for('auth.list_users'))
+
+
+@auth_bp.route('/users/<int:user_id>/unlock', methods=['POST'])
+@login_required
+def unlock_user(user_id):
+    """Clear a lockout before it expires. The lockout is 15 minutes, but with
+    a well-known username anyone on the network can keep re-arming it, and
+    this is how an admin gets the account back in the meantime."""
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    user.clear_failed_logins()
+    record_user_action('unlocked', user, actor=current_user)
+    db.session.commit()
+    flash(f'Unlocked {user.username}.', 'success')
+    return redirect(url_for('auth.list_users'))
+
+
+@auth_bp.route('/users/<int:user_id>/history')
+@login_required
+def user_history(user_id):
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    entries = (UserAdminAudit.query.filter_by(target_user_id=user.id)
+               .order_by(UserAdminAudit.occurred_at.desc(), UserAdminAudit.id.desc()).all())
+    return render_template('pages/user_history.html', user=user, entries=entries,
+                           users={u.id: u.username for u in User.query.all()})
+
+
+@auth_bp.route('/profile/password', methods=['POST'])
+@login_required
+def change_password():
+    """Change your own password, which needs the current one.
+
+    A wrong current password counts toward the lockout, as a failed login
+    would: a session left open on someone else's screen must not become an
+    unlimited guessing oracle for the password behind it. Every other session
+    you hold ends; this one carries on under the new epoch.
+    """
+    user = current_user._get_current_object()
+    current = request.form.get('current_password', '')
+    new = request.form.get('new_password', '')
+    confirm = request.form.get('confirm_password', '')
+    if user.is_locked() or not user.check_password(current):
+        if not user.is_locked():
+            user.register_failed_login(limit=MAX_FAILED_LOGINS, lockout=LOCKOUT_DURATION)
+            db.session.commit()
+        flash('Your current password was not accepted.')
+        return redirect(url_for('upgrades.profile'))
+    if new != confirm:
+        flash('The new passwords do not match.')
+        return redirect(url_for('upgrades.profile'))
+    if _password_too_short(new):
+        flash(f'Password must be at least {MIN_PASSWORD_LENGTH} characters.')
+        return redirect(url_for('upgrades.profile'))
+    user.set_password(new)
+    user.clear_failed_logins()
+    user.revoke_sessions()
+    record_user_action('password_changed', user, actor=user)
+    db.session.commit()
+    # The epoch moved, so this session's cookie names the old one; log in
+    # again under the new id so only the *other* sessions end.
+    session.permanent = True
+    login_user(user)
+    flash('Password changed. Your other sessions are ended.', 'success')
+    return redirect(url_for('upgrades.profile'))
 
 
 def register_cli(app):
@@ -172,5 +337,7 @@ def register_cli(app):
             user = User(username=username)
             user.set_password(password)
             db.session.add(user)
+            db.session.flush()
+            record_user_action('created', user, detail='create-admin command')
             db.session.commit()
             click.echo(f'Created user "{username}".')

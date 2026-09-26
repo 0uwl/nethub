@@ -118,6 +118,12 @@ Once you're logged in as an admin:
    matches. It is a command rather than a page, because it hashes
    everything.
 7. Deleting an artifact removes the row and its image file.
+8. **Users** — create accounts, reset someone's password, disable or
+   re-enable an account, and unlock one that too many failed logins locked.
+   Disabling someone or resetting their password ends their open sessions
+   on their next click. Change your own password on your **Profile**; that
+   ends your other sessions. Every one of these is recorded, and each
+   user's **History** shows who did what.
 
 ## Running it in a container
 
@@ -135,6 +141,7 @@ podman run --rm --userns=keep-id:uid=1000,gid=1000 -v ~/.config/nethub:/keys:z \
 
 podman run --rm -p 8080:8080 \
   -e SECRET_KEY="$(openssl rand -hex 32)" \
+  -e ADMIN_USERNAME=<first-user-name> \
   -e ADMIN_PASSWORD=<initial-admin-password> \
   -e ARTIFACT_STORE=/app/artifacts \
   -e NETHUB_CREDENTIAL_PUBLIC_KEY=<key> \
@@ -142,7 +149,9 @@ podman run --rm -p 8080:8080 \
 ```
 
 That serves the UI but performs no device work; that is the sibling's job
-(`quadlet/nethub-sibling.container`).
+(`quadlet/nethub-sibling.container`). `ADMIN_USERNAME` has no default: without
+it, NetHub starts with no users and logs that you need to run
+`flask --app nethub create-admin <name>` inside the container.
 
 The session cookie is `Secure` by default, so a deployment reached over plain
 HTTP needs a TLS terminator in front of it. `http://localhost:8080` works as

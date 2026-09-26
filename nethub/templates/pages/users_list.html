@@ -12,17 +12,46 @@
 <table class="table table-striped">
   <thead>
     <tr>
-      <th>ID</th>
       <th>Username</th>
+      <th>Status</th>
+      <th>Device username</th>
       <th>Created at</th>
+      <th>Actions</th>
     </tr>
   </thead>
   <tbody>
     {% for user in users %}
     <tr>
-      <td>{{ user.id }}</td>
-      <td>{{ user.username }}</td>
+      <td>{{ user.username }}{% if user.id == current_user.id %} (you){% endif %}</td>
+      <td>
+        {% if not user.is_active %}disabled{% elif user.is_locked() %}locked until {{ user.locked_until }}{% else %}active{% endif %}
+      </td>
+      <td>{{ user.device_username or '' }}</td>
       <td>{{ user.created_at }}</td>
+      <td>
+        <a href="{{ url_for('auth.user_history', user_id=user.id) }}">History</a>
+        {% if user.id != current_user.id %}
+        | <a href="{{ url_for('auth.reset_password', user_id=user.id) }}">Reset password</a>
+        {% if user.is_active %}
+        <form method="post" action="{{ url_for('auth.disable_user', user_id=user.id) }}" style="display:inline"
+              onsubmit="return confirm('Disable {{ user.username }}? Their sessions end at once and they cannot log in until enabled again.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-link">Disable</button>
+        </form>
+        {% else %}
+        <form method="post" action="{{ url_for('auth.enable_user', user_id=user.id) }}" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-link">Enable</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {% if user.is_locked() %}
+        <form method="post" action="{{ url_for('auth.unlock_user', user_id=user.id) }}" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="btn btn-link">Unlock</button>
+        </form>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>

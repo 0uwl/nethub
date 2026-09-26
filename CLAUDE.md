@@ -40,7 +40,8 @@ first slice of the Software Lifecycle module: local username/password auth
 creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
 This file is now the sole record of that slice's deliberate deviations from
 `design-document.md` — no OIDC, no roles, and sessions are Flask-Login's
-signed cookie rather than a `sessions` row (§4.5) — superseding the earlier
+signed cookie rather than a `sessions` row (§4.5), made revocable by a
+per-user epoch (see "User management" below) — superseding the earlier
 `alpha.md`/`HANDOFF.md`, both deleted once their content moved here and into
 `design-document.md` §10, since a completed planning/remediation doc left in
 the tree is exactly the stale-and-conflicting risk this file exists to avoid.
@@ -237,6 +238,47 @@ trusting a green local run, and when you do bump the pin, expect new findings
 and fix them rather than unpinning. `publish` fires only on push to `main`, so
 a PR gets `lint` and `test` as a free dry run before any image is built.
 
+## User management (`nethub/auth.py`, PLAN.md WS-10)
+
+Disable, re-enable, admin password reset, unlock, and changing your own
+password, each recorded in `user_admin_audit`. What is load-bearing:
+
+- **Revocation is an epoch in the cookie, not a `sessions` table.**
+  `User.get_id()` returns `id:session_epoch`, which Flask-Login signs into
+  the session, and `models.load_user` refuses a cookie whose epoch is not
+  the row's current one, or whose user is inactive. A disable, an admin
+  reset and your own password change bump the epoch
+  (`User.revoke_sessions`), so every existing cookie for that user stops
+  loading on its next request. Changing your own password then logs the
+  current session in again under the new epoch, so only the *other*
+  sessions end. A cookie with a bare id (issued before WS-10) is refused:
+  everyone logs in once after that upgrade. This is §4.5's "deactivation
+  takes effect on the next request" without its `sessions` table; idle and
+  absolute timeouts per session are still not built.
+- **Inactive is refused in three places:** the login route (after paying
+  for the password check, with the same single message as a wrong
+  password, so "disabled" is no more an oracle than "locked"), the user
+  loader, and Flask-Login itself, whose `UserMixin.is_authenticated` is
+  `is_active`.
+- **Nobody can disable themselves, and the last active user is never
+  disabled.** The second check is inside the `UPDATE` (a count of *other*
+  active users, on an alias so it is not correlated to the row being
+  updated): two people disabling each other at once both pass any check
+  made beforehand, and SQLite's single writer makes the second statement
+  find nobody else active.
+- **A wrong current password on the change form counts as a failed login**,
+  and a locked account cannot change its password: an open session on
+  someone else's screen must not be an unlimited guessing oracle for the
+  password behind it.
+- **`user_admin_audit` is append-only by trigger** (`BEFORE UPDATE` and
+  `BEFORE DELETE` both `RAISE(ABORT)`), as design doc §5 specifies. The row
+  is added in the same transaction as the change it records
+  (`models.record_user_action`). `actor_user_id` is null for
+  `create-admin` and first-boot bootstrap, which act with host access, and
+  `detail` says which. `detail` is fixed text of ours, never request input.
+- **Your own password is changed on the profile page**, which asks for the
+  current one; the admin reset route refuses to reset your own.
+
 ## Container
 
 `Containerfile` builds `localhost/nethub:latest` — single stage,
@@ -369,7 +411,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. An oversize request gets a real `413` page (`nethub/__init__.py`'s `too_large_error`) stating the configured limit, not Werkzeug's bare default (WS-5.6). |
 | `NETHUB_PORT` | `8080` | Read by `nethub/gunicorn.conf.py`'s `bind`; update the Quadlet `PublishPort=` to match if changed. |
-| `ADMIN_USERNAME` | `admin` | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). |
+| `ADMIN_USERNAME` | none | First-boot only — ignored once the `users` table is non-empty (`nethub/bootstrap.py`). No default since WS-10: a well-known `admin` plus the login lockout let anyone on the network keep that account locked out. Unset on an empty database, NetHub starts with no users and says to run `flask --app nethub create-admin <name>`. |
 | `ADMIN_PASSWORD` | none — random, printed once, if unset | First-boot only, same gate as above. A systemd credential named `admin_password` takes priority over this env var, same mechanism as `SECRET_KEY`. |
 | `DEBUG` | off | Local dev only — see the hard rule below. No effect on the production image; gunicorn never reads it. |
 
@@ -710,7 +752,8 @@ NetHub is explicitly not an inventory system (design doc §2 Non-goals, §7.4).
 serial→artifact mapping representable at all, plus `mac` for the Kea
 gate), `provisioning_log` with an `outcome` enum and a
 `provisioning_log_artifacts` junction, `settings` + append-only
-`settings_audit`, `user_admin_audit` and `sessions`. Of the upgrade
+`settings_audit`, and `sessions`. `user_admin_audit` exists since WS-10
+(see "User management"). Of the upgrade
 tables it describes, all exist, including `upgrade_host_phase_results`.
 `upgrade_phase_jobs` carries three columns §7/§9 depend on: `created_at`
 (the queue has nothing else to order by, since `started_at` is null until
