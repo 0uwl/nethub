@@ -69,19 +69,22 @@ function name.
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | merged |
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | merged |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | merged |
-| 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | in review |
+| 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | merged |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | todo |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
 | 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
 | 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | todo |
+| 16 | `feat/roles` | Admin and operator roles; optional two-person rules for artifacts, host keys and runs | 10 | todo |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
 before 7, 8 and 9: those three rewrite the dispatch path and need the
 end-to-end test as a safety net. WS-14 and WS-15 were added after the plan
 was written. Do WS-15 before WS-14, which relies on its stop-and-return-to-
-the-gate rule; both still come before WS-13, which stays last.
+the-gate rule; both still come before WS-13, which stays last. WS-16 was
+added later still and comes after WS-10, whose user pages and audit table it
+builds on.
 
 ## Decisions this plan makes
 
@@ -131,6 +134,16 @@ halfway through a branch.
     device, so the others carry on. A stopped phase leaves the hosts it did
     not reach where they were and returns the run to the same gate, rather
     than failing them. Decided by the maintainer on 2026-09-25.
+
+14. **Two roles, admin and operator, and optional two-person rules**
+    (WS-16). Operators upload and delete artifacts, scan, confirm and delete
+    host-key pins, and submit, approve, retry and cancel runs. Admins do all
+    of that and also manage users and NetHub's settings. An admin can make a
+    two-person rule mandatory, separately for artifacts, host keys and run
+    operations; admins are exempt from those rules. For runs the rule means
+    the approver of a gate or a retry is not the run's submitter; cancelling
+    and declining cleanup never need a second person. Decided by the
+    maintainer on 2026-09-26.
 
 ## Workstreams
 
@@ -556,7 +569,8 @@ of the docs.
 - **`design-document.md` rewritten around decisions:** a short description of
   the system as built; one entry per decision (decision, reason,
   consequences, what would reopen it); a short target-design section for
-  unbuilt parts (day-0 as a separate service, OIDC, roles); open questions.
+  unbuilt parts (day-0 as a separate service, OIDC and the roles it derives
+  from a group claim); open questions.
   Section numbers may change once nothing depends on them; update the `§`
   references in code comments in the same branch
   (`grep -rn "§" nethub tests`).
@@ -732,6 +746,108 @@ switches reloads the canary first and the other two together.
 verified canary, with the warning on the form; a refused password or a
 NetHub fault returns the run to its gate instead of failing it; and the
 "mistyped password" item in "Found while working" is marked done.
+
+### WS-16: Roles and two-person rules
+
+Branch `feat/roles`. After WS-10: it guards WS-10's user pages, extends its
+"last active user" refusal and writes to its `user_admin_audit` table.
+Changes `CLAUDE.md`'s recorded alpha deviation ("everyone who can log in is
+an admin — no roles") and its "Known gap" on device-username attribution,
+both in the same branch.
+
+**Why.** Every user is an admin and can create more admins. `CLAUDE.md`
+records that the same person can scan a host key and confirm it, which
+§4.3's separation of duty is meant to prevent, and names role-based access
+control as the real fix. And each gate is approved with the approver's own
+device password, while the run row records only the submitter's device
+username, so the audit trail and the device's AAA log can disagree about
+who logged in.
+
+**Design.**
+
+1. **Roles.** `users.role`, `admin` or `operator`, a CHECK constraint
+   (migration). Existing users become `admin`, so nobody loses access on
+   upgrade. `create-admin` and first-boot bootstrap create admins; a user an
+   admin creates in the UI is an `operator` unless the admin picks
+   otherwise. An admin can change a role; the change goes to
+   `user_admin_audit`. Demoting or disabling the last active admin is
+   refused. The user loader re-reads the row on every request, so a role
+   change applies on the next click. OIDC and roles derived from its group
+   claim (design doc §4.4) stay target design.
+2. **Who may do what.**
+
+   | Action | Operator | Admin |
+   |---|---|---|
+   | Upload, publish, delete artifacts | yes, under the artifact rule | yes |
+   | Scan, confirm, delete host-key pins | yes, under the host-key rule | yes |
+   | Submit a run | yes | yes |
+   | Approve a gate, retry, choose a reload count (WS-15) | yes, under the run rule | yes |
+   | Cancel a run, decline cleanup | yes, never needs a second person | yes |
+   | Set own device username | yes | yes |
+   | Users: create, disable, reset password, change role | no | yes |
+   | Settings, including the two-person rules | no | yes |
+
+   One decorator for the admin-only routes; templates hide what a user may
+   not do, but the server check is what counts, and every refusal is tested.
+3. **Settings.** Build the `settings` table and the append-only
+   `settings_audit` §5 specifies, with three booleans for now:
+   `two_person_artifacts`, `two_person_hostkeys`, `two_person_runs`, all off
+   by default. An admin-only page changes them; each change is an audit row
+   (old value, new value, who, when), and `BEFORE UPDATE`/`BEFORE DELETE`
+   triggers make the audit table append-only, as §5 asks. Read on each
+   request, never cached. The env-var settings (`DEVICE_TARGET_CIDRS` and
+   the rest) stay where they are; moving them is not this workstream.
+4. **The rules**, which apply to operators only and are checked when the
+   second action happens, not when the first did:
+   - *Artifacts.* An upload lands `staged` (the state exists and is unused
+     today): bytes in the store, row written, but not nameable by a run,
+     since `resolve_bundle` reads published rows only. A different user
+     publishes it (new `published_by`), and the bundle-key uniqueness check
+     runs at that moment. The uploader may withdraw their own staged upload
+     alone. Deleting a published artifact is a request (`delete_requested_by`,
+     `delete_requested_at`) that a different user confirms; the existing
+     refusal while a live run references the row still applies.
+   - *Host keys.* Confirming requires a confirmer other than the person who
+     requested the scan. This inverts WS-6.3's binding, which today requires
+     the confirmer to *be* the scanner; the scan's one-shot `consumed_at`
+     and 15-minute freshness window stay. Deleting a pin is a request a
+     different user confirms. `device_host_key_audit` records both people.
+   - *Runs.* Every gate approval and every retry must come from someone
+     other than `upgrade_runs.submitted_by`, including a scheduled approval
+     (WS-14). Cancel and decline cleanup are exempt: stopping is the
+     conservative action.
+   - *Admins* are exempt, and their acting alone is visible: record the
+     actor's role at the time of the action (on the job row for approvals
+     and retries, in the audit rows for artifacts and host keys), since a
+     role can change later.
+5. **Device username per phase.** Add `upgrade_phase_jobs.device_username_used`,
+   the supplier's device username snapshotted when the job is created
+   (submit, approve, retry), and show it on the run page.
+   `upgrade_runs.device_username_used` stays the submitter's. This closes
+   `CLAUDE.md`'s "Known gap", which the run rule would otherwise make the
+   normal case.
+6. **Docs.** `CLAUDE.md`: drop the "no roles" deviation, close the known
+   gap, and update the host-key paragraph on separation of duty. Design doc:
+   §4.4 (local roles built, OIDC-derived roles still target), §5 (the new
+   columns and the settings tables), §7.3 (the `staged` → `published` edge
+   and who writes it). README "Using it": roles and the two-person rules.
+
+**Tests:** existing users become admins on upgrade; an operator is refused
+every admin-only route; the last active admin cannot be demoted or disabled;
+each setting change writes an audit row, and the audit table refuses UPDATE
+and DELETE; with each rule off, an operator completes the action alone; with
+it on, the same operator cannot publish their own upload, confirm their own
+scan, delete a pin or an artifact alone, or approve or retry their own run,
+and a second operator can; an admin can do each alone and the record shows
+an admin acted; an uploader can withdraw their own staged upload under the
+rule; cancel and decline cleanup work alone under the run rule; a run whose
+gates are approved by different people records each one's device username
+on its job; the rule is read when the second action happens, so switching
+it off releases a waiting item.
+
+**Done when:** operators can do the day-to-day work and nothing else, admins
+can turn each two-person rule on and off with an audited change, and
+`CLAUDE.md` no longer lists "no roles" or the device-username gap.
 
 ## Maintainer actions (no branch)
 
