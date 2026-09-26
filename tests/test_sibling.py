@@ -5,6 +5,7 @@ real ones made with this module's own key pair. What is under test is §7.3's
 tables: who writes which edge, and what the queue does under contention.
 """
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -25,6 +26,7 @@ from nethub.models import (
     UpgradeRunHost,
     User,
 )
+from tests.test_phases import cancel_as_flask
 
 NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
 DIGEST = "a" * 128
@@ -712,7 +714,7 @@ class TestVerifyRunsOnActivatesCredential:
         ran = []
 
         def activate(conn, host, ctx):
-            host.run.cancel_requested_at = NOW
+            cancel_as_flask(run)
             return phases.HostOutcome(host.hostname, "activated")
 
         with app.app_context():
@@ -946,13 +948,108 @@ class TestHostKeyScanDispatch:
             assert db.session.get(HostKeyScan, scan.id).status == "running"
 
 
+class TestScansDuringAPhase:
+    """PLAN.md WS-9: `tick()` checks for a scan first, but `run_once()` used to
+    hold the loop for a whole phase, so a scan queued during an hour-long
+    stage waited an hour."""
+
+    def queue_scan(self, run_id):
+        scan = HostKeyScan(ansible_host="192.0.2.99",
+                           requested_by=db.session.get(UpgradeRun, run_id).submitted_by,
+                           status="queued", created_at=NOW)
+        db.session.add(scan)
+        db.session.commit()
+        return scan.id
+
+    def test_a_scan_finishes_while_a_long_host_is_still_running(
+        self, app, run, monkeypatch
+    ):
+        scanned = threading.Event()
+        order = []
+
+        def scan_host_key(host, **kw):
+            order.append("scan")
+            scanned.set()
+            return connection.HostKey("ssh-rsa", "SHA256:new")
+
+        def stage(conn, host, ctx):
+            # The host cannot finish until the scan has: only a scan run on a
+            # heartbeat tick, mid-phase, gets it there.
+            assert scanned.wait(5), "the scan waited for the phase"
+            order.append("host")
+            return phases.HostOutcome(host.hostname, "ok")
+
+        monkeypatch.setattr(connection, "scan_host_key", scan_host_key)
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", stage)
+        with app.app_context():
+            job_id = queue(run, "stage", approved_by=db.session.get(
+                UpgradeRun, run).submitted_by).id
+            scan_id = self.queue_scan(run)
+            assert make_sibling(heartbeat_interval=0.01).run_once() == "succeeded"
+            assert db.session.get(HostKeyScan, scan_id).status == "succeeded"
+            assert db.session.get(UpgradePhaseJob, job_id).status == "succeeded"
+        assert order == ["scan", "host"]
+
+    def test_a_scan_that_raises_mid_phase_fails_itself_and_not_the_phase(
+        self, app, run, monkeypatch
+    ):
+        release = threading.Event()
+
+        def scan_host_key(host, **kw):
+            release.set()
+            raise RuntimeError("a bug in the scan path")
+
+        def stage(conn, host, ctx):
+            assert release.wait(5)
+            return phases.HostOutcome(host.hostname, "ok")
+
+        monkeypatch.setattr(connection, "scan_host_key", scan_host_key)
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", stage)
+        with app.app_context():
+            job_id = queue(run, "stage", approved_by=db.session.get(
+                UpgradeRun, run).submitted_by).id
+            scan_id = self.queue_scan(run)
+            assert make_sibling(heartbeat_interval=0.01).run_once() == "succeeded"
+            scan = db.session.get(HostKeyScan, scan_id)
+            assert scan.status == "failed"
+            assert "unexpected error" in scan.error_summary
+            assert db.session.get(UpgradePhaseJob, job_id).status == "succeeded"
+            assert db.session.get(UpgradeRun, run).state == "awaiting_approval"
+
+
+class TestPhaseConcurrencySetting:
+    @pytest.mark.parametrize("value,expected", [(None, 4), ("", 4), ("1", 1), (" 8 ", 8)])
+    def test_accepted(self, value, expected):
+        assert S.phase_concurrency(value) == expected
+
+    @pytest.mark.parametrize("value", ["0", "-2", "four", "2.5"])
+    def test_refused_at_startup(self, value):
+        with pytest.raises(SystemExit, match="PHASE_CONCURRENCY"):
+            S.phase_concurrency(value)
+
+    def test_the_sibling_hands_it_to_the_phase(self, app, run, monkeypatch):
+        seen = {}
+
+        def execute_phase(job, ctx, **kw):
+            seen.update(kw)
+            job.status = "succeeded"
+            db.session.commit()
+            return "succeeded"
+
+        monkeypatch.setattr(phases, "execute_phase", execute_phase)
+        with app.app_context():
+            queue(run)
+            make_sibling(phase_concurrency=7).run_once()
+        assert seen["concurrency"] == 7
+
+
 class TestUnexpectedErrorDoesNotStrandTheRow:
     """WS-1.3: an exception that escaped `run_once()` after `claim()` left the
     job `running` under this instance's own id, which `sweep()` never matches,
     so the run sat `running` until the sibling restarted."""
 
     def test_a_raising_phase_fails_the_job_and_the_run(self, app, run, monkeypatch):
-        def boom(job, ctx, now):
+        def boom(job, ctx, **kw):
             raise RuntimeError("password=s3cret leaked into a message")
         monkeypatch.setattr(phases, "execute_phase", boom)
         with app.app_context():

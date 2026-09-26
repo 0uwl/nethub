@@ -909,7 +909,10 @@ Two operational consequences follow:
   full AAA-client integration (NetHub itself speaking to the TACACS+/
   RADIUS server) was considered and rejected as out of proportion: it
   would add a standing trust relationship and a shared secret of its own
-  to a design whose whole point is minimising exactly that. The probe's
+  to a design whose whole point is minimising exactly that. As built, the
+  probe is each phase's first login rather than a separate session:
+  `phases.LoginGate` holds every other host's login until one host has
+  answered, and a refusal stops the phase (§8.1). The probe's
   known limitation is stated rather than implied: Cisco AAA commonly
   authorizes by device group or VTY access class, so a credential
   confirmed against host 1 is evidence the *password* is correct, not
@@ -1568,7 +1571,7 @@ described there are `upgrade_phase_jobs`-only now.
     none: an activate phase reloading fifty switches with the wrong
     bundle could only be halted by killing the container, leaving a
     stale `running` row and an unknown fleet state. The sibling checks
-    these between hosts. What cancel *means* is per phase and is stated
+    these before starting each host. What cancel *means* is per phase and is stated
     in §8.1 — cancelling a stage is safe, cancelling an activation
     mid-wave is not.
   - `device_username_used` snapshots `users.device_username` at
@@ -2039,8 +2042,9 @@ per-host outcomes and phase logs surfaced in the dashboard.
 
 A credential is collected at each gate rather than once at submit, and
 §9.1 explains why that is the price of "no device credential is ever at
-rest". An operator can cancel a run at any gate, and between hosts
-during a phase; §8.1 says what that costs at each one.
+rest". An operator can cancel a run at any gate, and during a phase,
+where it stops further hosts from starting; §8.1 says what that costs at
+each one.
 
 All three flows above are the success path. What happens when an
 individual step fails is §7. Because the upgrade flow spans a database
@@ -2161,12 +2165,16 @@ request-handling work, and ordinary concurrent HTTP requests are exactly
 what §7.2's constraints are built to survive. The rule that *is* still
 true, and still named explicitly rather than left implicit, is that the
 sibling executes one phase execution at a time (§3.2, §8.1). Concurrency
-at this scale buys nothing there either, since upgrade dispatch is
-occasional and admin-initiated, and it costs the entire class of
-interleaved-device-work bugs. That queue is serial by construction
-rather than by locking discipline, the same reasoning the old registry
-lock used, applied to the one thing left in the system that still
-needs it.
+*between executions* buys nothing at this scale, since upgrade dispatch
+is occasional and admin-initiated, and it costs the entire class of
+interleaved-device-work bugs: two runs never touch devices at once. That
+queue is serial by construction rather than by locking discipline, the
+same reasoning the old registry lock used, applied to the one thing left
+in the system that still needs it. *Within* one execution, hosts are a
+different matter, and since PLAN.md WS-9 every phase but activation runs
+several of them at once (§8.1). That parallelism is confined to device
+I/O in worker threads; the rows are still written by the one thread
+that holds the database session, so the job row keeps a single writer.
 
 ### 7.2 Ingest isn't atomic across two stores, so the ordering is chosen deliberately
 
@@ -2332,7 +2340,10 @@ Several rules fall out of this:
 
 - **A crashed job doesn't stay `running` forever.** `heartbeat_at` is
   updated during the run **on its own timer inside the sibling's
-  monitoring loop, independent of any per-host event boundary** — that
+  monitoring loop, independent of any per-host event boundary** (built in
+  PLAN.md WS-9: the thread driving a phase writes it every
+  `phases.HEARTBEAT_INTERVAL`, 30 s, while hosts run in worker threads;
+  before that it moved only between hosts) — that
   precision matters because §8 gives the stage phase a per-host bound
   derived from `file_size` specifically because a single job-level bound
   is the wrong shape for a phase moving gigabytes, and the same reasoning
@@ -2428,7 +2439,7 @@ same shape minus the three states it has no use for:
 | `queued` | `expired` | sibling, past `deadline_at` |
 | `running` | `succeeded` / `partial` / `failed` | sibling, on phase completion (every host passed / some did / none did); `failed` also when the credential cannot be opened or its own code raises |
 | `running` | `timed_out` | sibling, at `deadline_at` |
-| `running` | `cancelled` | sibling, between hosts |
+| `running` | `cancelled` | sibling, seeing the cancel column before starting a further host; hosts already running finish first |
 | `running` | `abandoned` | sibling's startup sweep, foreign `runner_instance_id` |
 
 Flask writes only the first edge. Everything after dispatch is the
@@ -2442,7 +2453,7 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | `pre_checking` | `awaiting_approval` | sibling, on pre-check succeeding; sets `awaiting_phase` and `gate_expires_at` |
 | `pre_checking` / `running` | `failed` | sibling: a phase leaving no host able to carry on, a credential it could not open, or an unexpected error in its own code |
 | `pre_checking` / `running` | `failed` | sibling's startup sweep, abandoning a phase nobody approves (`precheck`, `verify`) |
-| `pre_checking` / `running` | `cancelled` | sibling, seeing the cancel column before claiming the job or between hosts |
+| `pre_checking` / `running` | `cancelled` | sibling, seeing the cancel column before claiming the job or before starting a further host |
 | `pre_checking` / `running` | `expired` | sibling, finding the queued job past its `deadline_at` |
 | `awaiting_approval` | `running` | Flask, on approval or on a retry of failed hosts (writes the phase job row; leaving the gate is a conditional update, so only one request can) |
 | `awaiting_approval` | `expired` | sibling, past `gate_expires_at` (checked every loop) |
@@ -2807,24 +2818,37 @@ What follows from the split:
   per-host results are rows (`upgrade_host_phase_results`, §5), so there
   is nothing left for a final summary pass to compute that the dashboard
   can't already read.
-- **Every phase runs its hosts strictly one at a time today, not just
-  activation.** `phases.execute_phase()` loops over a run's hosts in a
-  plain `for` loop, checking cancel and the deadline only *between*
-  hosts (§7.3) — there is no concurrency anywhere in the phase model yet,
-  stage included. That is stricter than the target design below, not a
-  bug: correctness first, parallelism second. **What's still target
-  rather than built** is letting pre-check and stage run across many
-  hosts at once, since copying to flash drops no traffic, while keeping
-  only activation serialized — copying is where a wave actually spends
-  its wall-clock time (§8's measured push throughput, ~1.4 MB/s per
-  device, makes a serial stage phase the dominant cost of a large wave).
-  That parallelism is not free once built: with NetHub the sole source of
-  the bytes (§3.3), an uncapped stage phase would mean NetHub pushing a
-  gigabyte to every targeted device at once, over whatever link separates
-  it from them. Concurrent devices cost NetHub's own link relatively
-  little at the measured rate — twenty devices at once is roughly
-  28 MB/s — but a deployment setting to cap it is still worth building
-  before removing the serial gate, not after.
+- **Pre-check, stage, verify and cleanup run several hosts at once;
+  activation runs one at a time** (PLAN.md WS-9). `phases.execute_phase()`
+  hands hosts to a thread pool of `PHASE_CONCURRENCY` workers (a
+  deployment setting on the sibling, default 4); activation goes through
+  the same code with one worker, because it reloads switches and a fleet
+  is not reloaded four at a time. Copying is where a wave spends its
+  wall-clock time (§8's measured push throughput, ~1.4 MB/s per device,
+  made a serial stage the dominant cost of a large wave: about two hours
+  for twenty switches), and copying to flash drops no traffic. The cap
+  exists because with NetHub the sole source of the bytes (§3.3), an
+  uncapped stage would push a gigabyte to every targeted device at once
+  over whatever link separates NetHub from them. At the measured rate
+  four devices cost that link about 6 MB/s; a site behind a narrow link
+  should lower it. Three rules keep the parallelism narrow:
+  - **Workers do device I/O and nothing else.** The thread holding the
+    database session copies each host into a plain value (address,
+    filename, digest, size, flash directory and the pinned host key)
+    before handing it over, and writes every row itself. The pin is
+    looked up there too, because activation's reconnect after the reload
+    needs it from inside its worker.
+  - **A password is tried once before it is tried in parallel.** The
+    first host to reach its login goes ahead and the others wait: if the
+    device accepts it they all log in, if it refuses no other host tries
+    and the rest are recorded `not_attempted`, and if the host could not
+    be reached at all the next one tries instead. Without that, a
+    mistyped password would be refused on every host logging in at the
+    same moment, toward the AAA lockout the next bullets describe.
+  - **Cancel and the deadline stop further hosts from starting.** Hosts
+    already running finish and are recorded (below), and the job's
+    deadline stays sized as if hosts ran one at a time, which leaves it
+    loose by up to the concurrency (`upgrades.PHASE_BUDGET_SECONDS`).
 - **Almost no state has to cross a phase boundary, and this is built as
   designed.** `filename`, `sha512`, `version` and `file_size` are
   snapshotted onto `upgrade_run_hosts` at submit (§5) rather than
@@ -2895,22 +2919,21 @@ What follows from the split:
   password across a 40-host wave could lock the account out fleet-wide.
   The phase stops at the first `credential` failure, and the hosts it did
   not reach are recorded as failed (`not_attempted`, `failure_stage:
-  credential`) so a retry with the right password picks them up.
+  credential`) so a retry with the right password picks them up. With
+  hosts running in parallel that needs the login gate above, or every
+  host logging in at that moment would be refused too.
 - **Cancelling means different things at different phases, and the UI
   says which.** `cancel_requested_at` (§5) is polled by the sibling
-  between hosts. Cancelling a `queued` phase stops it before it starts.
+  before it starts each host. Cancelling a `queued` phase stops it before it starts.
   Cancelling pre-check or verify is safe outright: both are read-only.
   Stage is not quite the same shape as those
   two: it's non-disruptive to the fleet's traffic, but push is the one
   thing in the system that mutates device configuration (§4.3.1's
-  SCP-server toggle). Since every phase runs its hosts strictly one at a
-  time today (above), a cancel during stage affects at most the single
-  host currently mid-transfer when it lands — the sibling lets that host
+  SCP-server toggle). Up to `PHASE_CONCURRENCY` hosts can be mid-transfer
+  when a cancel lands (above), and the sibling lets every one of them
   reach its own `try`/`finally` and confirm its restore before honoring
-  the cancel, rather than killing the sibling process outright. Once
-  concurrent staging exists, several hosts could be mid-transfer at once
-  when a cancel lands, and the same reasoning would need to wait for all
-  of them, not just one. Cancelling an activation mid-wave is
+  the cancel, rather than killing the sibling process outright: the
+  cancel only stops further hosts from starting. Cancelling an activation mid-wave is
   *not* safe and is not presented as though it were — the devices already
   reloaded are on the new version and the rest are not, and the operator
   is choosing a split fleet over finishing the wave. That is sometimes

@@ -49,6 +49,10 @@ NEXT_PHASE = {
 
 DEFAULT_GATE_TTL = timedelta(days=7)
 
+#: Hosts a phase runs at once unless `PHASE_CONCURRENCY` says otherwise
+#: (PLAN.md decision 6).
+DEFAULT_PHASE_CONCURRENCY = 4
+
 log = logging.getLogger('nethub.sibling')
 
 
@@ -84,6 +88,12 @@ class Sibling:
     #: Handed to every `PhaseContext`; None means `phases.default_connect`.
     #: Only the end-to-end test sets it, to put a fake device behind a real run.
     connect: Callable | None = None
+    #: Hosts a phase runs at once (PLAN.md WS-9). Activate ignores it and runs
+    #: one at a time (`phases.SERIAL_PHASES`). `main()` reads it from
+    #: `PHASE_CONCURRENCY`.
+    phase_concurrency: int = DEFAULT_PHASE_CONCURRENCY
+    #: How often a running phase writes its heartbeat and runs queued scans.
+    heartbeat_interval: float = phases.HEARTBEAT_INTERVAL
 
     def __post_init__(self):
         self.runner_instance_id = self.runner_instance_id or str(uuid.uuid4())
@@ -201,8 +211,9 @@ class Sibling:
         `main()` calls this when a phase or scan raised something nothing
         downstream handled. The row was claimed under *our* id, and `sweep()`
         only reclaims foreign ids, so without this it stayed `running` until
-        the sibling restarted. The loop is single-threaded, so once an
-        exception reaches `main()` nothing of ours is legitimately running.
+        the sibling restarted. `execute_phase` joins its worker threads before
+        an exception leaves it, so once one reaches `main()` nothing of ours
+        is legitimately running.
 
         `failed`, not `abandoned`: the process did not die, our code raised,
         and parking the run for re-approval would invite the same error again.
@@ -220,14 +231,17 @@ class Sibling:
             job.error_summary = 'the sibling hit an unexpected error; see its log'
             job.finished_at = self.now()
             self._fail_run(job.run)
+        self._fail_own_scans()
+        db.session.commit()
+        return len(jobs)
+
+    def _fail_own_scans(self) -> None:
         for scan in HostKeyScan.query.filter_by(
             status='running', runner_instance_id=self.runner_instance_id
         ):
             scan.status = 'failed'
             scan.error_summary = 'the sibling hit an unexpected error; see its log'
             scan.finished_at = self.now()
-        db.session.commit()
-        return len(jobs)
 
     def expire_gates(self) -> int:
         """Move runs parked at a gate past `gate_expires_at` to `expired`.
@@ -267,8 +281,9 @@ class Sibling:
 
         A scan is checked before a phase job every pass (WS-6.2b): it is
         bounded by `connection.CONNECT_TIMEOUT` and an admin is very likely
-        watching the result page, where a phase job may be a 15-minute stage
-        already in flight.
+        watching the result page. A scan queued while a phase is running does
+        not wait for this pass: `execute_phase` calls `_between_hosts` on
+        every heartbeat tick, which runs it then (PLAN.md WS-9).
         """
         try:
             self.expire_gates()
@@ -343,9 +358,9 @@ class Sibling:
     # shape, same queue shape -- but simpler: no credential, no PhaseContext,
     # no gate, no state machine beyond queued/running/succeeded/failed/
     # abandoned. It gets its own small queue rather than a shared one because
-    # `run_once()`'s loop checks for a queued scan first every iteration (see
-    # `main()` below): an admin watching a confirm screen should not queue
-    # behind a phase job that may be a 15-minute stage already in flight.
+    # an admin watching a confirm screen should not queue behind a phase job
+    # that may be an hour-long stage: `tick()` checks for a scan first, and a
+    # running phase takes one on every heartbeat tick (`_between_hosts`).
 
     def next_queued_scan(self) -> HostKeyScan | None:
         return (
@@ -403,6 +418,22 @@ class Sibling:
         db.session.commit()
         return 'succeeded'
 
+    def _between_hosts(self) -> None:
+        """Run while a phase's hosts are in flight, on `execute_phase`'s thread.
+
+        Takes a queued host-key scan, so an admin confirming a new switch does
+        not wait behind a stage that may run for an hour. A scan that raises
+        fails itself and nothing else: letting the exception out would reach
+        `tick()`, whose `recover_own()` would fail the phase job as well.
+        """
+        try:
+            self.run_scan_once()
+        except Exception:
+            log.exception('host-key scan raised during a phase; failing the scan')
+            db.session.rollback()
+            self._fail_own_scans()
+            db.session.commit()
+
     def run_once(self) -> str | None:
         """Take at most one job off the queue and see it through.
 
@@ -452,7 +483,9 @@ class Sibling:
         )
         try:
             while True:
-                status = phases.execute_phase(job, ctx, now=self.now)
+                status = phases.execute_phase(
+                    job, ctx, now=self.now, concurrency=self.phase_concurrency,
+                    tick_interval=self.heartbeat_interval, on_tick=self._between_hosts)
                 following = self._advance_run(job, status)
                 db.session.commit()
                 if following is None:
@@ -597,6 +630,20 @@ def _database_app():
     return app
 
 
+def phase_concurrency(value: str | None) -> int:
+    """`PHASE_CONCURRENCY`, or refuse to start. Unset means the default."""
+    if value is None or not value.strip():
+        return DEFAULT_PHASE_CONCURRENCY
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise SystemExit(f'PHASE_CONCURRENCY must be a whole number of at least 1, '
+                         f'not {value!r}')
+    return number
+
+
 def main(poll_interval: float = 5.0) -> None:
     """Wait for the schema, sweep once, then work the queue until killed.
 
@@ -608,6 +655,7 @@ def main(poll_interval: float = 5.0) -> None:
     NetHub is the one source of the bytes). The private key comes from the
     systemd credential `credential_private_key` or `NETHUB_CREDENTIAL_KEY_FILE`,
     and must match `NETHUB_CREDENTIAL_PUBLIC_KEY`, the key Flask seals to.
+    `PHASE_CONCURRENCY` is how many hosts a phase runs at once (default 4).
     """
     import os
     import time
@@ -632,7 +680,8 @@ def main(poll_interval: float = 5.0) -> None:
 
     from . import schema
 
-    worker = Sibling(private_key=private_key, search_dir=search_dir)
+    worker = Sibling(private_key=private_key, search_dir=search_dir,
+                     phase_concurrency=phase_concurrency(os.environ.get('PHASE_CONCURRENCY')))
     app = _database_app()
     schema.wait_for_current_schema(app.config['SQLALCHEMY_DATABASE_URI'])
     with app.app_context():

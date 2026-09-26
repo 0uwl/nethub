@@ -34,7 +34,6 @@ from nethub.models import (
     UpgradeHostPhaseResult,
     UpgradePhaseJob,
     UpgradeRun,
-    UpgradeRunHost,
 )
 from tests.test_connection import device_key
 from tests.test_install import CLEANUP_ACCEPTED, CLEANUP_PROMPT_OUTPUT
@@ -121,14 +120,15 @@ class FakeSwitch:
         assert host == ADDRESS
         return self.key
 
-    def connect(self, host: UpgradeRunHost, username: str, password: str):
+    def connect(self, host: phases.HostTarget, username: str, password: str):
         """Checks in the order a real session meets them: TCP, host key, auth."""
         if self.down_for:
             self.down_for -= 1
             raise connection.DeviceConnectionError(f"could not reach {host.ansible_host}:22")
-        # The same pin lookup `default_connect` does, so a pin the UI never
-        # confirmed fails here just as it would against hardware.
-        if phases.pinned_key(host) != self.key:
+        # The pin `default_connect` uses: looked up from the confirmed row
+        # before the host reached this worker thread, so a pin the UI never
+        # confirmed fails before here just as it would against hardware.
+        if host.host_key != self.key:
             raise connection.HostKeyError("host key does not match the pin")
         self.logins.append((username, password))
         if (username, password) != (DEVICE_USER, DEVICE_PASS):
@@ -592,7 +592,7 @@ class Fleet:
     def scan(self, host: str) -> connection.HostKey:
         return self.switches[host].key
 
-    def connect(self, host: UpgradeRunHost, username: str, password: str):
+    def connect(self, host: phases.HostTarget, username: str, password: str):
         return self.switches[host.ansible_host].connect(host, username, password)
 
 

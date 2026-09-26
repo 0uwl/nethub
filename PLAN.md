@@ -68,8 +68,8 @@ function name.
 | 5 | `chore/remove-unbuilt` | Delete pull transport and shared account mode | none | merged |
 | 6 | `chore/migrations` | Flask-Migrate with a baseline migration | 5 | merged |
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | merged |
-| 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | in review |
-| 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | todo |
+| 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | merged |
+| 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | in review |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | todo |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |

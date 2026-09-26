@@ -24,7 +24,9 @@ slip past.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -48,6 +50,17 @@ _STATE_AFTER = {
     'verify': 'verified',
     'cleanup': 'verified',
 }
+
+#: Phases that run one host at a time whatever `concurrency` says. Activate
+#: reloads switches; a fleet is not reloaded four at a time (PLAN.md
+#: decision 6). It still goes through the same driver as the others.
+SERIAL_PHASES = frozenset({'activate'})
+
+#: Seconds between the driver's ticks while hosts are running: how often it
+#: writes `heartbeat_at`, checks cancel and the deadline, and runs anything
+#: the sibling hands it (a queued host-key scan). A healthy job's heartbeat
+#: is never older than this plus one scan's `connection.CONNECT_TIMEOUT`.
+HEARTBEAT_INTERVAL = 30.0
 
 class UnconfirmedHost(Exception):
     """No confirmed `device_host_keys` row for this address (§4.3).
@@ -79,6 +92,102 @@ class HostOutcome:
         return self.failure_stage is None
 
 
+@dataclass(frozen=True)
+class HostTarget:
+    """One host as a worker thread sees it: plain values, no ORM.
+
+    Workers never touch `db.session`. They run without the app context the
+    session lives in, and an `UpgradeRunHost` read after a commit reloads
+    itself from the database on attribute access. So the main thread copies
+    what a phase needs into this before handing a host to a worker, including
+    the pinned host key: `pinned_key` queries the database, and activate's
+    reconnect after the reload needs the pin from inside its worker.
+    """
+
+    hostname: str
+    ansible_host: str
+    filename: str
+    sha512: str
+    file_size: int
+    version: str
+    flash_dir: str
+    host_key: connection.HostKey
+
+    @classmethod
+    def of(cls, host: UpgradeRunHost) -> HostTarget:
+        """Main thread only. Raises `UnconfirmedHost` if the address has no
+        confirmed pin."""
+        return cls(
+            hostname=host.hostname,
+            ansible_host=host.ansible_host,
+            filename=host.filename,
+            sha512=host.sha512,
+            file_size=host.file_size,
+            version=host.version,
+            flash_dir=host.flash_dir,
+            host_key=pinned_key(host),
+        )
+
+
+class LoginGate:
+    """One login at a time until the credential has worked once.
+
+    Every host in a phase gets the same password, so a mistyped one would be
+    refused on every host that is logging in at the same time, and enough
+    refusals lock the account out of TACACS+/RADIUS for the whole fleet
+    (PLAN.md WS-8). With hosts running in parallel, the first host to reach
+    its login goes ahead and the others wait for the answer:
+
+    - accepted: the gate opens and every host logs in as it arrives;
+    - refused: the gate shuts, and no host that has not yet logged in tries;
+    - neither (unreachable, host-key mismatch): nothing was learned about the
+      password, so the next waiting host tries instead.
+
+    A refusal after the gate opened shuts it too. That is a device refusing
+    a credential another device accepted, and the phase stops there as well.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._state = 'untried'  # untried | trying | open | shut
+        #: Hostname the credential was first refused on, for the
+        #: `not_attempted` rows of the hosts that never tried.
+        self.refused_on: str | None = None
+
+    def enter(self) -> str:
+        """Block until this host may log in. Returns 'probe' (log in and
+        report with `settle`), 'go' (log in), or 'stop' (do not)."""
+        with self._cond:
+            while self._state == 'trying':
+                self._cond.wait()
+            if self._state == 'shut':
+                return 'stop'
+            if self._state == 'open':
+                return 'go'
+            self._state = 'trying'
+            return 'probe'
+
+    def settle(self, accepted: bool | None, hostname: str) -> None:
+        """Report a probe's login: True accepted, False refused, None unknown."""
+        with self._cond:
+            if accepted is False:
+                self._shut(hostname)
+            elif self._state == 'trying':
+                self._state = 'open' if accepted else 'untried'
+            self._cond.notify_all()
+
+    def refuse(self, hostname: str) -> None:
+        """A credential failure anywhere, at any time: nobody else tries."""
+        with self._cond:
+            self._shut(hostname)
+            self._cond.notify_all()
+
+    def _shut(self, hostname: str) -> None:
+        self._state = 'shut'
+        if self.refused_on is None:
+            self.refused_on = hostname
+
+
 @dataclass
 class PhaseContext:
     """What an execution needs that the run row does not carry.
@@ -102,7 +211,7 @@ class PhaseContext:
     #: Injectable so tests need no device and the sibling can pass its own.
     connect: Callable[..., object] | None = None
 
-    def open(self, host: UpgradeRunHost):
+    def open(self, host: HostTarget):
         opener = self.connect or default_connect
         return opener(host, self.device_username, self.device_password)
 
@@ -192,8 +301,10 @@ def pinned_key(host: UpgradeRunHost) -> connection.HostKey:
     return connection.HostKey(row.key_type, row.fingerprint_sha256)
 
 
-def default_connect(host: UpgradeRunHost, username: str, password: str):
-    return connection.connect(host.ansible_host, username, password, pinned_key(host))
+def default_connect(host: HostTarget, username: str, password: str):
+    """The pin was looked up on the main thread (`HostTarget.of`); this runs
+    in a worker, and again for each reconnect after activate's reload."""
+    return connection.connect(host.ansible_host, username, password, host.host_key)
 
 
 # --------------------------------------------------------------------------
@@ -201,7 +312,7 @@ def default_connect(host: UpgradeRunHost, username: str, password: str):
 # raising is also fine -- run_host turns either into a row.
 # --------------------------------------------------------------------------
 
-def phase_precheck(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
+def phase_precheck(conn, host: HostTarget, ctx: PhaseContext) -> HostOutcome:
     """Read-only. Runs on submit with no gate, so it must change nothing."""
     device = facts.get_facts(conn)
     privilege = facts.get_privilege(conn)
@@ -225,7 +336,7 @@ def phase_precheck(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome
     return HostOutcome(host.hostname, 'precheck_ok', version_pre=device.version)
 
 
-def phase_stage(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
+def phase_stage(conn, host: HostTarget, ctx: PhaseContext) -> HostOutcome:
     outcome = transfer.stage_image(
         conn,
         image=host.filename,
@@ -240,7 +351,7 @@ def phase_stage(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
     )
 
 
-def phase_activate(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
+def phase_activate(conn, host: HostTarget, ctx: PhaseContext) -> HostOutcome:
     """Reload, then wait for the device back. Verification is its own phase.
 
     The reconnect belongs here rather than to `verify` because `verify` cannot
@@ -265,12 +376,12 @@ def phase_activate(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome
     )
 
 
-def phase_verify(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
+def phase_verify(conn, host: HostTarget, ctx: PhaseContext) -> HostOutcome:
     device = install.verify_upgrade(conn, target_version=host.version)
     return HostOutcome(host.hostname, 'verified', version_post=device.version)
 
 
-def phase_cleanup(conn, host: UpgradeRunHost, ctx: PhaseContext) -> HostOutcome:
+def phase_cleanup(conn, host: HostTarget, ctx: PhaseContext) -> HostOutcome:
     result = install.cleanup(conn)
     return HostOutcome(host.hostname, f"removed {len(result.removed)} files")
 
@@ -288,31 +399,65 @@ PHASE_RUNNERS: dict[str, Callable] = {
 # The driver. Called by the sibling with a job it has already claimed.
 # --------------------------------------------------------------------------
 
-def run_host(host: UpgradeRunHost, job: UpgradePhaseJob, ctx: PhaseContext) -> HostOutcome:
+def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
+             gate: LoginGate | None = None) -> HostOutcome:
     """One host, one phase. Turns success or any exception into an outcome.
 
-    Never raises: a host that fails is a row, not an aborted execution -- the
-    other hosts in the wave still have to be attempted and recorded.
+    Runs in a worker thread, so it sees a `HostTarget` and a phase name and
+    never the job or the session. Never raises: a host that fails is a row,
+    not an aborted execution -- the other hosts in the wave still have to be
+    attempted and recorded. The first login waits at `gate` (see `LoginGate`).
     """
-    runner = PHASE_RUNNERS[job.phase]
+    runner = PHASE_RUNNERS[phase]
+    gate = gate if gate is not None else LoginGate()
     conn = None
     try:
-        conn = ctx.open(host)
+        turn = gate.enter()
+        if turn == 'stop':
+            return _not_attempted_outcome(host.hostname, gate.refused_on)
+        learned = None
+        try:
+            conn = ctx.open(host)
+            learned = True
+        except Exception as exc:
+            learned = False if failure_stage_for(exc) == 'credential' else None
+            raise
+        finally:
+            # In a `finally` so a probe that dies any other way still lets the
+            # hosts waiting behind it go on.
+            if turn == 'probe':
+                gate.settle(learned, host.hostname)
         return runner(conn, host, ctx)
     except Exception as exc:  # noqa: BLE001 -- every failure becomes a row
-        return HostOutcome(
-            host.hostname,
-            status=getattr(exc, 'status', 'failed'),
-            failure_stage=failure_stage_for(exc),
-            error_summary=_summarise(exc),
-            scp_restore_confirmed=getattr(exc, 'scp_restore_confirmed', None),
-        )
+        outcome = _failed_outcome(host.hostname, exc)
+        if outcome.failure_stage == 'credential':
+            gate.refuse(host.hostname)
+        return outcome
     finally:
         if conn is not None:
             try:
                 conn.disconnect()
             except Exception:  # noqa: BLE001, S110 -- a dead session is already gone
                 pass
+
+
+def _failed_outcome(hostname: str, exc: BaseException) -> HostOutcome:
+    return HostOutcome(
+        hostname,
+        status=getattr(exc, 'status', 'failed'),
+        failure_stage=failure_stage_for(exc),
+        error_summary=_summarise(exc),
+        scp_restore_confirmed=getattr(exc, 'scp_restore_confirmed', None),
+    )
+
+
+def _not_attempted_outcome(hostname: str, after: str | None) -> HostOutcome:
+    """A host the phase stopped before logging in to, failed and retryable."""
+    return HostOutcome(
+        hostname, 'not_attempted', failure_stage='credential',
+        error_summary=(f"not attempted: the phase stopped after the credential "
+                       f"was refused on {after}"),
+    )
 
 
 def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
@@ -371,60 +516,98 @@ def reset_for_retry(job: UpgradePhaseJob) -> None:
             host.error_summary = None
 
 
-def _not_attempted(host: UpgradeRunHost, job: UpgradePhaseJob, after: str,
-                   when: datetime) -> None:
-    """Record a host the phase stopped before reaching, as failed and retryable."""
-    record(host, job, HostOutcome(
-        host.hostname, 'not_attempted', failure_stage='credential',
-        error_summary=(f"not attempted: the phase stopped after the credential "
-                       f"was refused on {after}"),
-    ), when)
+def _stop_reason(job: UpgradePhaseJob, now: Callable[[], datetime]) -> str | None:
+    """Why no further host may start, or None. Main thread only: it reads the
+    run, and it is what Flask's cancel reaches through."""
+    if job.run.cancel_requested_at is not None:
+        return 'cancelled'
+    deadline = _aware(job.deadline_at)
+    if deadline is not None and now() >= deadline:
+        return 'timed_out'
+    return None
 
 
 def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
-                  now: Callable[[], datetime] = _utcnow) -> str:
+                  now: Callable[[], datetime] = _utcnow, *,
+                  concurrency: int = 1,
+                  tick_interval: float = HEARTBEAT_INTERVAL,
+                  on_tick: Callable[[], None] | None = None) -> str:
     """Run `job`'s phase across every eligible host. Returns the job's status.
 
     The caller has already claimed the job and set it `running`; this writes
     the terminal edge and the per-host rows, and nothing else touches the job.
 
+    Up to `concurrency` hosts run at once, each in a worker thread
+    (PLAN.md WS-9); a phase in `SERIAL_PHASES` runs one at a time through the
+    same code. Workers do device I/O and nothing else. This thread, the one
+    holding the session, builds each host's `HostTarget` before handing it
+    over, writes every row, and every `tick_interval` seconds while hosts run
+    it writes `heartbeat_at` and calls `on_tick` (the sibling runs queued
+    host-key scans there). The pool is closed before this returns, so no
+    worker outlives the phase or the credential the caller clears after it.
+
     `succeeded` means every host the phase ran on passed, `failed` none, and
     `partial` the rest (PLAN.md WS-8). A host that fails does not stop the
     others -- except on a refused credential. The same password goes to every
     host, so it would be refused on each of them in turn, and enough failed
-    logins lock the account out of TACACS+/RADIUS for the whole fleet. So the
-    phase stops there, and the hosts it did not reach are recorded as failed
-    (`not_attempted`) so a retry with the right password picks them up.
+    logins lock the account out of TACACS+/RADIUS for the whole fleet. So no
+    host starts after one, `LoginGate` keeps the hosts already running from
+    trying their own login, and every host that never tried is recorded as
+    failed (`not_attempted`) so a retry with the right password picks it up.
 
-    Cancel and the deadline are checked *between hosts* and not mid-host
-    (§7.3): there is no safe place to stop inside an activation, and a job row
-    polled more finely would still not give one.
+    Cancel and the deadline stop further hosts from starting; hosts already
+    running finish and are recorded (§7.3). There is no safe place to stop
+    inside an activation, and a job row polled more finely would still not
+    give one.
     """
     if job.is_retry:
         reset_for_retry(job)
     hosts = eligible_hosts(job)
+    workers = 1 if job.phase in SERIAL_PHASES else max(1, concurrency)
+    gate = LoginGate()
+    waiting = list(hosts)
+    running: dict = {}
     stopped = None
+    refused = False
 
-    for index, host in enumerate(hosts):
-        if job.run.cancel_requested_at is not None:
-            stopped = 'cancelled'
-            break
-        deadline = _aware(job.deadline_at)
-        if deadline is not None and now() >= deadline:
-            stopped = 'timed_out'
-            break
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix=f'nethub-{job.phase}') as pool:
+        while True:
+            while waiting and len(running) < workers and not refused:
+                stopped = _stop_reason(job, now)
+                if stopped is not None:
+                    break
+                host = waiting.pop(0)
+                started = now()
+                try:
+                    target = HostTarget.of(host)
+                except UnconfirmedHost as exc:
+                    record(host, job, _failed_outcome(host.hostname, exc), started)
+                    db.session.commit()
+                    continue
+                future = pool.submit(run_host, target, job.phase, ctx, gate)
+                running[future] = (host, started)
+            if not running:
+                break
 
-        started = now()
-        outcome = run_host(host, job, ctx)
-        record(host, job, outcome, started)
-        if outcome.failure_stage == 'credential':
-            for rest in hosts[index + 1:]:
-                _not_attempted(rest, job, host.hostname, now())
-        job.heartbeat_at = now()
+            done, _ = wait(running, timeout=tick_interval, return_when=FIRST_COMPLETED)
+            for future in done:
+                host, started = running.pop(future)
+                outcome = future.result()
+                record(host, job, outcome, started)
+                if outcome.failure_stage == 'credential':
+                    refused = True
+            job.heartbeat_at = now()
+            db.session.commit()
+            if on_tick is not None:
+                on_tick()
+            if stopped is not None and not running:
+                break
+
+    if refused:
+        for host in waiting:
+            record(host, job, _not_attempted_outcome(host.hostname, gate.refused_on), now())
         db.session.commit()
-        if outcome.failure_stage == 'credential':
-            break
-
     if stopped is None:
         failed = [h for h in hosts if h.state == 'failed']
         if not failed:
