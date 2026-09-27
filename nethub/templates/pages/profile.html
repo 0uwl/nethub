@@ -10,6 +10,30 @@
   <dt>NetHub username</dt><dd>{{ current_user.username }}</dd>
 </dl>
 
+<h3>Password</h3>
+
+<p>Changing your password ends every other session you have open.</p>
+
+<form method="post" action="{{ url_for('auth.change_password') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="form-group">
+    <label for="current_password">Current password</label>
+    <input type="password" class="form-control" id="current_password"
+           name="current_password" required autocomplete="current-password">
+  </div>
+  <div class="form-group">
+    <label for="new_password">New password</label>
+    <input type="password" class="form-control" id="new_password"
+           name="new_password" required autocomplete="new-password">
+  </div>
+  <div class="form-group">
+    <label for="confirm_password">New password again</label>
+    <input type="password" class="form-control" id="confirm_password"
+           name="confirm_password" required autocomplete="new-password">
+  </div>
+  <button type="submit" class="btn btn-primary">Change password</button>
+</form>
+
 <h3>Device username</h3>
 
 <p>The name that NetHub logs into <em>devices</em> with on your behalf, separate 

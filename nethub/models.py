@@ -18,6 +18,18 @@ class User(db.Model, UserMixin):
     device_username = db.Column(db.String(80))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    #: Deactivation rather than deletion (design doc §5): the audit trail
+    #: references these rows. An inactive user cannot log in, and the user
+    #: loader refuses them, so an existing session ends on its next request
+    #: (PLAN.md WS-10).
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default='1')
+    #: Bumped to revoke every session this user holds: on a password change,
+    #: an admin reset and a disable. It is part of the id Flask-Login keeps in
+    #: the signed cookie (`get_id`), so a cookie minted under an older epoch no
+    #: longer loads a user. That is revocation without the `sessions` table
+    #: §4.5 specifies, which alpha does not have.
+    session_epoch = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+
     # Online-guessing budget. Deliberately per-*user* rather than per-submitted
     # -username: design doc §4.2 argues at length that a counter keyed on
     # attacker-chosen input is an unbounded-growth attack on the SQLite file
@@ -31,6 +43,14 @@ class User(db.Model, UserMixin):
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
+
+    def get_id(self):
+        # Flask-Login stores this in the session cookie and hands it back to
+        # `load_user`; carrying the epoch here is what makes a bump revoke.
+        return f'{self.id}:{self.session_epoch}'
+
+    def revoke_sessions(self):
+        self.session_epoch = (self.session_epoch or 0) + 1
 
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
@@ -142,7 +162,72 @@ class Artifact(db.Model):
 
 @login_manager.user_loader
 def load_user(user_id):
-    return db.session.get(User, int(user_id))
+    """The user a session cookie names, or None to log it out.
+
+    The cookie carries `id:epoch` (`User.get_id`). A bare id, from a cookie
+    issued before sessions carried an epoch, is refused: everyone logs in
+    again once after the upgrade that added it. A disabled user is refused
+    too, so disabling someone ends their session on its next request.
+    """
+    user_part, sep, epoch_part = str(user_id).partition(':')
+    if not sep or not user_part.isdigit() or not epoch_part.isdigit():
+        return None
+    user = db.session.get(User, int(user_part))
+    if user is None or not user.is_active or user.session_epoch != int(epoch_part):
+        return None
+    return user
+
+
+#: `user_admin_audit.action` (PLAN.md WS-10). `created` covers the web form,
+#: `create-admin` and first-boot bootstrap alike.
+USER_AUDIT_ACTIONS = (
+    'created', 'password_changed', 'password_reset', 'disabled', 'enabled', 'unlocked',
+)
+
+
+class UserAdminAudit(db.Model):
+    """Who did what to which account, and when (design doc §5).
+
+    Append-only by trigger, not by habit: a Flask-side compromise that can
+    forge a user could otherwise also erase the record of having done it.
+    `actor_user_id` is null for the command line and first-boot bootstrap,
+    which act with host access rather than as a NetHub user.
+    """
+
+    __tablename__ = 'user_admin_audit'
+
+    id = db.Column(db.Integer, primary_key=True)
+    occurred_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    target_user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    action = db.Column(_enum(USER_AUDIT_ACTIONS, 'user_audit_action'), nullable=False)
+    #: Short, fixed text of ours: never a password, never request input.
+    detail = db.Column(db.String(200))
+
+
+def record_user_action(action, target, actor=None, detail=None):
+    """Add a `user_admin_audit` row to the session; the caller commits it
+    with the change it records, so neither lands without the other."""
+    db.session.add(UserAdminAudit(
+        action=action, target_user_id=target.id,
+        actor_user_id=actor.id if actor is not None else None, detail=detail,
+    ))
+
+
+for _event in ('UPDATE', 'DELETE'):
+    db.event.listen(
+        UserAdminAudit.__table__,
+        'after_create',
+        db.DDL(
+            f"""
+            CREATE TRIGGER user_admin_audit_no_{_event.lower()}
+            BEFORE {_event} ON user_admin_audit
+            BEGIN
+                SELECT RAISE(ABORT, 'user_admin_audit is append-only');
+            END;
+            """
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

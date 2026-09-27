@@ -20,7 +20,7 @@ from nethub import models, schema
 from nethub.extensions import db
 
 FIXTURES = Path(__file__).parent / "fixtures" / "schemas"
-HEAD = "0004_partial_and_retry"
+HEAD = "0005_user_management"
 
 
 def url(path):

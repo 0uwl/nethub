@@ -120,15 +120,20 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # default, comfortably above a real IOS-XE image.
 #Environment=MAX_CONTENT_LENGTH=1610612736
 
-# --- Optional ---
-# Only consulted on first boot, when the database has no users yet -- an
-# already-running deployment has its admin(s) and ignores both of these. If
-# neither is set, a random password is generated and printed once, to
-# `podman logs nethub` / `journalctl --user -u nethub`, on that first boot.
+# --- First boot ---
+# Only consulted when the database has no users yet -- an already-running
+# deployment has its user(s) and ignores both of these.
 
-# Username for the first admin account. Everyone who can log in is an admin
-# in this alpha -- there are no roles yet to pick between.
-#Environment=ADMIN_USERNAME=admin
+# Username for the first account. There is no default: a well-known name
+# plus the login lockout would let anyone on the network keep it locked out.
+# Left unset, NetHub starts with no users and logs that one is needed; create
+# it with `podman exec -it nethub flask --app nethub create-admin <name>`.
+# Everyone who can log in is an admin in this alpha -- there are no roles yet.
+#Environment=ADMIN_USERNAME=
+
+# If ADMIN_USERNAME is set and neither of the password sources below is, a
+# random password is generated and printed once, to `podman logs nethub` /
+# `journalctl --user -u nethub`, on that first boot.
 
 # Sets the first admin's password directly instead of a random one. Has to
 # sit here in plaintext for the container to read it on every restart --
