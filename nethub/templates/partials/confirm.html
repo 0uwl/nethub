@@ -1,0 +1,14 @@
+{#
+  A short confirmation checkbox whose consequence is explained on hover
+  (PLAN.md WS-11). The explainer is Pico's CSS-only tooltip, and also a
+  <small> the checkbox names in aria-describedby: a screen reader reads it
+  while hidden, and nethub.css shows it under the label on a device that
+  cannot hover. The route checks confirm=yes (web.confirmed).
+#}
+{% macro short_confirm(id, label, explainer) -%}
+<label class="confirm" data-tooltip="{{ explainer }}" data-placement="left">
+  <input type="checkbox" name="confirm" value="yes" required aria-describedby="{{ id }}">
+  {{ label }}
+</label>
+<small id="{{ id }}" class="explainer">{{ explainer }}</small>
+{%- endmacro %}

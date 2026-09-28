@@ -1,57 +1,45 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Your profile{% endblock %}
 {% block content %}
+<h1>Your profile</h1>
 
-<div class="page-header">
-  <h1>Your profile</h1>
-</div>
-
-<dl class="dl-horizontal">
+<dl class="facts">
   <dt>NetHub username</dt><dd>{{ current_user.username }}</dd>
 </dl>
 
-<h3>Password</h3>
+<h2>Password</h2>
 
 <p>Changing your password ends every other session you have open.</p>
 
 <form method="post" action="{{ url_for('auth.change_password') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <div class="form-group">
-    <label for="current_password">Current password</label>
-    <input type="password" class="form-control" id="current_password"
-           name="current_password" required autocomplete="current-password">
-  </div>
-  <div class="form-group">
-    <label for="new_password">New password</label>
-    <input type="password" class="form-control" id="new_password"
-           name="new_password" required autocomplete="new-password">
-  </div>
-  <div class="form-group">
-    <label for="confirm_password">New password again</label>
-    <input type="password" class="form-control" id="confirm_password"
-           name="confirm_password" required autocomplete="new-password">
-  </div>
-  <button type="submit" class="btn btn-primary">Change password</button>
+  <label for="current_password">Current password</label>
+  <input type="password" id="current_password"
+         name="current_password" required autocomplete="current-password">
+  <label for="new_password">New password</label>
+  <input type="password" id="new_password"
+         name="new_password" required autocomplete="new-password">
+  <label for="confirm_password">New password again</label>
+  <input type="password" id="confirm_password"
+         name="confirm_password" required autocomplete="new-password">
+  <button type="submit">Change password</button>
 </form>
 
-<h3>Device username</h3>
+<h2>Device username</h2>
 
-<p>The name that NetHub logs into <em>devices</em> with on your behalf, separate 
-from your NetHub user account above</p>
+<p>The name that NetHub logs into <em>devices</em> with on your behalf, separate
+from your NetHub user account above.</p>
 
-<p><strong>You cannot submit an upgrade run until this is set.</strong></p>
+<p><strong>You cannot submit or approve an upgrade run until this is set.</strong></p>
 
 <form method="post" action="{{ url_for('upgrades.set_device_username') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <div class="form-group">
-    <label for="device_username">Device username</label>
-    <input type="text" class="form-control" id="device_username"
-           name="device_username" value="{{ current_user.device_username or '' }}"
-           placeholder="e.g. jsmith" autofocus>
-    <p class="help-block">Leave empty and save to clear it. Clearing it stops you
-    submitting new runs; it does not affect runs already in flight</p>
-  </div>
-  <button type="submit" class="btn btn-primary">Save device username</button>
+  <label for="device_username">Device username</label>
+  <input type="text" id="device_username"
+         name="device_username" value="{{ current_user.device_username or '' }}"
+         placeholder="e.g. jsmith" aria-describedby="device_username_help">
+  <small id="device_username_help">Leave empty and save to clear it. Clearing it stops you
+  submitting new runs; it does not affect runs already in flight.</small>
+  <button type="submit">Save device username</button>
 </form>
-
 {% endblock %}

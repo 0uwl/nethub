@@ -1,13 +1,14 @@
 {% extends 'layouts/main.html' %}
+{% from 'partials/confirm.html' import short_confirm %}
 {% block title %}Device host keys{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Device host keys</h1></div>
+<h1>Device host keys</h1>
 <p>An address with no <strong>confirmed</strong> pin cannot be named by any run.
 Confirming one is a deliberate action, separate from submitting a run.</p>
-<p><a href="{{ url_for('hostkeys.scan_hostkey') }}" class="btn btn-primary">Scan an address</a></p>
+<p><a href="{{ url_for('hostkeys.scan_hostkey') }}" role="button">Scan an address</a></p>
 {% if keys %}
-<div class="table-responsive">
-<table class="table table-striped">
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>Address</th><th>Type</th><th>Fingerprint</th><th>First seen</th><th>Confirmed by</th><th></th></tr></thead>
   <tbody>
   {% for k in keys %}
@@ -18,13 +19,17 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
       <td>{{ k.first_seen_at }}</td>
       <td>{% if k.is_confirmed %}{{ users.get(k.confirmed_by, '?') }} on {{ k.confirmed_at }}
           {% else %}<em>not confirmed, unusable</em>{% endif %}</td>
-      <td>
+      <td class="actions">
         <a href="{{ url_for('hostkeys.hostkey_history', address=k.ansible_host) }}">History</a>
-        <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}"
-              onsubmit="return confirm('Remove this pin? A run targeting this address will be refused until it is confirmed again.');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-          <button type="submit" class="btn btn-link">Remove</button>
-        </form>
+        <details>
+          <summary>Remove</summary>
+          <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            {{ short_confirm('pin_help_%d' % k.id, 'Remove pin',
+                'Runs naming ' ~ k.ansible_host ~ ' are refused until it is scanned and confirmed again.') }}
+            <button type="submit" class="secondary">Remove pin</button>
+          </form>
+        </details>
       </td>
     </tr>
   {% endfor %}

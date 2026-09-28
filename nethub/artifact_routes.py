@@ -20,6 +20,7 @@ from flask_login import current_user, login_required
 from . import artifacts as artifact_store
 from .extensions import db
 from .models import Artifact, User
+from .web import confirmed
 
 artifacts_bp = Blueprint('artifacts', __name__)
 
@@ -64,6 +65,8 @@ def new_artifact():
 @artifacts_bp.route('/artifacts/<int:artifact_id>/delete', methods=['POST'])
 @login_required
 def delete_artifact(artifact_id):
+    if not confirmed('the delete'):
+        return redirect(url_for('artifacts.list_artifacts'))
     artifact = db.session.get(Artifact, artifact_id)
     if artifact is not None:
         key = artifact.bundle_key

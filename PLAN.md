@@ -71,7 +71,7 @@ function name.
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | merged |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | merged |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | merged |
-| 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
+| 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | in review |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
 | 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
@@ -551,14 +551,21 @@ needs the real heartbeat.
 2. **Security headers** in an `after_request` hook: a CSP of
    `default-src 'self'; script-src 'none'; frame-ancestors 'none';
    form-action 'self'; base-uri 'none'`, plus `X-Content-Type-Options: nosniff`
-   and `Referrer-Policy: same-origin`.
+   and `Referrer-Policy: same-origin`. *As built* it also carries
+   `img-src 'self' data:`: Pico draws its checkbox ticks, select chevrons and
+   `<details>` markers as `data:` SVGs in the stylesheet, and without it they
+   vanish (found in a browser, not by inspection).
 3. **Auto-refresh.** A `<meta http-equiv="refresh" content="5">` on the scan
    result page and the run page while anything is `queued` or `running`.
 4. **Stalled indicator.** A `running` job whose `heartbeat_at` is older than
    three heartbeat intervals shows "stalled: check the nethub-sibling unit".
 5. **Nothing is picking up work.** A `queued` job or scan older than a minute
-   with no sibling heartbeat anywhere shows "No worker has picked this up. Is
-   nethub-sibling running?" (today this fails silently).
+   shows "No worker has picked this up. Is nethub-sibling running?" (today
+   this fails silently). The sibling has no heartbeat outside a running
+   phase, so decided by the maintainer on 2026-09-28: infer it from the
+   queue, with no schema change. The notice shows when something has been
+   queued over a minute and no job is running with a fresh heartbeat and no
+   scan is running that started recently.
 6. **Queue depth at the gate.** The approve form says how many jobs are queued
    ahead.
 7. **Missing device username, before the form is filled.** `upgrades.submit`

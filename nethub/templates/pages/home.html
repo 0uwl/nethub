@@ -1,14 +1,10 @@
 {% extends 'layouts/main.html' %}
 {% block title %}NetHub{% endblock %}
 {% block content %}
-
-<div class="page-header">
-  <h1>NetHub</h1>
-</div>
+<h1>NetHub</h1>
 {% if current_user.is_authenticated %}
-<p class="lead"><a href="{{ url_for('artifacts.list_artifacts') }}">Go to the artifacts</a></p>
+<p><a href="{{ url_for('artifacts.list_artifacts') }}">Go to the artifacts</a></p>
 {% else %}
-<p class="lead"><a href="{{ url_for('auth.login') }}">Log in</a> to manage published images.</p>
+<p><a href="{{ url_for('auth.login') }}">Log in</a> to manage published images.</p>
 {% endif %}
-
 {% endblock %}

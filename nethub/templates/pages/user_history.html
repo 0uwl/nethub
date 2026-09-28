@@ -1,10 +1,10 @@
 {% extends 'layouts/main.html' %}
 {% block title %}User history{% endblock %}
 {% block content %}
-<div class="page-header"><h1>History for {{ user.username }}</h1></div>
+<h1>History for {{ user.username }}</h1>
 {% if entries %}
-<div class="table-responsive">
-<table class="table table-striped">
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>When</th><th>Action</th><th>By</th><th>Detail</th></tr></thead>
   <tbody>
   {% for e in entries %}

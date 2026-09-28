@@ -1,10 +1,10 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Host key history{% endblock %}
 {% block content %}
-<div class="page-header"><h1>History for <code>{{ address }}</code></h1></div>
+<h1>History for <code>{{ address }}</code></h1>
 {% if entries %}
-<div class="table-responsive">
-<table class="table table-striped">
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>When</th><th>Action</th><th>Type</th><th>Fingerprint</th><th>By</th></tr></thead>
   <tbody>
   {% for e in entries %}

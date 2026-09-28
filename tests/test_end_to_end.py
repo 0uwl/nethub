@@ -370,7 +370,7 @@ def submit(client) -> int:
 
 def approve(client, run_id: int, phase: str) -> None:
     client.post(f"/upgrades/{run_id}/approve",
-                data={"phase": phase, "device_password": DEVICE_PASS})
+                data={"phase": phase, "device_password": DEVICE_PASS, "confirm": "yes"})
 
 
 @pytest.fixture
@@ -497,7 +497,7 @@ class TestCancel:
         assert work() == ["succeeded"]
         seen = len(switch.commands)
 
-        web.post(f"/upgrades/{submitted}/cancel")
+        web.post(f"/upgrades/{submitted}/cancel", data={"confirm": "yes"})
         assert state(app, submitted)["run"] == ("cancelled", None)
 
         approve(web, submitted, "stage")
@@ -515,7 +515,7 @@ class TestCancel:
         assert credential_channel.held() == 1
         seen = len(switch.commands)
 
-        web.post(f"/upgrades/{submitted}/cancel")
+        web.post(f"/upgrades/{submitted}/cancel", data={"confirm": "yes"})
         assert credential_channel.held() == 0, "cancel dropped the ciphertext"
 
         assert work() == ["cancelled"]
@@ -636,7 +636,7 @@ class TestOneHostFailing:
             as_text=True)
 
         web.post(f"/upgrades/{run_id}/retry",
-                 data={"phase": "stage", "device_password": DEVICE_PASS})
+                 data={"phase": "stage", "device_password": DEVICE_PASS, "confirm": "yes"})
         assert work() == ["succeeded"]
         assert state(app, run_id)["run"] == ("awaiting_approval", "activate")
         assert self.hosts(app, run_id) == {HOSTNAME: "staged", HOSTNAME2: "staged"}
@@ -685,7 +685,7 @@ class TestOneHostFailing:
     ):
         """Each refused login counts toward the AAA server's lockout."""
         web.post(f"/upgrades/{run_id}/approve",
-                 data={"phase": "stage", "device_password": "typo"})
+                 data={"phase": "stage", "device_password": "typo", "confirm": "yes"})
         assert work() == ["failed"]
         wrong = [login for address in (ADDRESS, ADDRESS2)
                  for login in switch[address].logins if login[1] == "typo"]

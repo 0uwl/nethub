@@ -1,117 +1,81 @@
 <!doctype html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{% block title %}{% endblock %}</title>
-
-<!-- meta -->
-<meta name="description" content="">
-<meta name="author" content="">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<!-- /meta -->
-
-<!-- styles -->
-<link type="text/css" rel="stylesheet" href="/static/css/font-awesome-4.1.0.min.css" />
-<link type="text/css" rel="stylesheet" href="/static/css/bootstrap-3.1.1.min.css">
-<link type="text/css" rel="stylesheet" href="/static/css/bootstrap-theme-3.1.1.min.css" />
-<link type="text/css" rel="stylesheet" href="/static/css/layout.main.css" />
-<link type="text/css" rel="stylesheet" href="/static/css/main.css" />
-<link type="text/css" rel="stylesheet" href="/static/css/main.responsive.css" />
-<link type="text/css" rel="stylesheet" href="/static/css/main.quickfix.css" />
-<!-- /styles -->
-
-<!-- favicons -->
-<link rel="shortcut icon" href="/static/ico/favicon.png">
-<!-- /favicons -->
-
-<!-- scripts -->
-<script src="/static/js/libs/modernizr-2.8.2.min.js"></script>
-<!--[if lt IE 9]><script src="/static/js/libs/respond-1.4.2.min.js"></script><![endif]-->
-<!-- /scripts -->
-
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}NetHub{% endblock %}</title>
+{#
+  Pico CSS v2.1.1, vendored from the npm tarball @picocss/pico@2.1.1
+  (css/pico.min.css, MIT licence header kept in the file).
+  pico.min.css sha256: fbc9a63fc9fc9f72d12fd7fc9806e11fa9f77ae4f9cad146b27003a1119ba3db
+  tests/test_templates.py hashes the file against the line above, so the
+  vendored copy cannot change without a visible diff here. Upgrading Pico is
+  replacing the file and this digest together. No CDN: the CSP allows 'self'.
+#}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pico.min.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/nethub.css') }}">
+<link rel="icon" href="{{ url_for('static', filename='ico/favicon.png') }}">
+{% block head %}{% endblock %}
 </head>
 <body>
 
-  <!-- Wrap all page content here -->
-  <div id="wrap">
+<header class="container">
+  <nav>
+    <ul>
+      <li><a href="{{ url_for('home') }}"><strong>NetHub</strong></a></li>
+    </ul>
+    {% if current_user.is_authenticated %}
+    <ul>
+      <li><a href="{{ url_for('artifacts.list_artifacts') }}">Artifacts</a></li>
+      <li><a href="{{ url_for('upgrades.list_runs') }}">Upgrades</a></li>
+      <li><a href="{{ url_for('hostkeys.list_hostkeys') }}">Host keys</a></li>
+      <li><a href="{{ url_for('auth.list_users') }}">Users</a></li>
+      <li><a href="{{ url_for('upgrades.profile') }}">Profile</a></li>
+      <li>
+        <form method="post" action="{{ url_for('auth.logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit" class="secondary outline">Log out</button>
+        </form>
+      </li>
+    </ul>
+    {% endif %}
+  </nav>
+</header>
 
-    <!-- Fixed navbar -->
-    <div class="navbar navbar-default navbar-fixed-top">
-      <div class="container">
-        <div class="navbar-header">
-          <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse">
-            <span class="icon-bar"></span>
-            <span class="icon-bar"></span>
-            <span class="icon-bar"></span>
-          </button>
-          <a class="navbar-brand" href="/">NetHub</a>
-        </div>
-        {% if current_user.is_authenticated %}
-        <div class="collapse navbar-collapse">
-          <ul class="nav navbar-nav">
-            <li><a href="{{ url_for('artifacts.list_artifacts') }}">Artifacts</a></li>
-            <li><a href="{{ url_for('upgrades.list_runs') }}">Upgrades</a></li>
-            <li><a href="{{ url_for('hostkeys.list_hostkeys') }}">Host keys</a></li>
-            <li><a href="{{ url_for('auth.list_users') }}">Users</a></li>
-            <li><a href="{{ url_for('upgrades.profile') }}">Profile</a></li>
-          </ul>
-          <form class="navbar-form navbar-right" method="post" action="{{ url_for('auth.logout') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-link navbar-btn">Log out</button>
-          </form>
-        </div>
-        {% endif %}
-      </div>
-    </div>
+<main class="container">
 
-    <!-- Begin page content -->
-    <main id="content" role="main" class="container">
+  {#
+    Every flash used to render as alert-error regardless of what it said,
+    because no flash() call passed a category -- so "Published ..." and
+    "Invalid username or password" looked identical.
 
-      {#
-        Every flash used to render as alert-error regardless of what it said,
-        because no flash() call passed a category -- so "Published ..." and
-        "Invalid username or password" looked identical.
+    The DEFAULT category stays an error deliberately. Flask calls it
+    'message' when none is given, and the uncategorised calls that remain
+    are failures, so treating the default as an error keeps them correct
+    rather than quietly downgrading a real refusal to a notice. Pass
+    'success' or 'info' explicitly for anything that went right.
+  #}
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      {% if category == 'success' %}
+        {% set alert_class = 'alert-success' %}
+      {% elif category == 'info' %}
+        {% set alert_class = 'alert-info' %}
+      {% else %}
+        {% set alert_class = 'alert-error' %}
+      {% endif %}
+      <div class="alert {{ alert_class }}" role="alert">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
 
-        The DEFAULT category stays an error deliberately. Flask calls it
-        'message' when none is given, and the uncategorised calls that remain
-        are failures, so treating the default as an error keeps them correct
-        rather than quietly downgrading a real refusal to a notice. Pass
-        'success' or 'info' explicitly for anything that went right.
-      #}
-      {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-          {% for category, message in messages %}
-            {% if category == 'success' %}
-              {% set alert_class = 'alert-success' %}
-            {% elif category == 'info' %}
-              {% set alert_class = 'alert-info' %}
-            {% else %}
-              {% set alert_class = 'alert-error alert-danger' %}
-            {% endif %}
-            <div class="alert alert-block {{ alert_class }} fade in" role="alert">
-              <a class="close" data-dismiss="alert">&times;</a>
-              {{ message }}
-            </div>
-          {% endfor %}
-        {% endif %}
-      {% endwith %}
+  {% block content %}{% endblock %}
 
-      {% block content %}{% endblock %}
+</main>
 
-    </main>
-
-  </div>
-
-  <div id="footer">
-    <div class="container">
-      <p>NetHub</p>
-      {% block footer %}{% endblock %}
-    </div>
-  </div>
-
-  <script type="text/javascript" src="/static/js/libs/jquery-1.11.1.min.js"></script>
-  <script type="text/javascript" src="/static/js/libs/bootstrap-3.1.1.min.js" defer></script>
-  <script type="text/javascript" src="/static/js/plugins.js" defer></script>
-  <script type="text/javascript" src="/static/js/script.js" defer></script>
+<footer class="container">
+  <small class="muted">NetHub</small>
+</footer>
 
 </body>
 </html>

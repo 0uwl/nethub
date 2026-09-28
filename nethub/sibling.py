@@ -9,9 +9,9 @@ job edge (the `queued` row); the sibling writes every other one, plus the
 per-host rows via `phases.execute_phase`. The startup sweep lives here rather
 than in Flask so it can never fire against a run that is healthy under another
 process -- with the consequence, stated in §7.3, that a sibling which dies and
-stays dead is swept by nobody. The design has Flask read `heartbeat_at` and
-render "stalled" (not built yet; PLAN.md WS-11); noticing is not the sweep's
-job.
+stays dead is swept by nobody. Flask reads `heartbeat_at` and renders
+"stalled" instead (`nethub/worker_status.py`, PLAN.md WS-11); noticing is not
+the sweep's job.
 """
 
 from __future__ import annotations

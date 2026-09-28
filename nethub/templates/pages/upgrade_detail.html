@@ -1,9 +1,13 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Run {{ run.id }}{% endblock %}
+{% block head %}
+{# Reload while the sibling has work on this run; stop once nothing moves. #}
+{% if refresh %}<meta http-equiv="refresh" content="5">{% endif %}
+{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Run {{ run.id }} - {{ run.state }}</h1></div>
+<h1>Run {{ run.id }}: {{ run.state }}</h1>
 
-<dl class="dl-horizontal">
+<dl class="facts">
   <dt>Submitted by</dt><dd>{{ users.get(run.submitted_by, '?') }} on {{ run.created_at }}</dd>
   <dt>Device username</dt><dd>{{ run.device_username_used }}</dd>
   <dt>Request digest</dt><dd><code>{{ run.request_sha512[:32] }}&hellip;</code></dd>
@@ -12,84 +16,124 @@
   {% endif %}
 </dl>
 
+{% include 'partials/no_worker.html' %}
+{% for j in jobs if j.id in stalled_ids %}
+<div class="warning" role="alert">
+  {{ j.phase }} (attempt {{ j.attempt }}) is stalled: no heartbeat since
+  {{ j.heartbeat_at or j.started_at }}. Check the <code>nethub-sibling</code> unit.
+</div>
+{% endfor %}
+{% if refresh %}
+<p class="muted" aria-busy="true">Working. This page reloads itself every few seconds.</p>
+{% endif %}
+
 {% if run.state == 'awaiting_approval' %}
-<div class="alert alert-block">
-  <h4>Approve: {{ run.awaiting_phase }}</h4>
+<article>
+  <header><strong>Approve: {{ run.awaiting_phase }}</strong></header>
   {% if run.awaiting_phase == 'activate' %}
-  <p><strong>This reloads every host below and drops traffic.</strong></p>
+  <p><strong>This reloads every host listed here and drops traffic.</strong></p>
   {% elif run.awaiting_phase == 'cleanup' %}
   <p>Cleanup frees up storage space but removes the packages that a rollback would need.</p>
   {% endif %}
-  <p>Each targeted address, and who confirmed its host key, is listed below.
+  <p>Runs on {{ gate_hosts|length }} host(s): {{ gate_hosts|map(attribute='hostname')|join(', ') }}.
+  Each targeted address, and who confirmed its host key, is listed below.
   Check that before releasing your credential against it.</p>
+  <p class="muted">
+    {% if queued_ahead or running_now %}
+    Queued behind {{ queued_ahead }} job(s){% if running_now %}, with a phase running now{% endif %}:
+    the sibling runs one phase at a time, oldest first.
+    {% else %}
+    Nothing is queued ahead; the sibling picks this up at once.
+    {% endif %}
+  </p>
+  {% if not current_user.device_username %}
+  {% include 'partials/device_username_missing.html' %}
+  {% else %}
   {#
-    Artifact delete, host-key delete and cancel all confirmed; this form --
-    the only one that reboots production network hardware -- did not. The
-    copy names the phase and the host count so the dialog says what will
+    The confirmation used to be a JavaScript confirm(), which the CSP now
+    blocks. The checkbox is required in the browser and checked again by the
+    route (web.confirmed): `required` alone is a convenience, not a check.
+    The copy names the phase and the host count so it says what will
     actually happen rather than "are you sure?".
   #}
-  <form method="post" action="{{ url_for('upgrades.approve', run_id=run.id) }}"
-        onsubmit="return confirm(
-          {%- if run.awaiting_phase == 'activate' -%}
-            'Reload {{ run.hosts|length }} device(s) now? Each one drops traffic while it reboots, and this releases your device credential against every address listed.'
-          {%- elif run.awaiting_phase == 'cleanup' -%}
-            'Remove inactive packages on {{ run.hosts|length }} device(s)? This frees flash but removes what a rollback would need.'
-          {%- else -%}
-            'Approve {{ run.awaiting_phase }} on {{ run.hosts|length }} device(s)? This releases your device credential against every address listed.'
-          {%- endif -%}
-        );">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-    <input type="hidden" name="phase" value="{{ run.awaiting_phase }}"/>
-    <label class="sr-only" for="approve_device_password">Your device password</label>
+  <form method="post" action="{{ url_for('upgrades.approve', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="phase" value="{{ run.awaiting_phase }}">
+    <label for="approve_device_password">Device password for <code>{{ current_user.device_username }}</code></label>
     <input type="password" id="approve_device_password" name="device_password"
-           placeholder="Your device password"
-           class="form-control" required autocomplete="off"/>
-    <br/>
-    <button type="submit" class="btn btn-primary">Approve {{ run.awaiting_phase }}</button>
-  </form>
-  {% if run.awaiting_phase == 'cleanup' %}
-  <form method="post" action="{{ url_for('upgrades.decline_cleanup', run_id=run.id) }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-    <button type="submit" class="btn btn-default">Decline cleanup and close the run</button>
+           required autocomplete="off">
+    <label class="confirm">
+      <input type="checkbox" name="confirm" value="yes" required>
+      {% if run.awaiting_phase == 'activate' -%}
+      Reload {{ gate_hosts|length }} device(s) now. Each one drops traffic while it reboots,
+      and this releases your device credential against every address listed.
+      {%- elif run.awaiting_phase == 'cleanup' -%}
+      Remove inactive packages on {{ gate_hosts|length }} device(s). This frees flash but
+      removes what a rollback would need.
+      {%- else -%}
+      Approve {{ run.awaiting_phase }} on {{ gate_hosts|length }} device(s). This releases
+      your device credential against every address listed.
+      {%- endif %}
+    </label>
+    <button type="submit">Approve {{ run.awaiting_phase }}</button>
   </form>
   {% endif %}
-</div>
+  {% if run.awaiting_phase == 'cleanup' %}
+  <form method="post" action="{{ url_for('upgrades.decline_cleanup', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="secondary">Decline cleanup and close the run</button>
+  </form>
+  {% endif %}
+</article>
 {% endif %}
 
 {% for phase, failed in retryable %}
-<div class="alert alert-block">
-  <h4>Retry: {{ phase }}</h4>
+<article>
+  <header><strong>Retry: {{ phase }}</strong></header>
   <p>{{ failed|length }} host(s) failed {{ phase }}: {{ failed|join(', ') }}.
   Retrying runs {{ phase }} again on those hosts only. The run then comes back
   to the {{ run.awaiting_phase }} gate.</p>
   {% if phase == 'activate' %}
   <p><strong>This reloads the hosts listed and drops their traffic.</strong></p>
   {% endif %}
-  <form method="post" action="{{ url_for('upgrades.retry', run_id=run.id) }}"
-        onsubmit="return confirm('Retry {{ phase }} on {{ failed|length }} device(s)? This releases your device credential against each of them.');">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-    <input type="hidden" name="phase" value="{{ phase }}"/>
-    <label class="sr-only" for="retry_{{ phase }}_device_password">Your device password</label>
+  {% if not current_user.device_username %}
+  {% include 'partials/device_username_missing.html' %}
+  {% else %}
+  <form method="post" action="{{ url_for('upgrades.retry', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="phase" value="{{ phase }}">
+    <label for="retry_{{ phase }}_device_password">Device password for <code>{{ current_user.device_username }}</code></label>
     <input type="password" id="retry_{{ phase }}_device_password" name="device_password"
-           placeholder="Your device password"
-           class="form-control" required autocomplete="off"/>
-    <br/>
-    <button type="submit" class="btn btn-default">Retry {{ phase }} on {{ failed|length }} host(s)</button>
+           required autocomplete="off">
+    <label class="confirm">
+      <input type="checkbox" name="confirm" value="yes" required>
+      Retry {{ phase }} on {{ failed|length }} device(s){% if phase == 'activate' %}, reloading each{% endif %}.
+      This releases your device credential against each of them.
+    </label>
+    <button type="submit" class="secondary">Retry {{ phase }} on {{ failed|length }} host(s)</button>
   </form>
-</div>
+  {% endif %}
+</article>
 {% endfor %}
 
 {% if run.state not in ('completed', 'failed', 'cancelled', 'expired') %}
-<form method="post" action="{{ url_for('upgrades.cancel', run_id=run.id) }}"
-      onsubmit="return confirm('Request cancel? A running phase stops between hosts, not mid-host.');">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-  <button type="submit" class="btn btn-link">Request cancel</button>
-</form>
+<details>
+  <summary>Cancel this run</summary>
+  <form method="post" action="{{ url_for('upgrades.cancel', run_id=run.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="confirm">
+      <input type="checkbox" name="confirm" value="yes" required>
+      Cancel run {{ run.id }}. A running phase stops between hosts, not mid-host, and the
+      run cannot be resumed.
+    </label>
+    <button type="submit" class="secondary">Request cancel</button>
+  </form>
+</details>
 {% endif %}
 
-<h3>Hosts</h3>
-<div class="table-responsive">
-<table class="table table-striped">
+<h2>Hosts</h2>
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>Host</th><th>Address</th><th>Image</th><th>Target</th><th>State</th><th>Last phase</th><th>Was</th><th>Now</th><th>Error</th></tr></thead>
   <tbody>
   {% for h in run.hosts %}
@@ -109,16 +153,16 @@
 </table>
 </div>
 
-<h3>Phase executions</h3>
-<div class="table-responsive">
-<table class="table table-striped">
+<h2>Phase executions</h2>
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>Phase</th><th>Attempt</th><th>Status</th><th>Approved by</th><th>Started</th><th>Heartbeat</th><th>Failure</th></tr></thead>
   <tbody>
   {% for j in jobs %}
     <tr>
       <td>{{ j.phase }}</td>
       <td>{{ j.attempt }}</td>
-      <td>{{ j.status }}</td>
+      <td>{{ j.status }}{% if j.id in stalled_ids %} (stalled){% endif %}</td>
       <td>{{ users.get(j.approved_by, '') if j.approved_by else '' }}</td>
       <td>{{ j.started_at or '' }}</td>
       <td>{{ j.heartbeat_at or '' }}</td>
@@ -130,9 +174,9 @@
 </div>
 
 {% if results %}
-<h3>Per-host results</h3>
-<div class="table-responsive">
-<table class="table table-striped">
+<h2>Per-host results</h2>
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>Host</th><th>Phase</th><th>Attempt</th><th>Status</th><th>Failure</th><th>SCP restored</th><th>Finished</th></tr></thead>
   <tbody>
   {% for r in results %}
@@ -149,6 +193,6 @@
   </tbody>
 </table>
 </div>
-<p class="help-block">A blank &ldquo;SCP restored&rdquo; means no bracket ran.</p>
+<p class="muted">A "-" under &ldquo;SCP restored&rdquo; means no bracket ran.</p>
 {% endif %}
 {% endblock %}
