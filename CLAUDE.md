@@ -89,15 +89,23 @@ list and the systemd-credential mechanism for `SECRET_KEY`/`ADMIN_PASSWORD`.
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, Flask-Migrate (+ alembic, pinned
-                                   # on its own), gunicorn, pytest, netmiko,
-                                   # ntc-templates -- all pinned to exact
-                                   # versions, because CI resolves this file
-                                   # fresh on every push to main and publishes
-                                   # the result. PyYAML was dropped with the
-                                   # YAML registry (build step 7); yamllint is
-                                   # a CI tool, not a runtime dep.
+pip install --require-hashes -r requirements-dev.txt   # runtime set + pytest,
+                                   # pip-tools and CI's linters (ruff, yamllint,
+                                   # zizmor, shellcheck-py), all at CI's versions.
+                                   # requirements.txt alone is what the image
+                                   # installs; see "Lockfiles" below.
+
+pip-compile --generate-hashes --allow-unsafe --strip-extras \
+    --output-file=requirements.txt requirements.in           # regenerate the locks
+pip-compile --generate-hashes --allow-unsafe --strip-extras \
+    --output-file=requirements-dev.txt requirements-dev.in   # after editing an .in
+                                   # file -- on Python 3.12, runtime lock first
+                                   # (the dev one is constrained by it). CI runs
+                                   # exactly these and fails on any diff.
+
+scripts/smoke_test.sh [image]      # start web + sibling containers the way the
+                                    # Quadlet units do and check they come up;
+                                    # ENGINE=docker if you have no podman. CI runs it.
 
 export SECRET_KEY=$(openssl rand -hex 32)   # required; config.py rejects an absent
                                    # key, a known placeholder, or anything under 32 chars
@@ -135,7 +143,7 @@ ruff check .                       # Python lint (pyproject.toml: 100-char lines
 yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML files
                                     # are left -- this config and the CI workflow -- but
                                     # document-start/truthy stay disabled for new
-                                    # reasons: ci.yml has no `---`, and Actions' `on:`
+                                    # reasons: cicd.yml has no `---`, and Actions' `on:`
                                     # key is a YAML 1.1 boolean.
 
 python -m nethub.sealed_credentials keygen --out <file>   # the sibling's key pair:
@@ -225,23 +233,77 @@ concurrent branches collide in. `pyproject.toml`'s
 `import nethub` — without it only `python -m pytest` (which puts the cwd on
 `sys.path` itself) could.
 
-`.github/workflows/ci.yml` runs on every push/PR against `main`: a `lint`
-job (`ruff`/`yamllint`, plus `Containerfile` — not `Containerfile.dev`, which
-is dev-only — via the `immanuwell/dockerfile-roast` action also used by
-Drawbridge), a `test` job (`pytest -v`), and a `publish` job that builds and
-pushes `ghcr.io/<repo>:latest` (linux/amd64+arm64) on push to `main` once both
-prior jobs pass.
+## CI and releases (`.github/workflows/cicd.yml`, PLAN.md WS-12)
 
-**The lint tools are pinned (`ruff==0.16.7`, `yamllint==1.38.0`) and the
-reason is not tidiness.** They were installed unpinned, and ruff 0.16 widened
-its *default* rule set to include isort and part of pylint/flake8-simplify —
-so `ruff check .` passed locally against 0.15 and failed in CI on byte-identical
-files, on three branches at once. A linter that changes what it enforces with
-no commit blocks merges at random. **`ruff check .` locally therefore only
-matches CI if your ruff is that version** — check `ruff --version` before
-trusting a green local run, and when you do bump the pin, expect new findings
-and fix them rather than unpinning. `publish` fires only on push to `main`, so
-a PR gets `lint` and `test` as a free dry run before any image is built.
+One workflow, structured on the maintainer's DynaForm `cicd.yml`. On pull
+requests and pushes to `main`: `lint` (ruff, yamllint, shellcheck on
+`scripts/*.sh`, zizmor over `.github/`, the lockfile check, and
+`Containerfile` via `immanuwell/dockerfile-roast` — not `Containerfile.dev`,
+which is dev-only), `test` (`pytest -v`), and `image` (amd64 build, then
+`scripts/smoke_test.sh`, then Trivy). Weekly and on demand, `scan-published`
+scans `ghcr.io/<repo>:latest` for CVEs disclosed since release. **Only a `v*`
+tag publishes**: `publish` needs `lint` and `test`, builds amd64, smoke-tests
+and scans it, then pushes amd64+arm64 as `:X.Y.Z`, `:X.Y` and `:latest`
+(a hyphenated prerelease tag gets only its own tag), and creates the GitHub
+release last so a release means a green, published image. A merge to `main`
+publishes nothing. What is load-bearing:
+
+- **Every `uses:` is pinned to a commit SHA, tag in a comment** (two spaces
+  before `#`, for yamllint), and zizmor fails a new unpinned one. The
+  droast linter is pinned twice over: the action by SHA *and* its
+  `image-tag` input by tag and digest, because the action just runs
+  `ghcr.io/immanuwell/droast:<image-tag>`, which defaults to `latest`.
+  trivy-action pins its own nested actions and Trivy (v0.70.0) itself, but
+  the vulnerability database is fetched per run, so a re-run can fail where
+  the first passed. That is the gate working.
+- **Trivy fails on fixable `CRITICAL,HIGH`** (`SCAN_SEVERITY`, one env block
+  for every scan). DynaForm adds MEDIUM because Jinja2 sandbox escapes rate
+  MEDIUM and it renders user templates; NetHub renders none, so the
+  maintainer chose CRITICAL,HIGH (2026-09-28). The `image` gate can fail a PR
+  that did not cause it (a CVE published overnight against the base); the fix
+  is the Dependabot digest bump, not loosening the gate.
+- **Permissions default to `contents: read`.** Only `publish` gets
+  `packages: write` and `contents: write` (the release), `scan-published`
+  `packages: read`. Checkouts use `persist-credentials: false`. Untrusted
+  values reach shell through `env:`, never `${{ }}` inside `run:`.
+- **Nothing on the release path reads a cache another run wrote.** zizmor's
+  cache-poisoning audit flags any cache in a tag-triggered workflow. So
+  `lint` and `test` (which run on the tag push) use no pip cache, `publish`
+  builds with `no-cache` and hands its amd64 layers to the pushing build
+  through a job-local `type=local` cache in `runner.temp` (so what is pushed
+  is what was tested), and its Trivy step sets `cache: false`. The PR/main
+  `image` job may use the shared gha cache: it pushes nothing.
+- **Dependabot keeps the pins moving** (`.github/dependabot.yml`): actions,
+  pip (it regenerates pip-compile lockfiles; if it leaves the dev one stale,
+  the lockfile check fails its PR) and the base image digest, digest-only,
+  since `3.12`→`3.13` changes what the locks were compiled for. `cooldown`
+  holds new releases back a few days.
+- **The linters are in the hashed dev lockfile, not installed loose by the
+  workflow, and the reason is not tidiness.** They were once unpinned, and
+  ruff 0.16 widened its *default* rule set to include isort and part of
+  pylint/flake8-simplify — so `ruff check .` passed locally against 0.15 and
+  failed in CI on byte-identical files, on three branches at once. Installing
+  `requirements-dev.txt` now gives you CI's exact versions. When you bump a
+  pin, expect new findings and fix them rather than unpinning.
+
+**Lockfiles.** `requirements.in` lists the direct runtime dependencies (exact
+pins, with the reasons they are pinned); `requirements.txt` is compiled from
+it by pip-tools with every transitive package pinned and hashed, and the image
+installs it with `--require-hashes`, so a file replaced on the index fails the
+build instead of shipping. `requirements-dev.in` pulls in the runtime set with
+`-c requirements.txt` (the tests run exactly the image's versions) and adds
+pytest, pip-tools and the linters; pytest is no longer in the image. Compile on
+Python 3.12, the image's and CI's version, or markers resolve differently.
+
+**The smoke test does not cover SELinux, and that is settled** (maintainer,
+2026-09-28). `scripts/smoke_test.sh` runs both containers with the units'
+flags — read-only root, tmpfs, UID 1000, `keep-id` under podman, shared `:z`
+volumes — and checks the keygen, that the sibling waits for the migration,
+`/login` (with its CSP), the admin bootstrap and the sibling's start line. It
+fails on the WS-3 class of volume bug (verified: an unwritable data directory
+fails it with `unable to open database file`), but GitHub's runners use
+AppArmor, so a `:Z`-versus-`:z` relabel conflict passes. Nor does it run the
+units under systemd/Quadlet. Don't claim either.
 
 ## User management (`nethub/auth.py`, PLAN.md WS-10)
 
@@ -396,7 +458,9 @@ file gets edited:
   units mount the same two directories; `:Z` gives each container a private
   SELinux label, so on an enforcing host the second unit to start relabels
   the directory and locks the first out of the database. Unverified on an
-  enforcing host (none was available); the unit comments say so.
+  enforcing host (none was available); the unit comments say so. The
+  maintainer accepted leaving it so (2026-09-28): the CI smoke test cannot
+  reach SELinux either (see "CI and releases").
 - **`UserNS=keep-id:uid=1000,gid=1000` is required for the volumes to be
   writable, not optional hardening.** Confirmed by testing: the
   container's bind mounts fail with `unable to open database file`

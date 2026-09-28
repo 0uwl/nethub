@@ -1,0 +1,56 @@
+# Keeps the pins in this repository moving (PLAN.md WS-12). Pinning every
+# action to a commit, every Python package to a hash and the base image to a
+# digest stops anything changing without a diff; without something proposing
+# those diffs, the pins just rot, and a stale pin is its own vulnerability.
+#
+# Every update arrives as an ordinary pull request, so it goes through the same
+# CI as any other change: lint (including the lockfile check and zizmor), the
+# tests, and the image build, smoke test and Trivy scan.
+#
+# cooldown holds a release back for a few days before proposing it. Most
+# poisoned-package incidents are found and yanked within that window, and none
+# of these updates is urgent in hours: a CVE fix that is shows up in the weekly
+# scan of the published image instead.
+version: 2
+updates:
+  # The SHA pins in .github/workflows/cicd.yml. Dependabot rewrites the SHA and
+  # the version comment beside it together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+
+  # requirements.in and the pip-compile lockfiles generated from it. If an
+  # update leaves requirements-dev.txt stale, CI's lockfile check fails the
+  # pull request rather than letting the two drift.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+
+  # The python:3.12-slim digest in Containerfile and Containerfile.dev. This is
+  # how Debian security fixes reach the image, so it has the shortest cooldown.
+  # Digest updates only: moving to 3.13-slim changes the Python the lockfiles
+  # were compiled for, which is a deliberate change of its own (regenerate the
+  # locks on the new version, update CI's python-version), not a weekly bump.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor

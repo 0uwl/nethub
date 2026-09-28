@@ -71,8 +71,8 @@ function name.
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | merged |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | merged |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | merged |
-| 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | in review |
-| 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
+| 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | merged |
+| 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | in review |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
 | 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
 | 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | todo |
@@ -587,7 +587,8 @@ the server without its confirmation box ticked.
 
 Branch `ci/hardening`.
 
-- Pin every action in `.github/workflows/ci.yml` to a commit SHA, with the tag
+- Pin every action in `.github/workflows/ci.yml` (renamed `cicd.yml` in this
+  workstream, since it deploys as well) to a commit SHA, with the tag
   as a comment. This matters most for `immanuwell/dockerfile-roast`, a small
   third-party action in a workflow that can publish images.
 - Set top-level `permissions: contents: read`; grant `packages: write` only
@@ -599,7 +600,24 @@ Branch `ci/hardening`.
 - Add a container smoke test job: build the image, start the web container
   and the sibling against a shared volume, check `/login` returns 200 and the
   sibling logs its start line. This is the check that would have caught the
-  WS-3 volume bug on an enforcing runner.
+  WS-3 volume bug on an enforcing runner. *As built:* it catches the
+  unwritable-volume half of that bug class, but not the SELinux relabel
+  half, since GitHub's runners use AppArmor, not SELinux. The maintainer
+  settled on that on 2026-09-28 rather than run the Quadlet units under
+  systemd on the runner.
+
+**Added by the maintainer on 2026-09-28**, on top of the list above:
+
+- Restructure the workflow on the maintainer's DynaForm `cicd.yml`: publish
+  only on a `v*` tag (versioned image tags, `:latest` withheld from
+  prereleases, GitHub release created last), Trivy scanning of every image
+  build and weekly of the published image. Trivy fails on fixable
+  `CRITICAL,HIGH`; DynaForm's MEDIUM is specific to rendering user templates,
+  which NetHub does not do.
+- Dependabot for the actions, the pip lockfiles and the base image.
+- zizmor in the lint job, so a regression in the workflow's own security
+  fails CI instead of relying on review.
+- Pin `python:3.12-slim` by digest in both Containerfiles.
 
 **Done when:** CI runs the smoke test on every PR.
 
@@ -903,7 +921,9 @@ can turn each two-person rule on and off with an audited change, and
   it, the key already survived two upgrades. Check the notes from that run.
   If confirmed, treat `HostKeyError` as non-transient in `wait_for_device`
   (a small follow-up branch) and close the §10 entry.
-- **SELinux verification** for WS-3, if an enforcing host is available.
+- ~~**SELinux verification** for WS-3, if an enforcing host is available.~~
+  Settled on 2026-09-28: left unverified and accepted. The WS-12 smoke test
+  cannot reach SELinux either; the unit comments and `CLAUDE.md` say so.
 
 ## Found while working
 

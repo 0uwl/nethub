@@ -1,14 +1,15 @@
 # Local dev only -- never used in production (see Containerfile). Runs the
 # Flask dev server (debug + reload) against the repo bind-mounted in at
 # `podman run` time, so edits on the host take effect live with no rebuild.
-FROM python:3.12-slim
+# Same pinned base as Containerfile, so dev and production run the same Python.
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # No COPY . . here on purpose -- application code comes from the bind mount
 # (see dev.sh), so a change on the host is visible to the reloader without
