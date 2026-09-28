@@ -1,4 +1,5 @@
 {% extends 'layouts/main.html' %}
+{% from 'partials/confirm.html' import short_confirm %}
 {% block title %}Device host keys{% endblock %}
 {% block content %}
 <h1>Device host keys</h1>
@@ -24,11 +25,8 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
           <summary>Remove</summary>
           <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label class="confirm">
-              <input type="checkbox" name="confirm" value="yes" required>
-              Remove the pin for <code>{{ k.ansible_host }}</code>; runs naming it are
-              refused until it is scanned and confirmed again
-            </label>
+            {{ short_confirm('pin_help_%d' % k.id, 'Remove pin',
+                'Runs naming ' ~ k.ansible_host ~ ' are refused until it is scanned and confirmed again.') }}
             <button type="submit" class="secondary">Remove pin</button>
           </form>
         </details>

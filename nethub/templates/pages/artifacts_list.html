@@ -1,4 +1,5 @@
 {% extends 'layouts/main.html' %}
+{% from 'partials/confirm.html' import short_confirm %}
 {% block title %}Artifacts{% endblock %}
 {% block content %}
 <h1>Artifacts</h1>
@@ -24,10 +25,8 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
           <summary>Delete</summary>
           <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label class="confirm">
-              <input type="checkbox" name="confirm" value="yes" required>
-              Delete <code>{{ a.bundle_key }}</code> and its image file from the store
-            </label>
+            {{ short_confirm('delete_help_%d' % a.id, 'Delete artifact',
+                'Removes ' ~ a.bundle_key ~ ' and its image file from the store.') }}
             <button type="submit" class="secondary">Delete</button>
           </form>
         </details>

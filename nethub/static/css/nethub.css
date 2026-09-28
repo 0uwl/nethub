@@ -41,7 +41,7 @@ nav button { margin: 0; padding: 0.25rem 0.75rem; }
 .actions details { margin: 0; }
 .actions button { margin: 0; padding: 0.25rem 0.75rem; font-size: 0.875rem; }
 .actions details summary { font-size: 0.875rem; }
-.actions details form { margin-top: 0.5rem; min-width: 16rem; }
+.actions details form { margin-top: 0.5rem; min-width: 11rem; }
 
 /* A definition list laid out as label / value rows. */
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }

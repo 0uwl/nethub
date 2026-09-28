@@ -1,4 +1,5 @@
 {% extends 'layouts/main.html' %}
+{% from 'partials/confirm.html' import short_confirm %}
 {% block title %}Users{% endblock %}
 {% block content %}
 <h1>Users</h1>
@@ -33,13 +34,8 @@
           <summary>Disable</summary>
           <form method="post" action="{{ url_for('auth.disable_user', user_id=user.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            {% set explainer = 'Their sessions end at once, and they cannot log in until enabled again.' %}
-            <label class="confirm" data-tooltip="{{ explainer }}" data-placement="left">
-              <input type="checkbox" name="confirm" value="yes" required
-                     aria-describedby="disable_help_{{ user.id }}">
-              Disable user.
-            </label>
-            <small id="disable_help_{{ user.id }}" class="explainer">{{ explainer }}</small>
+            {{ short_confirm('disable_help_%d' % user.id, 'Disable user',
+                'Their sessions end at once, and they cannot log in until enabled again.') }}
             <button type="submit" class="secondary">Disable {{ user.username }}</button>
           </form>
         </details>
