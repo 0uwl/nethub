@@ -125,6 +125,13 @@ Once you're logged in as an admin:
    ends your other sessions. Every one of these is recorded, and each
    user's **History** shows who did what.
 
+Anything that deletes, reloads or disables something asks you to tick a box
+stating what will happen; the server refuses the request without it. A run
+or scan page reloads itself while NetHub has work in flight. If it says **No
+worker has picked this up**, or marks a phase **stalled**, the
+`nethub-sibling` unit is down or stuck: the web unit only queues work, and the
+sibling does all of it.
+
 ## Running it in a container
 
 ```bash

@@ -1,16 +1,14 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Artifacts{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Artifacts</h1></div>
+<h1>Artifacts</h1>
 <p>Images that NetHub can serve. Stored under <code>{{ store }}</code></p>
-<p>
-  <a href="{{ url_for('artifacts.new_artifact') }}" class="btn btn-primary">Publish an image</a>
-</p>
-<p class="text-muted">To check that every stored image still matches its recorded
+<p><a href="{{ url_for('artifacts.new_artifact') }}" role="button">Publish an image</a></p>
+<p class="muted">To check that every stored image still matches its recorded
 SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
 {% if artifacts %}
-<div class="table-responsive">
-<table class="table table-striped">
+<div class="overflow-auto">
+<table class="striped">
   <thead><tr><th>Bundle key</th><th>Version</th><th>File</th><th>Size</th><th>SHA-512</th><th>Uploaded by</th><th></th></tr></thead>
   <tbody>
   {% for a in artifacts %}
@@ -21,17 +19,23 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
       <td>{{ "{:,}".format(a.file_size) }}</td>
       <td><code title="{{ a.sha512 }}">{{ a.sha512[:16] }}&hellip;</code></td>
       <td>{{ users.get(a.uploaded_by, '') }} {{ a.uploaded_at }}</td>
-      <td>
-        <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}"
-              onsubmit="return confirm('Delete this artifact and its image file?');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-          <button type="submit" class="btn btn-link">Delete</button>
-        </form>
+      <td class="actions">
+        <details>
+          <summary>Delete</summary>
+          <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label class="confirm">
+              <input type="checkbox" name="confirm" value="yes" required>
+              Delete <code>{{ a.bundle_key }}</code> and its image file from the store
+            </label>
+            <button type="submit" class="secondary">Delete</button>
+          </form>
+        </details>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
-{% else %}<p class="lead">Nothing published yet.</p>{% endif %}
+{% else %}<p>Nothing published yet.</p>{% endif %}
 {% endblock %}

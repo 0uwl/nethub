@@ -1,14 +1,17 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Scan a host key{% endblock %}
 {% block content %}
-<div class="page-header"><h1>Scan a host key</h1></div>
-<p>This opens an SSH connection to read the device's host key, no device credential is sent. 
-Compare the fingerprint against the device itself before confirming to ensure this is the device you intend to run against</p>
-<form method="post" class="form-inline">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-  <label class="sr-only" for="address">Device address</label>
-  <input type="text" id="address" name="address" class="form-control" placeholder="192.0.2.10"
-         value="{{ address or '' }}" required/>
-  <button type="submit" class="btn btn-default">Scan</button>
+<h1>Scan a host key</h1>
+<p>This opens an SSH connection to read the device's host key; no device credential is sent.
+Compare the fingerprint against the device itself before confirming, to be sure this is the
+device you intend to run against.</p>
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label for="address">Device address</label>
+  <div role="group">
+    <input type="text" id="address" name="address" placeholder="192.0.2.10"
+           value="{{ address or '' }}" required>
+    <button type="submit">Scan</button>
+  </div>
 </form>
 {% endblock %}

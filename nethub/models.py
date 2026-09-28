@@ -543,7 +543,7 @@ class UpgradePhaseJob(db.Model):
     #: dispatch (§5).
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     started_at = db.Column(db.DateTime)
-    #: Flask *reads* this and renders "stalled". The sweep lives in the sibling
+    #: Flask *reads* this and renders "stalled" (`worker_status`). The sweep lives in the sibling
     #: so it cannot fire against a healthy run, which means a sibling that dies
     #: and stays dead is swept by nobody (§7.3).
     heartbeat_at = db.Column(db.DateTime)

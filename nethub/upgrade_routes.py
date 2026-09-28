@@ -26,10 +26,11 @@ from flask import (
 from flask_login import current_user, login_required
 
 from . import artifacts as artifact_store
-from . import upgrades
+from . import upgrades, worker_status
 from .devices.phases import _aware
 from .extensions import db
 from .models import (
+    STATE_BEFORE,
     DeviceHostKey,
     DeviceHostKeyAudit,
     HostKeyScan,
@@ -38,6 +39,7 @@ from .models import (
     UpgradeRun,
     User,
 )
+from .web import confirmed
 
 upgrade_bp = Blueprint('upgrades', __name__)
 hostkeys_bp = Blueprint('hostkeys', __name__)
@@ -90,13 +92,17 @@ def scan_hostkey():
 @hostkeys_bp.route('/hostkeys/scan/<int:scan_id>')
 @login_required
 def scan_result(scan_id):
-    """Poll a queued scan's outcome. No client-side polling in this app
-    (WS-6.2b) -- reload to check, the same as everything else here."""
+    """A queued scan's outcome. There is no JavaScript in this app, so the
+    page reloads itself with a meta refresh while the scan is queued or
+    running (WS-11), and says so if nothing is picking up work."""
     scan = db.session.get(HostKeyScan, scan_id)
     if scan is None:
         flash('No such scan.')
         return redirect(url_for('hostkeys.scan_hostkey'))
-    return render_template('pages/hostkeys_scan_result.html', scan=scan)
+    return render_template(
+        'pages/hostkeys_scan_result.html', scan=scan,
+        no_worker=scan.status == 'queued' and worker_status.no_worker(),
+    )
 
 
 @hostkeys_bp.route('/hostkeys/confirm', methods=['POST'])
@@ -161,6 +167,8 @@ def confirm_hostkey():
 @hostkeys_bp.route('/hostkeys/<int:key_id>/delete', methods=['POST'])
 @login_required
 def delete_hostkey(key_id):
+    if not confirmed('removing the pin'):
+        return redirect(url_for('hostkeys.list_hostkeys'))
     row = db.session.get(DeviceHostKey, key_id)
     if row is not None:
         # Captured before the delete, obviously, not after (WS-6.4) -- this
@@ -243,11 +251,24 @@ def show_run(run_id):
             .order_by(UpgradePhaseJob.created_at, UpgradePhaseJob.id).all())
     results = (UpgradeHostPhaseResult.query.filter_by(run_id=run.id)
                .order_by(UpgradeHostPhaseResult.started_at).all())
+    # PLAN.md WS-11: reload while the sibling has work on this run, say so
+    # when it has stopped beating or nobody is taking work, and tell an
+    # approver what their approval would queue behind. All reads.
+    live = [j for j in jobs if j.status in ('queued', 'running')]
+    queued_ahead, running_now = worker_status.queue_depth()
+    gate_hosts = []
+    if run.state == 'awaiting_approval' and run.awaiting_phase in STATE_BEFORE:
+        before = STATE_BEFORE[run.awaiting_phase]
+        gate_hosts = [h for h in run.hosts if h.state == before]
     return render_template(
         'pages/upgrade_detail.html', run=run, jobs=jobs, results=results,
-        approvable=upgrades.APPROVABLE,
         retryable=upgrades.retryable_phases(run),
         users={u.id: u.username for u in User.query.all()},
+        refresh=bool(live),
+        stalled_ids={j.id for j in live if worker_status.is_stalled(j)},
+        no_worker=any(j.status == 'queued' for j in live) and worker_status.no_worker(),
+        queued_ahead=queued_ahead, running_now=running_now,
+        gate_hosts=gate_hosts,
     )
 
 
@@ -260,6 +281,8 @@ def approve(run_id):
     if run is None:
         flash('No such run.')
         return redirect(url_for('upgrades.list_runs'))
+    if not confirmed(f'approving {phase}'):
+        return redirect(url_for('upgrades.show_run', run_id=run_id))
     try:
         job = upgrades.approve(
             run=run, phase=phase, user=current_user, password=password,
@@ -282,6 +305,8 @@ def retry(run_id):
     if run is None:
         flash('No such run.')
         return redirect(url_for('upgrades.list_runs'))
+    if not confirmed(f'retrying {phase}'):
+        return redirect(url_for('upgrades.show_run', run_id=run_id))
     try:
         job = upgrades.retry(
             run=run, phase=phase, user=current_user, password=password,
@@ -311,7 +336,7 @@ def decline_cleanup(run_id):
 @login_required
 def cancel(run_id):
     run = db.session.get(UpgradeRun, run_id)
-    if run is not None:
+    if run is not None and confirmed('the cancel'):
         try:
             upgrades.request_cancel(run=run, user=current_user)
             flash('Cancel requested. A running phase stops between hosts.', 'info')

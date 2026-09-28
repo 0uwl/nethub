@@ -1,0 +1,57 @@
+/*
+ * What Pico does not style (PLAN.md WS-11). Pico's own variables are used
+ * for colour, so both themes follow the browser's light/dark preference.
+ * No inline styles anywhere: the Content-Security-Policy refuses them.
+ */
+
+/* Flash messages. The class names are asserted by tests/test_templates.py:
+   a success must not read as alert-error, and an uncategorised flash must. */
+.alert {
+  padding: var(--pico-spacing);
+  margin-bottom: var(--pico-spacing);
+  border-left: 0.25rem solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+}
+.alert-success { border-left-color: var(--pico-ins-color); }
+.alert-error { border-left-color: var(--pico-del-color); }
+.alert-info { border-left-color: var(--pico-primary-border); }
+
+/* Warnings about the worker (stalled, nothing picking up work): the same
+   shape as an error flash, since each needs someone to go and look. */
+.warning {
+  padding: var(--pico-spacing);
+  margin-bottom: var(--pico-spacing);
+  border-left: 0.25rem solid var(--pico-del-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
+}
+
+/* The nav bar wraps on a phone rather than widening the page. */
+header nav,
+header nav ul { flex-wrap: wrap; }
+
+/* The logout button sits in the nav bar. */
+nav form { margin: 0; }
+nav button { margin: 0; padding: 0.25rem 0.75rem; }
+
+/* Row actions in a table: small, side by side, no form margins. */
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; }
+.actions form,
+.actions details { margin: 0; }
+.actions button { margin: 0; padding: 0.25rem 0.75rem; font-size: 0.875rem; }
+.actions details summary { font-size: 0.875rem; }
+.actions details form { margin-top: 0.5rem; min-width: 16rem; }
+
+/* A definition list laid out as label / value rows. */
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; }
+dl.facts dt { font-weight: bold; }
+dl.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+/* A confirmation checkbox's label is a sentence, not a word. */
+label.confirm { font-weight: bold; }
+
+.muted { color: var(--pico-muted-color); }
+
+/* Pico keeps a busy element on one line; a sentence must still wrap on a phone. */
+p[aria-busy="true"] { white-space: normal; }

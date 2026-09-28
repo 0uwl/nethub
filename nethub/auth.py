@@ -17,6 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
 from .models import User, UserAdminAudit, record_user_action
+from .web import confirmed
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -211,6 +212,8 @@ def disable_user(user_id):
         return redirect(url_for('auth.list_users'))
     if user.id == current_user.id:
         flash('You cannot disable your own account.')
+        return redirect(url_for('auth.list_users'))
+    if not confirmed(f'disabling {user.username}'):
         return redirect(url_for('auth.list_users'))
     other = aliased(User)
     others = (db.session.query(db.func.count(other.id))

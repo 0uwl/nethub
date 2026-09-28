@@ -260,7 +260,8 @@ class TestDelete:
             a = ingest(store)
             self.run_using(a, "running")
             artifact_id = a.id
-        resp = client.post(f"/artifacts/{artifact_id}/delete", follow_redirects=True)
+        resp = client.post(f"/artifacts/{artifact_id}/delete", data={"confirm": "yes"},
+                           follow_redirects=True)
         assert resp.status_code == 200
         assert b"still needed by run" in resp.data
         with app.app_context():

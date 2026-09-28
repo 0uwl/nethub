@@ -40,6 +40,10 @@ def create_app():
     register_cli(app)
     register_artifact_cli(app)
 
+    # Content-Security-Policy and friends on every response (PLAN.md WS-11).
+    from .web import set_security_headers
+    app.after_request(set_security_headers)
+
     # Device credentials are sealed to the sibling's public key and stored in
     # the job row (nethub/sealed_credentials.py). Refuse to start without a
     # valid key rather than accept approvals that could never run, and do it

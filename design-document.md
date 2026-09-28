@@ -125,6 +125,20 @@ system does not correlate entries with each other or attach them to a
 persistent device record; that would make it an inventory manager, which
 it explicitly isn't (see Non-Goals).
 
+**As built, the frontend is not Drawbridge's** (PLAN.md WS-11, decided
+2026-09-27). The pages are server-rendered Jinja styled by one vendored
+stylesheet, [Pico CSS](https://picocss.com) v2, plus a small `nethub.css`,
+and carry **no JavaScript at all**. What that buys is a
+Content-Security-Policy of `script-src 'none'` on the pages where admins
+type AAA passwords: the 2014 jQuery and Bootstrap the tree started from
+both had known XSS CVEs. Two consequences are design rather than taste.
+Confirmations are a required checkbox whose label states the consequence,
+checked again by the route, since a script `confirm()` is exactly what
+the policy blocks. And a page waiting on the sibling reloads itself with
+`<meta http-equiv="refresh">` rather than polling. A Tailwind/DaisyUI
+build was considered and set aside: it needs a Node toolchain in the
+image build for no gain on forms and tables.
+
 ### 3.2 Backend
 One Flask service, organized as two logical modules:
 
@@ -2372,7 +2386,12 @@ Several rules fall out of this:
   sibling's own liveness shown beside it. Flask does not change the row
   — writing job state from the web tier would break §9's control-channel
   rule — it reports what the row already says. Sweeping stays the
-  sibling's job; noticing does not have to be.
+  sibling's job; noticing does not have to be. *As built* (PLAN.md
+  WS-11, `nethub/worker_status.py`): a running job is stalled after three
+  missed heartbeats. The sibling has no heartbeat of its own outside a
+  phase, so its liveness is inferred from the queue instead: a row queued
+  for over a minute while no job or scan is running with a fresh heartbeat
+  shows "No worker has picked this up. Is nethub-sibling running?".
 - **An `abandoned` device-touching phase is not silently re-dispatched.**
   Re-running it needs a fresh approval, because §8.1's approval is what
   supplies the credential (§9.1) and what names the human in
@@ -3441,5 +3460,6 @@ the next attempt gets a credential.
   operators actually want, not a technical one.
 - New repository, built clean for the backend, reusing applicable
   existing pieces (e.g. Kea configuration) rather than forking the repo
-  wholesale. The frontend is the exception: it's carried over from
-  Drawbridge as-is and extended in place (see §3.1), not rebuilt.
+  wholesale. The frontend was to be the exception, carried over from
+  Drawbridge as-is and extended in place; it was replaced instead with a
+  script-free Pico CSS frontend (see §3.1).

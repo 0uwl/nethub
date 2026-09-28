@@ -177,7 +177,12 @@ Flash categories are asserted both ways: a success must not render
 `alert-error`, and an *uncategorised* flash must still read as an error —
 the default category is deliberately an error, because the remaining
 uncategorised calls are refusals and downgrading them to a neutral notice
-would mis-style real failures.
+would mis-style real failures. WS-11's rendering states (confirmation
+boxes, the refresh, stalled and no-worker notices, queue depth, the
+missing-device-username notice) are tested there too; the server half of
+each confirmation box, the security headers and `worker_status` itself are
+in `tests/test_frontend.py`, which spies on the service functions to show an
+unticked POST never reaches them.
 
 **`tests/test_end_to_end.py` drives whole runs**: the UI through Flask's test
 client, the real `Sibling` on the app `main()` builds, credentials really
@@ -203,7 +208,7 @@ behind, it tells the next test's startup that an empty database is at head.
 Use the `drop_database` fixture, not an import of `tests.conftest`: conftest
 loads as `conftest`, and importing it again re-runs its env setup.
 
-Tests cover `nethub/{config,credentials,models,bootstrap,auth,artifacts,artifact_routes,upgrade_routes}.py`
+Tests cover `nethub/{config,credentials,models,bootstrap,auth,artifacts,artifact_routes,upgrade_routes,web,worker_status}.py`
 end-to-end through Flask's test client (login flow and lockout, CSRF disabled in
 the `app` fixture — see the template-test note above for why that matters —
 artifact ingest and its two uniqueness constraints, host-key confirm, submit and
@@ -311,10 +316,12 @@ hand over.
 
 **Running `nethub.container` alone gets you a UI that accepts work and
 performs none of it.** Flask writes a `queued` row and stops there by design
-(§9), so with no sibling unit a host-key scan and an upgrade both hang at
-"Still working" indefinitely — and nothing surfaces it, because `sweep()`
-only reclaims `running` rows and the scan result page renders `queued` and
-`running` identically. If something never starts, check that unit first.
+(§9), so with no sibling unit a host-key scan and an upgrade both sit
+`queued` indefinitely, and `sweep()` only reclaims `running` rows. Since
+WS-11 the page says so after a minute ("No worker has picked this up. Is
+nethub-sibling running?"; see "Frontend"), but that is a page inferring it
+from the queue, not anything restarting the unit. If something never starts,
+check that unit first.
 Neither unit depends on the other being up: a web restart between an
 approval and its phase costs nothing, because the credential is in the row.
 After an upgrade the sibling waits, logging why, until the web unit's
@@ -715,14 +722,15 @@ Five things in §7.3 are easy to get wrong:
 - **The sweep keys on `runner_instance_id`** (a UUID minted per sibling
   start), never a PID — a PID is reused across container restarts and
   meaningless across PID namespaces.
-- **Nothing renders "stalled" yet.** The sweep lives in the sibling so it
-  can't fire against a healthy run, which means a sibling that dies and
-  stays dead is swept by nobody. The design answer is for Flask to read
-  `heartbeat_at` and show "stalled" without changing the row. The sibling
-  half is built (WS-9): a running phase writes `heartbeat_at` every
-  `phases.HEARTBEAT_INTERVAL` (30 s) while its hosts are in flight, not
-  only between hosts. The Flask half is not: the run page only prints the
-  raw timestamp (PLAN.md WS-11).
+- **Flask renders "stalled"; it never sweeps.** The sweep lives in the
+  sibling so it can't fire against a healthy run, which means a sibling
+  that dies and stays dead is swept by nobody. So Flask reads
+  `heartbeat_at` and shows "stalled" without changing the row
+  (`nethub/worker_status.py`, WS-11): a running phase writes it every
+  `phases.HEARTBEAT_INTERVAL` (30 s) while its hosts are in flight (WS-9),
+  and three missed beats is a stall. Don't let that module write anything:
+  Flask failing a stalled row would be Flask writing job state after
+  dispatch, which §7.3's table forbids.
 - **An `abandoned` device-touching phase needs a fresh approval**, not an
   auto-retry — the approval is what supplies the credential and names the
   human. The retry is a new row with an incremented `attempt`.
@@ -1762,9 +1770,9 @@ to call `connection.scan_host_key()` inline in the request handler — the one
 place in the tree still doing blocking device I/O in Flask, and with no
 `DEVICE_TARGET_CIDRS` check either. It now validates the address through the
 same `upgrades.check_target()` the submit path uses, inserts a `queued`
-`host_key_scans` row, and redirects to `GET /hostkeys/scan/<id>` — a plain
-"reload to check" result page, since this app has no client-side polling
-anywhere else. The sibling's dispatch loop checks for a queued scan *before*
+`host_key_scans` row, and redirects to `GET /hostkeys/scan/<id>` — a result
+page that reloads itself with a meta refresh while the scan is queued or
+running, since the app has no JavaScript (WS-11). The sibling's dispatch loop checks for a queued scan *before*
 a queued phase job on every iteration (`Sibling.tick()`), and a phase that is
 already running takes one on each heartbeat tick (WS-9): an admin watching a
 confirm screen shouldn't queue behind a stage that may run for an hour. `confirm_hostkey` takes a `scan_id`
@@ -1861,6 +1869,61 @@ Verified against the lab switch: `--scan` prints the same fingerprint
 `ssh-keygen -lf` does, a `precheck` runs to completion with the database
 deliberately unreachable, and a deliberately wrong `--fingerprint` fails
 closed without sending the credential.
+
+## Frontend (`nethub/templates/`, `nethub/static/`, PLAN.md WS-11)
+
+Server-rendered Jinja, one vendored stylesheet, **no JavaScript anywhere**.
+The 2014 jQuery/Bootstrap/Modernizr/Font Awesome tree is gone. What is
+load-bearing:
+
+- **The CSP is `script-src 'none'`, and it is set on every response**
+  (`nethub/web.py`, an `after_request` hook in `create_app()`), with
+  `frame-ancestors 'none'`, `form-action 'self'`, `base-uri 'none'`,
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`.
+  Its one widening of `default-src 'self'` is `img-src 'self' data:`: Pico
+  draws checkbox ticks, select chevrons and `<details>` markers as `data:`
+  SVGs in the stylesheet, and they vanish without it. `style-src` falls back
+  to `'self'`, so a `style=` attribute or a `<style>` block is dead markup:
+  put it in `nethub.css`. A test fails on any `<script`, `<style`, `style=`
+  or `on*=` attribute in any page.
+- **Pico CSS v2.1.1 is vendored as `static/css/pico.min.css`**, from the
+  npm tarball (its sha512 checked against the registry's `integrity`), MIT
+  header intact. The layout records the file's SHA-256 in a comment and a
+  test hashes the file against it. Upgrading Pico is replacing both together.
+  No CDN: the CSP allows `'self'` only. `nethub.css` holds what Pico lacks:
+  the flash colours (`alert-error`/`alert-success`/`alert-info`, still
+  asserted both ways), the `.warning` box, table `.actions`, `dl.facts`.
+- **Every destructive form carries a required checkbox, and the route checks
+  it** (`web.confirmed`): approve, retry, cancel, delete an artifact, remove a
+  pin, disable a user. The field is `confirm=yes`; anything else is refused
+  with a flash, before the route reads a password or touches a row.
+  `required` in the browser is a convenience, not the check, and a
+  `confirm()` prompt is exactly what the CSP would silently delete. The
+  approve label counts the hosts the phase will *run on*
+  (`STATE_BEFORE[awaiting_phase]`), not every host in the run: since WS-8
+  those differ after a partial phase. Row actions in a table put the form in
+  a `<details>`, so the consequence is read before the box can be ticked.
+- **Tables sit in `<div class="overflow-auto">`**, so a wide table scrolls
+  inside itself rather than widening the page; the narrow-screen test counts
+  those wrappers. Checked in Chromium at 360px: the nav wraps, the digest
+  wraps (`overflow-wrap: anywhere` in `dl.facts`), and `p[aria-busy]` is
+  reset to wrap, because Pico keeps a busy element on one line.
+- **What the pages say about the sibling is inferred from rows, read-only**
+  (`nethub/worker_status.py`). A run or scan page with anything `queued` or
+  `running` reloads every 5 s. A running job stalls after
+  `STALLED_AFTER` (3 × `HEARTBEAT_INTERVAL`). "No worker has picked this up"
+  shows when a job or scan has been queued over `NO_WORKER_AFTER` (a minute)
+  and no job is running with a fresh heartbeat and no scan started within
+  `STALLED_AFTER`: there is no sibling heartbeat outside a phase, so this is
+  the maintainer's chosen inference (2026-09-28) rather than a schema change.
+  A stalled running row does not vouch for a live worker. The approve form
+  also says how many jobs are queued ahead, across every run, since the
+  sibling has one FIFO queue.
+- **No device username, no password field.** The new-run page, and the
+  approve and retry forms, show a notice linking to `/profile` in place of
+  the form when `current_user.device_username` is unset. The server-side
+  refusals in `upgrades.submit`/`approve`/`retry` stay; this only moves the
+  message ahead of a typed password. Cancel collects no credential and stays.
 
 ## Keeping this file current
 

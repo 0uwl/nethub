@@ -14,6 +14,9 @@ from nethub import auth
 from nethub.extensions import db
 from nethub.models import User, UserAdminAudit
 
+#: The disable form's confirmation box, ticked (PLAN.md WS-11).
+CONFIRM = {'confirm': 'yes'}
+
 
 def login(client, username, password):
     return client.post('/login', data={'username': username, 'password': password})
@@ -50,14 +53,14 @@ class TestDisable:
             self, app, logged_in_client, bob):
         """WS-10's "done when"."""
         bob_id = user_id(app, 'bob')
-        assert logged_in_client.post(f'/users/{bob_id}/disable').status_code == 302
+        assert logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM).status_code == 302
         response = bob.get('/users')
         assert response.status_code == 302
         assert '/login' in response.headers['Location']
 
     def test_a_disabled_user_cannot_log_in_and_gets_the_usual_message(
             self, app, logged_in_client, bob):
-        logged_in_client.post(f'/users/{user_id(app, "bob")}/disable')
+        logged_in_client.post(f'/users/{user_id(app, "bob")}/disable', data=CONFIRM)
         response = login(app.test_client(), 'bob', 'bob-long-enough-pw')
         assert response.status_code == 200
         assert b'Invalid username or password' in response.data
@@ -66,7 +69,7 @@ class TestDisable:
                                                      bob, monkeypatch):
         """Refusing a disabled account before checking its password would be
         a timing oracle for "this account exists and is disabled"."""
-        logged_in_client.post(f'/users/{user_id(app, "bob")}/disable')
+        logged_in_client.post(f'/users/{user_id(app, "bob")}/disable', data=CONFIRM)
         calls = []
         real = User.check_password
         monkeypatch.setattr(User, 'check_password',
@@ -76,7 +79,8 @@ class TestDisable:
 
     def test_you_cannot_disable_yourself(self, app, logged_in_client):
         alice = user_id(app, 'alice')
-        response = logged_in_client.post(f'/users/{alice}/disable', follow_redirects=True)
+        response = logged_in_client.post(f'/users/{alice}/disable', data=CONFIRM,
+                                         follow_redirects=True)
         assert b'cannot disable your own account' in response.data
         with app.app_context():
             assert db.session.get(User, alice).is_active
@@ -97,7 +101,8 @@ class TestDisable:
             return target
 
         monkeypatch.setattr(auth, '_target', concurrent)
-        response = logged_in_client.post(f'/users/{bob_id}/disable', follow_redirects=True)
+        response = logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM,
+                                         follow_redirects=True)
         assert b'last active user' in response.data
         with app.app_context():
             assert db.session.get(User, bob_id).is_active
@@ -105,14 +110,14 @@ class TestDisable:
 
     def test_enable_lets_them_back_in(self, app, logged_in_client, bob):
         bob_id = user_id(app, 'bob')
-        logged_in_client.post(f'/users/{bob_id}/disable')
+        logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM)
         logged_in_client.post(f'/users/{bob_id}/enable')
         assert login(app.test_client(), 'bob', 'bob-long-enough-pw').status_code == 302
         assert [a[0] for a in audit(app)][-2:] == ['disabled', 'enabled']
 
     def test_enabling_does_not_revive_the_old_session(self, app, logged_in_client, bob):
         bob_id = user_id(app, 'bob')
-        logged_in_client.post(f'/users/{bob_id}/disable')
+        logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM)
         logged_in_client.post(f'/users/{bob_id}/enable')
         assert not logged_in(bob)
 
@@ -279,7 +284,7 @@ class TestAudit:
 
     def test_the_history_page_lists_what_happened(self, app, logged_in_client, bob):
         bob_id = user_id(app, 'bob')
-        logged_in_client.post(f'/users/{bob_id}/disable')
+        logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM)
         page = logged_in_client.get(f'/users/{bob_id}/history').get_data(as_text=True)
         assert 'disabled' in page and 'alice' in page
         assert '{{' not in page and '{%' not in page

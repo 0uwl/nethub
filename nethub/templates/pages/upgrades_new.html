@@ -1,37 +1,35 @@
 {% extends 'layouts/main.html' %}
 {% block title %}New upgrade run{% endblock %}
 {% block content %}
-<div class="page-header"><h1>New upgrade run</h1></div>
+<h1>New upgrade run</h1>
 <p>Pre-check runs immediately and is read-only. Everything that touches a device
 afterwards waits for an approval, and each approval collects the credential again.</p>
+{% if not current_user.device_username %}
+{% include 'partials/device_username_missing.html' %}
+{% else %}
 <form method="post">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-  <div class="form-group">
-    <label for="bundle">Bundle</label>
-    <select id="bundle" name="bundle" class="form-control">
-      {% for a in available %}
-      <option value="{{ a.bundle_key }}" {% if form.bundle == a.bundle_key %}selected{% endif %}>
-        {{ a.bundle_key }} - {{ a.version }} ({{ a.filename }})
-      </option>
-      {% endfor %}
-    </select>
-    {% if not available %}
-    <p class="help-block">No published images. <a href="{{ url_for('artifacts.new_artifact') }}">Upload one first.</a></p>
-    {% endif %}
-  </div>
-  <div class="form-group">
-    <label for="hosts">Hosts. One <code>hostname, address</code> per line</label>
-    <textarea id="hosts" name="hosts" class="form-control" rows="6"
-              placeholder="sw01, 192.0.2.10">{{ form.hosts }}</textarea>
-    <p class="help-block">Addresses must be IP literals inside a configured target CIDR,
-    and each must already have a confirmed host key.</p>
-  </div>
-  <div class="form-group">
-    <label for="device_password">Your device password</label>
-    <input type="password" id="device_password" name="device_password" class="form-control" required
-           autocomplete="off"/>
-    <p class="help-block">Used for pre-check execution only</p>
-  </div>
-  <button type="submit" class="btn btn-primary">Submit run</button>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label for="bundle">Bundle</label>
+  <select id="bundle" name="bundle"{% if not available %} aria-describedby="bundle_help"{% endif %}>
+    {% for a in available %}
+    <option value="{{ a.bundle_key }}" {% if form.bundle == a.bundle_key %}selected{% endif %}>
+      {{ a.bundle_key }} - {{ a.version }} ({{ a.filename }})
+    </option>
+    {% endfor %}
+  </select>
+  {% if not available %}
+  <small id="bundle_help">No published images. <a href="{{ url_for('artifacts.new_artifact') }}">Upload one first.</a></small>
+  {% endif %}
+  <label for="hosts">Hosts. One <code>hostname, address</code> per line</label>
+  <textarea id="hosts" name="hosts" rows="6" placeholder="sw01, 192.0.2.10"
+            aria-describedby="hosts_help">{{ form.hosts }}</textarea>
+  <small id="hosts_help">Addresses must be IP literals inside a configured target CIDR,
+  and each must already have a confirmed host key.</small>
+  <label for="device_password">Device password for <code>{{ current_user.device_username }}</code></label>
+  <input type="password" id="device_password" name="device_password" required
+         autocomplete="off" aria-describedby="device_password_help">
+  <small id="device_password_help">Used for the pre-check only.</small>
+  <button type="submit">Submit run</button>
 </form>
+{% endif %}
 {% endblock %}

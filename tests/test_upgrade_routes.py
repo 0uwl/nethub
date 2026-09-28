@@ -529,7 +529,8 @@ class TestRetry:
     def test_the_route_queues_a_retry(self, app, client, partial_stage):
         client.post("/login", data={"username": "alice", "password": "hunter2"})
         response = client.post(f"/upgrades/{partial_stage}/retry",
-                               data={"phase": "stage", "device_password": PASSWORD},
+                               data={"phase": "stage", "device_password": PASSWORD,
+                                     "confirm": "yes"},
                                follow_redirects=True)
         assert "Retrying stage" in response.get_data(as_text=True)
         with app.app_context():
@@ -539,7 +540,8 @@ class TestRetry:
     def test_the_route_reports_a_refusal(self, app, client, partial_stage):
         client.post("/login", data={"username": "alice", "password": "hunter2"})
         response = client.post(f"/upgrades/{partial_stage}/retry",
-                               data={"phase": "cleanup", "device_password": PASSWORD},
+                               data={"phase": "cleanup", "device_password": PASSWORD,
+                                     "confirm": "yes"},
                                follow_redirects=True)
         assert "cannot be retried" in response.get_data(as_text=True)
 
@@ -643,7 +645,8 @@ class TestCancelDropsTheCredential:
             run = UpgradeRun.query.one()
             run_id = run.id
             assert UpgradePhaseJob.query.one().sealed_credential is not None
-        client.post(f'/upgrades/{run_id}/cancel', follow_redirects=True)
+        client.post(f'/upgrades/{run_id}/cancel', data={'confirm': 'yes'},
+                    follow_redirects=True)
         with app.app_context():
             job = UpgradePhaseJob.query.one()
             # Cleared, but still `queued`: the sibling writes `cancelled`,
@@ -804,7 +807,8 @@ class TestHostkeyAudit:
         self.login(client)
         with app.app_context():
             key_id = DeviceHostKey.query.filter_by(ansible_host='192.0.2.10').one().id
-        client.post(f'/hostkeys/{key_id}/delete', follow_redirects=True)
+        client.post(f'/hostkeys/{key_id}/delete', data={'confirm': 'yes'},
+                    follow_redirects=True)
         with app.app_context():
             entry = DeviceHostKeyAudit.query.filter_by(ansible_host='192.0.2.10').one()
             assert entry.action == 'deleted'
@@ -832,7 +836,8 @@ class TestHostkeyAudit:
         self.login(client)
         with app.app_context():
             key_id = DeviceHostKey.query.one().id
-        client.post(f'/hostkeys/{key_id}/delete', follow_redirects=True)
+        client.post(f'/hostkeys/{key_id}/delete', data={'confirm': 'yes'},
+                    follow_redirects=True)
         with app.app_context():
             assert DeviceHostKey.query.count() == 0
             assert DeviceHostKeyAudit.query.filter_by(
@@ -888,7 +893,8 @@ class TestSealedInTheSameTransaction:
             run_id = run.id
         seen = self.sibling_polls_after_commit(monkeypatch, 'stage')
         client.post(f'/upgrades/{run_id}/approve',
-                    data={'phase': 'stage', 'device_password': PASSWORD})
+                    data={'phase': 'stage', 'device_password': PASSWORD,
+                          'confirm': 'yes'})
         assert len(seen) == 1 and seen[0] is not None
 
     @pytest.mark.parametrize('password', ['', 'tab\there', 'x' * 129],

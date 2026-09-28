@@ -1,15 +1,11 @@
 {% extends 'layouts/main.html' %}
 {% block title %}Users{% endblock %}
 {% block content %}
+<h1>Users</h1>
+<p><a href="{{ url_for('auth.new_user') }}" role="button">New user</a></p>
 
-<div class="page-header">
-  <h1>Users</h1>
-</div>
-
-<p><a href="{{ url_for('auth.new_user') }}" class="btn btn-primary">New user</a></p>
-
-<div class="table-responsive">
-<table class="table table-striped">
+<div class="overflow-auto">
+<table class="striped">
   <thead>
     <tr>
       <th>Username</th>
@@ -28,27 +24,34 @@
       </td>
       <td>{{ user.device_username or '' }}</td>
       <td>{{ user.created_at }}</td>
-      <td>
+      <td class="actions">
         <a href="{{ url_for('auth.user_history', user_id=user.id) }}">History</a>
         {% if user.id != current_user.id %}
-        | <a href="{{ url_for('auth.reset_password', user_id=user.id) }}">Reset password</a>
+        <a href="{{ url_for('auth.reset_password', user_id=user.id) }}">Reset password</a>
         {% if user.is_active %}
-        <form method="post" action="{{ url_for('auth.disable_user', user_id=user.id) }}" style="display:inline"
-              onsubmit="return confirm('Disable {{ user.username }}? Their sessions end at once and they cannot log in until enabled again.');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="btn btn-link">Disable</button>
-        </form>
+        <details>
+          <summary>Disable</summary>
+          <form method="post" action="{{ url_for('auth.disable_user', user_id=user.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label class="confirm">
+              <input type="checkbox" name="confirm" value="yes" required>
+              Disable {{ user.username }}: their sessions end at once, and they cannot
+              log in until enabled again
+            </label>
+            <button type="submit" class="secondary">Disable {{ user.username }}</button>
+          </form>
+        </details>
         {% else %}
-        <form method="post" action="{{ url_for('auth.enable_user', user_id=user.id) }}" style="display:inline">
+        <form method="post" action="{{ url_for('auth.enable_user', user_id=user.id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="btn btn-link">Enable</button>
+          <button type="submit" class="secondary outline">Enable</button>
         </form>
         {% endif %}
         {% endif %}
         {% if user.is_locked() %}
-        <form method="post" action="{{ url_for('auth.unlock_user', user_id=user.id) }}" style="display:inline">
+        <form method="post" action="{{ url_for('auth.unlock_user', user_id=user.id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button type="submit" class="btn btn-link">Unlock</button>
+          <button type="submit" class="secondary outline">Unlock</button>
         </form>
         {% endif %}
       </td>
@@ -57,5 +60,4 @@
   </tbody>
 </table>
 </div>
-
 {% endblock %}
