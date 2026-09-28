@@ -70,7 +70,7 @@ function name.
 | 7 | `feat/sealed-credentials` | Replace the credential socket with sealed credentials in the job row | 4, 6 | merged |
 | 8 | `feat/per-host-continuation` | Partial phases continue; retry failed hosts | 4, 6 | merged |
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | merged |
-| 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | in review |
+| 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | merged |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | todo |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | todo |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
@@ -506,12 +506,48 @@ request, with a test proving it.
 Branch `feat/frontend-cleanup`. After WS-9, because the stalled indicator
 needs the real heartbeat.
 
-1. **Replace the 2014 assets.** `layouts/main.html` loads jQuery 1.11.1,
-   Bootstrap 3.1.1 (both with known XSS CVEs), Modernizr, respond.js and
-   Font Awesome 4.1 on the page where admins type AAA passwords. Fourteen
-   server-rendered forms need none of it. Replace with one small hand-written
-   stylesheet and no JavaScript. Delete the vendored files under
-   `nethub/static/`.
+1. **Replace the 2014 assets with Pico CSS.** `layouts/main.html` loads
+   jQuery 1.11.1, Bootstrap 3.1.1 (both with known XSS CVEs), Modernizr,
+   respond.js and Font Awesome 4.1 on the page where admins type AAA
+   passwords. The server-rendered forms need none of it. Decided by the
+   maintainer on 2026-09-27: use [Pico CSS](https://picocss.com), which
+   styles plain HTML (forms, tables, buttons, `<article>`, light and dark
+   themes) with few classes, has no JavaScript, and needs no build step or
+   Node toolchain, so the image stays light. A Tailwind/DaisyUI build was
+   considered and set aside for that reason.
+   - **Vendor one file**, the minified Pico v2 build, as
+     `nethub/static/css/pico.min.css`, keeping its MIT licence header.
+     Record the version and the file's SHA-256 in a comment in
+     `layouts/main.html`, and add a test that hashes the file against that
+     value, so the vendored copy cannot change without a visible diff.
+     Upgrading Pico is replacing the file and the pinned digest together.
+     No CDN: the CSP below allows `'self'` only, and an admin page should
+     not depend on a third party being up.
+   - **One small `nethub/static/css/nethub.css`** for what Pico lacks: the
+     flash-message colours (keep the `alert-error`/`alert-success` class
+     names, which `tests/test_templates.py` asserts both ways) and anything
+     else the pages turn out to need. No webfonts and no icon font: Pico
+     uses the system font stack.
+   - **Strip Bootstrap's markup from every template** (`form-control`,
+     `btn`, `page-header`, `dl-horizontal`, `sr-only`, `table-responsive`
+     and the rest) in favour of the semantic HTML Pico styles. Tables go in
+     Pico's `<div class="overflow-auto">` wrapper; update the narrow-screen
+     test in `tests/test_templates.py`, which counts `table-responsive`
+     wrappers, to count that instead.
+   - **No inline styles.** The CSP in item 2 blocks `style=` attributes;
+     `users_list.html` has three (from WS-10, for inline action forms). Use
+     Pico's `role="group"` or a class in `nethub.css`.
+   - **Confirmations without JavaScript.** Six forms confirm with an inline
+     `onsubmit="return confirm(...)"`: approving a phase (including the
+     reload), retrying, cancelling a run, deleting an artifact, deleting a
+     host-key pin and disabling a user. The CSP in item 2 would silently
+     remove every one of those prompts. Replace each with a required
+     checkbox inside the form whose label states the consequence ("Reload
+     3 devices now; each drops traffic while it reboots"), and have the
+     route refuse the POST unless the box was ticked: `required` alone is
+     a browser convenience, not a check.
+   - Delete everything else under `nethub/static/` (Bootstrap, Font
+     Awesome and its fonts, the `js/libs` tree, the old `main*.css`).
 2. **Security headers** in an `after_request` hook: a CSP of
    `default-src 'self'; script-src 'none'; frame-ancestors 'none';
    form-action 'self'; base-uri 'none'`, plus `X-Content-Type-Options: nosniff`
@@ -527,16 +563,18 @@ needs the real heartbeat.
    ahead.
 7. **Missing device username, before the form is filled.** `upgrades.submit`
    and `upgrades.approve` refuse a user with no `device_username`, but only
-   after the form is posted (the first-boot `admin` user always starts
-   without one). When `current_user.device_username` is unset, the new-run
+   after the form is posted (the first user, created at first boot or by
+   `create-admin`, always starts without one). When `current_user.device_username` is unset, the new-run
    page and the approve form on the run page show a notice linking to
    `/profile` in place of the password field and submit button. The server-side
    refusal stays: this only moves the message earlier. With no JavaScript
    (item 1), this is a template condition, not a disabled button.
 
 **Done when:** `tests/test_templates.py` covers the new states (including a
-user with and without a device username on both forms) and the page loads
-with no external or inline script.
+user with and without a device username on both forms); every page loads
+with no external or inline script and no inline style; the vendored Pico
+file matches its pinned digest; and every destructive form is refused by
+the server without its confirmation box ticked.
 
 ### WS-12: CI hardening
 
