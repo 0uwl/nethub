@@ -35,4 +35,4 @@ gunicorn==26.2.0
 # it directly and a change in it changes what can open a stored credential.
 PyNaCl==1.6.2
 netmiko==4.7.0
-ntc-templates==9.2.0
+ntc-templates==9.3.0

@@ -392,9 +392,9 @@ netmiko==4.7.0 \
     --hash=sha256:406684e45b3822e17efa0f8e376644995693ff40a750c297ccce0c58e873f29d \
     --hash=sha256:94cf7bfe5daed1d058444ce1637e10177df22f903683a53d1fbee47553488c65
     # via -r requirements.in
-ntc-templates==9.2.0 \
-    --hash=sha256:79fef745d12b6dbdc1f7c00665327790adc91fd981199b0a9adb04f4b365cd97 \
-    --hash=sha256:b94ea1221e6814e65bd5233ad6b4060e5e6ef1f6c7efec54dbae68592c0c86bd
+ntc-templates==9.3.0 \
+    --hash=sha256:2045d20839b5892152637b7c22893923c9a57b6c3e92771fc976f473d0fb05e3 \
+    --hash=sha256:ad607a137e68e302de041ed0e9973fa3f192d32ed44a0092219886f557be814f
     # via
     #   -r requirements.in
     #   netmiko
