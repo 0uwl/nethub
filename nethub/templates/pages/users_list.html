@@ -33,11 +33,13 @@
           <summary>Disable</summary>
           <form method="post" action="{{ url_for('auth.disable_user', user_id=user.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <label class="confirm">
-              <input type="checkbox" name="confirm" value="yes" required>
-              Disable {{ user.username }}: their sessions end at once, and they cannot
-              log in until enabled again
+            {% set explainer = 'Their sessions end at once, and they cannot log in until enabled again.' %}
+            <label class="confirm" data-tooltip="{{ explainer }}" data-placement="left">
+              <input type="checkbox" name="confirm" value="yes" required
+                     aria-describedby="disable_help_{{ user.id }}">
+              Disable user.
             </label>
+            <small id="disable_help_{{ user.id }}" class="explainer">{{ explainer }}</small>
             <button type="submit" class="secondary">Disable {{ user.username }}</button>
           </form>
         </details>

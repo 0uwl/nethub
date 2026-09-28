@@ -51,6 +51,23 @@ dl.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* A confirmation checkbox's label is a sentence, not a word. */
 label.confirm { font-weight: bold; }
 
+/* Pico's tooltips are one line with an ellipsis; an explainer must wrap. */
+[data-tooltip]::before {
+  white-space: normal;
+  width: max-content;
+  max-width: 16rem;
+}
+
+/* The same explainer as text, for a screen reader (aria-describedby reads it
+   while hidden) and for a touchscreen, which cannot hover and where a table's
+   scroll box would clip the tooltip anyway. */
+.explainer { display: none; }
+@media (hover: none) {
+  .explainer { display: block; margin-bottom: 0.5rem; }
+  label.confirm[data-tooltip]::before,
+  label.confirm[data-tooltip]::after { display: none; }
+}
+
 .muted { color: var(--pico-muted-color); }
 
 /* Pico keeps a busy element on one line; a sentence must still wrap on a phone. */

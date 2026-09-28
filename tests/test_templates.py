@@ -212,8 +212,8 @@ def test_the_host_count_is_the_hosts_the_phase_runs_on(operator, make_run):
 
 def _confirm_box(form):
     """The form's confirmation checkbox, required, as the routes expect it."""
-    box = re.search(r'<input type="checkbox" name="confirm" value="yes" required>', form)
-    return box is not None and '<label class="confirm">' in form
+    box = re.search(r'<input type="checkbox" name="confirm" value="yes" required[\s>]', form)
+    return box is not None and '<label class="confirm"' in form
 
 
 # --- Retrying the hosts that failed a phase (PLAN.md WS-8) --------------------
@@ -658,3 +658,17 @@ def test_with_a_device_username_the_gate_has_both_forms(operator, make_run):
     assert 'no device username set' not in body
     assert _form_containing(body, f'/upgrades/{run}/approve')
     assert _form_containing(body, f'/upgrades/{run}/retry')
+
+
+def test_the_disable_box_is_short_and_explains_itself_on_hover(logged_in_client, make_user):
+    """The label is two words; the consequence is in a CSS tooltip (Pico's
+    `data-tooltip`, no script) and, for a screen reader, `aria-describedby`."""
+    make_user('bob', 'bob-long-enough-pw')
+    body = logged_in_client.get('/users').get_data(as_text=True)
+    form = _form_containing(body, '/disable')
+    label = re.search(r'<label class="confirm"(.*?)</label>', form, re.DOTALL)
+    assert re.sub(r'<[^>]+>|\s+', ' ', label.group(0)).strip() == 'Disable user.'
+    explainer = 'Their sessions end at once, and they cannot log in until enabled again.'
+    assert f'data-tooltip="{explainer}"' in label.group(0)
+    described = re.search(r'aria-describedby="([^"]+)"', label.group(0)).group(1)
+    assert f'<small id="{described}" class="explainer">{explainer}</small>' in form

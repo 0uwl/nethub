@@ -1903,6 +1903,12 @@ load-bearing:
   (`STATE_BEFORE[awaiting_phase]`), not every host in the run: since WS-8
   those differ after a partial phase. Row actions in a table put the form in
   a `<details>`, so the consequence is read before the box can be ticked.
+  Where the maintainer wants the label short (disabling a user: "Disable
+  user."), the consequence moves to Pico's CSS-only `data-tooltip` on the
+  label, and to a `<small class="explainer">` the checkbox names in
+  `aria-describedby`: a screen reader reads it while it is hidden, and on a
+  device that cannot hover (`@media (hover: none)`) it is shown in place of
+  the tooltip, which a table's scroll box would clip anyway.
 - **Tables sit in `<div class="overflow-auto">`**, so a wide table scrolls
   inside itself rather than widening the page; the narrow-screen test counts
   those wrappers. Checked in Chromium at 360px: the nav wraps, the digest
