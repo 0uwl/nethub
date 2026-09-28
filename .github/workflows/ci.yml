@@ -1,84 +1,350 @@
 name: CI
 
+# Structure taken from DynaForm's cicd.yml, adapted for NetHub, plus the
+# hardening in PLAN.md WS-12. Every `uses:` is pinned to a commit SHA with its
+# tag as a comment, because a tag can be moved to other code after the fact and
+# this workflow can publish images; Dependabot proposes the bumps
+# (.github/dependabot.yml) and zizmor, in the lint job, fails a new unpinned
+# one.
+
 on:
   push:
     branches: [main]
+    # Publishing is driven by a version tag, not by merging to main: the
+    # published image always corresponds to a version someone chose to cut,
+    # and the GitHub release is created at the end of a green run (see the
+    # publish job), so it means the image built, passed the smoke test,
+    # scanned clean and was pushed.
+    tags: ['v*']
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly, deliberately off the hour: on-the-hour crons queue behind
+    # everybody else's and GitHub drops scheduled runs it cannot start.
+    - cron: '23 5 * * 1'
+  # So the weekly scan can be run on demand instead of waited for.
+  workflow_dispatch:
+
+# Every job reads and nothing more, unless it says otherwise below.
+permissions:
+  contents: read  # checkout, and zizmor's online audits
+
+# A new push to a pull request cancels that pull request's run in flight: only
+# the latest commit's result matters. Never for main or a tag, where every run
+# is a build someone may need, a publish half-done is worse than a slow queue,
+# and cancelling would drop a scheduled scan.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# One policy for every place that scans. As separate literals these would
+# drift, and a release gate that disagrees with the pull request gate is worse
+# than having only one of them.
+#
+# CRITICAL and HIGH, fixable only (ignore-unfixed at each step). DynaForm, which
+# this file is modelled on, adds MEDIUM because every Jinja2 sandbox escape is
+# rated MEDIUM and DynaForm renders user-supplied templates. NetHub renders no
+# user-supplied template (CLAUDE.md, hard rules), so that argument does not
+# carry over, and MEDIUM on the Debian base would mostly be noise that teaches
+# people to reach for the bypass. Decided by the maintainer on 2026-09-28.
+env:
+  SCAN_SEVERITY: 'CRITICAL,HIGH'
+  SCAN_VULN_TYPE: 'os,library'
 
 jobs:
   lint:
     name: Lint
+    # Code events only. The scheduled run re-scans the published image; there
+    # is no new code in it to lint.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # No pip cache, here or in test. Both jobs run on the tag push that
+      # publishes, and a cache written by an earlier run is an input to that
+      # run (zizmor's cache-poisoning audit). --require-hashes would refuse a
+      # poisoned wheel anyway, but the saving is seconds, and a clean audit is
+      # worth more than a suppression comment in the one file that publishes.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      # Pinned. Unpinned, this job can fail on an unchanged codebase: ruff
-      # 0.16 widened its DEFAULT rule set to include isort and part of
-      # pylint/flake8-simplify, which broke lint on three branches that had
-      # passed locally against 0.15. A linter that changes what it enforces
-      # without a commit is a linter that blocks merges at random, so bumping
-      # these is a deliberate change with its own diff -- the same reason
-      # requirements.txt is pinned.
-      - run: pip install ruff==0.16.7 yamllint==1.38.0
+      # The linters are in the hashed dev lockfile, not a loose `pip install`
+      # here: pinned so they cannot change what they enforce without a commit
+      # (ruff 0.16 widened its default rules over 0.15 and broke three
+      # branches at once), and hash-checked like everything else.
+      - run: pip install --require-hashes -r requirements-dev.txt
       - name: Ruff (Python)
         run: ruff check .
       - name: yamllint
         run: yamllint .
-      # Containerfile.dev is dev-only, deliberately incomplete (no COPY of
-      # app code -- see its own header comment) and never used in
-      # production, so it's not linted against the production preset --
-      # same exclusion Drawbridge applies to its own dev image.
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      # zizmor audits this workflow and dependabot.yml: unpinned actions,
+      # permissions wider than a job needs, template injection, credentials
+      # left in the checkout, cache poisoning on the release path. The token
+      # turns on its online audits, which check among other things that each
+      # pinned SHA really belongs to the repository it claims to.
+      - name: zizmor (workflow audit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: zizmor --format=github .github/
+      # The lockfiles must be what their .in files compile to. Without this, an
+      # edit to requirements.in merges with a stale requirements.txt, and the
+      # image installs something no one reviewed as a diff.
+      - name: Lockfiles are current
+        run: |
+          pip-compile -q --generate-hashes --allow-unsafe --strip-extras \
+            --output-file=requirements.txt requirements.in
+          pip-compile -q --generate-hashes --allow-unsafe --strip-extras \
+            --output-file=requirements-dev.txt requirements-dev.in
+          if ! git diff --exit-code -- requirements.txt requirements-dev.txt; then
+            echo "::error::requirements*.txt are stale. Regenerate them on Python 3.12 with the commands in requirements.in."
+            exit 1
+          fi
+      # Containerfile.dev is dev-only, deliberately incomplete (no COPY of app
+      # code) and never used in production, so it is not linted against the
+      # production preset.
+      #
+      # image-tag is the load-bearing pin here as much as the SHA: the action
+      # is a thin wrapper that runs `ghcr.io/immanuwell/droast:<image-tag>`,
+      # which defaults to `latest`. The tag is pinned to its digest as well, so
+      # the linter is as fixed as the action that runs it.
       - name: Containerfile linting
-        uses: immanuwell/dockerfile-roast@1.4.4
+        uses: immanuwell/dockerfile-roast@1c87b2aa189338c24db4acde40864dae8994de8f  # 1.7.0
         with:
           files: 'Containerfile'
+          image-tag: '1.7.0@sha256:4f31be49f26804c0a2f8a0ab0ae578719e30376323e8fd5951c6dcc79a478b40'
           engine: podman
           preset: production
 
   test:
     name: Test
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install -r requirements.txt
+      # requirements-dev.txt carries the runtime set at exactly the image's
+      # versions plus pytest, so this one install is all the tests need.
+      - run: pip install --require-hashes -r requirements-dev.txt
       - name: Pytest
         run: pytest -v
 
-  publish:
-    name: Publish container
-    needs: [lint, test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  image:
+    name: Build, smoke test and scan
+    # Pull requests and main. Not tags: publish builds, smoke-tests and scans
+    # the very image it is about to push. Not the schedule: scan-published
+    # covers that, against what people are actually running rather than a
+    # fresh build. A scheduled run's github.ref is the default branch, so the
+    # event has to be checked as well as the ref.
+    #
+    # The scan can fail a pull request that did not cause it: a CVE disclosed
+    # against the base image overnight fails everything until Dependabot's
+    # digest bump lands. That is the intended trade -- finding out on a pull
+    # request beats finding out while cutting a release -- but if it becomes
+    # noise, drop exit-code here and leave the release gate blocking.
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      # amd64 only, and no QEMU: this image is never pushed. It exists to be
+      # started by the smoke test and read by Trivy.
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          load: true
+          tags: localhost/nethub:ci
+          cache-from: type=gha,scope=nethub
+          cache-to: type=gha,scope=nethub,mode=max
+      # The image the two Quadlet units run, run the way they run it (rootless
+      # podman, read-only root, keep-id). See scripts/smoke_test.sh for what it
+      # checks, and for what it cannot: SELinux, since these runners use
+      # AppArmor. podman reads the image out of the docker daemon buildx
+      # loaded it into.
+      - name: Smoke test
+        run: |
+          podman pull docker-daemon:localhost/nethub:ci
+          scripts/smoke_test.sh localhost/nethub:ci
+      - name: Scan image for CVEs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: localhost/nethub:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: ${{ env.SCAN_VULN_TYPE }}
+          severity: ${{ env.SCAN_SEVERITY }}
+
+  scan-published:
+    name: Scan published image
+    # The one check a build-time gate cannot make: CVEs disclosed *after* the
+    # image shipped. Nothing in the repository changes when that happens, so
+    # only a clock can catch it -- and :latest is what a pull of the image
+    # resolves to, i.e. what is actually running on people's hosts.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read  # pull the published image from ghcr.io to scan it
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # linux/arm64 covers e.g. a 64-bit Raspberry Pi host; QEMU
-      # (setup-qemu-action) emulates it since this runner is amd64.
-      # cache-from/to: type=gha caches build layers in the Actions cache
-      # and reuses whatever's still valid on the next run.
-      - uses: docker/build-push-action@v6
+      # Before the first release there is no image to scan. Checking keeps that
+      # from being reported as a scan failure, which would train us to ignore a
+      # red weekly run.
+      - id: published
+        name: Check for a published image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No published :latest image yet -- nothing to scan."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Scan published image for CVEs
+        if: steps.published.outputs.exists == 'true'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: ${{ env.SCAN_VULN_TYPE }}
+          severity: ${{ env.SCAN_SEVERITY }}
+
+  publish:
+    name: Publish container
+    # lint and test are not gated to the tag, so they run on the tag push too,
+    # and `needs` keeps a red build from shipping.
+    needs: [lint, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # Everything before the last two steps only reads.
+      contents: write  # create the GitHub release, the job's last step
+      packages: write  # push the image to ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Derives the image tags from the git tag: `v1.4.0` publishes :1.4.0 and
+      # :1.4 (the `v` is stripped by {{version}}), and latest=auto adds :latest
+      # except for a semver prerelease (v1.4.0-rc1 publishes :1.4.0-rc1 and
+      # nothing else), so pulling :latest never lands on a release candidate.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      # The release path reads no cache another run wrote. The pull request
+      # and main builds share a gha cache, and a release that read it would
+      # ship layers some earlier, less privileged run produced: cache
+      # poisoning, which zizmor flags on exactly this path. So the first build
+      # starts cold and writes a local cache that lives only in this job, and
+      # the publishing build reads that one: the amd64 layers it pushes are the
+      # ones the smoke test ran and Trivy scanned, not a second build of them.
+      #
+      # The smoke test and scan have to happen between building and pushing,
+      # so the build is split in two. This first one is amd64-only and loaded
+      # into the runner's docker daemon, which cannot hold a multi-platform
+      # image, so loading and multi-arch are mutually exclusive.
+      - name: Build image for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          load: true
+          no-cache: true
+          tags: localhost/nethub:release
+          cache-to: type=local,dest=${{ runner.temp }}/buildcache,mode=max
+      - name: Smoke test
+        run: |
+          podman pull docker-daemon:localhost/nethub:release
+          scripts/smoke_test.sh localhost/nethub:release
+      # exit-code 1 makes this a gate rather than a report: a fixable finding
+      # at or above SCAN_SEVERITY fails the job and the push never runs.
+      # ignore-unfixed keeps the gate honest -- the Debian base carries CVEs
+      # with no patch yet, and blocking every release on those would only
+      # teach us to reach for the bypass.
+      #
+      # Only the amd64 image is scanned: both platforms install the same
+      # Debian and pip packages from the same Containerfile and lockfile, so
+      # arm64 would report the same list. Pinning the action pins the Trivy
+      # binary, but its vulnerability database is fetched at run time, so a
+      # re-run of a release that passed last month can fail today. That is the
+      # point of a security gate. cache: false for the same reason as the
+      # build: nothing on this path reads a cache.
+      - name: Scan image for CVEs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: localhost/nethub:release
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: ${{ env.SCAN_VULN_TYPE }}
+          severity: ${{ env.SCAN_SEVERITY }}
+          cache: 'false'
+      # linux/arm64 covers e.g. a 64-bit Raspberry Pi host; QEMU emulates it,
+      # since this runner is amd64. The amd64 half comes from the job-local
+      # cache the tested build wrote, so only arm64 is new work here.
+      - name: Build and publish image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           file: Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
-          cache-from: type=gha,scope=nethub
-          cache-to: type=gha,scope=nethub,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=${{ runner.temp }}/buildcache
+      # Last, so that the release means "this version built, passed the smoke
+      # test, scanned clean and was published" instead of being the thing that
+      # starts the attempt. A release drafted by hand in the web UI pushes its
+      # tag, which arrives here as an ordinary tag push -- hence the existence
+      # check, so that path publishes the image and leaves the hand-written
+      # notes alone.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists -- leaving it as it is."
+            exit 0
+          fi
+          # A semver prerelease carries a hyphen (v1.4.0-rc1) and a full
+          # release never does: the same rule metadata-action applies above
+          # when it decides whether :latest moves.
+          flags=(--generate-notes --verify-tag)
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}"

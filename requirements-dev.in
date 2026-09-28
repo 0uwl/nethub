@@ -1,0 +1,26 @@
+# Test and tooling dependencies, on top of the runtime set. Not installed in the
+# image: pytest has no business in production. See requirements.in for how to
+# regenerate requirements-dev.txt.
+#
+# -c keeps every runtime package at exactly the version the image runs, so the
+# tests exercise what ships; -r pulls the runtime set in, so the test job needs
+# this one install.
+-c requirements.txt
+-r requirements.in
+pytest==9.1.1
+# Pinned so the lockfile check in CI regenerates with the same resolver and
+# header this file was compiled with.
+pip-tools==7.6.1
+# The linters CI runs, here rather than in an unhashed `pip install` in the
+# workflow, so they are hash-checked too and a local `pip install -r
+# requirements-dev.txt` gets exactly CI's versions. That matters: ruff 0.16
+# widened its default rule set over 0.15, so an unpinned local ruff passed
+# while CI failed on byte-identical files. Bumping any of these is a deliberate
+# diff, and new findings are fixed rather than the pin loosened.
+ruff==0.16.7
+yamllint==1.38.0
+# Audits .github/workflows for unpinned actions, over-broad permissions,
+# template injection and cache poisoning (PLAN.md WS-12).
+zizmor==1.30.1
+# shellcheck itself, as a wheel carrying the binary: lints scripts/*.sh.
+shellcheck-py==0.11.0.1

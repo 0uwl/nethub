@@ -45,9 +45,12 @@ design target, not a description of current code.
 ## Running it
 
 ```bash
-pip install -r requirements.txt   # Flask, Flask-SQLAlchemy, Flask-Login,
-                                   # Flask-WTF, Flask-Migrate, gunicorn, pytest,
-                                   # netmiko, ntc-templates -- pinned to exact versions
+pip install --require-hashes -r requirements-dev.txt   # the runtime set plus
+                                   # pytest and CI's own linters, at CI's versions.
+                                   # Both files are hashed lockfiles compiled from
+                                   # requirements.in / requirements-dev.in on
+                                   # Python 3.12; requirements.txt alone is what
+                                   # the image installs.
 
 export SECRET_KEY=$(openssl rand -hex 32)   # required; nethub/config.py rejects an absent
                                    # key, a known placeholder, or anything under 32 chars
@@ -74,9 +77,33 @@ pytest                            # runs tests/ -- see tests/conftest.py for the
                                    # app/client fixtures (temp DB + artifact store per test)
 ```
 
-`.github/workflows/ci.yml` lints (`ruff`, `yamllint`, plus the
-`Containerfile` itself), runs the test suite, and publishes a container
-image to `ghcr.io` on every push to `main` once both pass.
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+lint (`ruff`, `yamllint`, `shellcheck`, the `Containerfile`, `zizmor` over
+the workflow itself, and a check that the lockfiles match their `.in`
+files), the test suite, and an image build that is smoke-tested
+(`scripts/smoke_test.sh`: web and sibling containers started the way the
+Quadlet units start them) and scanned by Trivy for fixable CRITICAL and HIGH
+CVEs. It also scans the published image weekly. Dependabot proposes updates to
+the pinned actions, Python packages and base image. A merge to `main` publishes
+nothing; see [Releasing](#releasing).
+
+To change a dependency, edit `requirements.in` (or `requirements-dev.in`) and
+regenerate both lockfiles on Python 3.12 with the commands at the top of
+`requirements.in`. CI fails a pull request whose lockfiles are stale.
+
+To run the smoke test locally against an image you built:
+`scripts/smoke_test.sh localhost/nethub:latest` (podman, as the units use;
+`ENGINE=docker` also works).
+
+### Releasing
+
+Push a version tag: `git tag v1.4.0 && git push origin v1.4.0`. CI lints and
+tests, builds the image, runs the smoke test and the Trivy scan, and only then
+pushes `ghcr.io/<owner>/nethub` as `:1.4.0`, `:1.4` and `:latest` (amd64 and
+arm64), then creates the GitHub release with generated notes. A tag with a
+hyphen (`v1.4.0-rc1`) is a prerelease: it publishes `:1.4.0-rc1` only, never
+`:latest`. A release drafted by hand in the web UI works too; its notes are
+left alone.
 
 ## Using it
 
@@ -203,9 +230,11 @@ is not something to cause on purpose.
    Or stop both units and copy `database.db` together with any
    `database.db-wal`/`database.db-shm` beside it.
 2. **Put the new image in place.** The reference units both run
-   `localhost/nethub:latest`, so rebuild or pull that tag; or point `Image=`
-   at a new tag in both `nethub.container` and `nethub-sibling.container`.
-   Either way, both units must run the same image.
+   `localhost/nethub:latest`, so rebuild that tag, or pull a release and tag
+   it (`podman pull ghcr.io/<owner>/nethub:1.4.0` then
+   `podman tag ghcr.io/<owner>/nethub:1.4.0 localhost/nethub:latest`); or
+   point `Image=` at the release in both `nethub.container` and
+   `nethub-sibling.container`. Either way, both units must run the same image.
 3. **Restart:** `systemctl --user daemon-reload && systemctl --user restart nethub nethub-sibling`.
 
 The web unit migrates the database at startup and logs
