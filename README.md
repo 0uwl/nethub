@@ -77,7 +77,7 @@ pytest                            # runs tests/ -- see tests/conftest.py for the
                                    # app/client fixtures (temp DB + artifact store per test)
 ```
 
-`.github/workflows/ci.yml` runs on every pull request and push to `main`:
+`.github/workflows/cicd.yml` runs on every pull request and push to `main`:
 lint (`ruff`, `yamllint`, `shellcheck`, the `Containerfile`, `zizmor` over
 the workflow itself, and a check that the lockfiles match their `.in`
 files), the test suite, and an image build that is smoke-tested

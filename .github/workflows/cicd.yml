@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 # Structure taken from DynaForm's cicd.yml, adapted for NetHub, plus the
 # hardening in PLAN.md WS-12. Every `uses:` is pinned to a commit SHA with its

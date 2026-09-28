@@ -587,7 +587,8 @@ the server without its confirmation box ticked.
 
 Branch `ci/hardening`.
 
-- Pin every action in `.github/workflows/ci.yml` to a commit SHA, with the tag
+- Pin every action in `.github/workflows/ci.yml` (renamed `cicd.yml` in this
+  workstream, since it deploys as well) to a commit SHA, with the tag
   as a comment. This matters most for `immanuwell/dockerfile-roast`, a small
   third-party action in a workflow that can publish images.
 - Set top-level `permissions: contents: read`; grant `packages: write` only

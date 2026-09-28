@@ -143,7 +143,7 @@ ruff check .                       # Python lint (pyproject.toml: 100-char lines
 yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML files
                                     # are left -- this config and the CI workflow -- but
                                     # document-start/truthy stay disabled for new
-                                    # reasons: ci.yml has no `---`, and Actions' `on:`
+                                    # reasons: cicd.yml has no `---`, and Actions' `on:`
                                     # key is a YAML 1.1 boolean.
 
 python -m nethub.sealed_credentials keygen --out <file>   # the sibling's key pair:
@@ -233,7 +233,7 @@ concurrent branches collide in. `pyproject.toml`'s
 `import nethub` — without it only `python -m pytest` (which puts the cwd on
 `sys.path` itself) could.
 
-## CI and releases (`.github/workflows/ci.yml`, PLAN.md WS-12)
+## CI and releases (`.github/workflows/cicd.yml`, PLAN.md WS-12)
 
 One workflow, structured on the maintainer's DynaForm `cicd.yml`. On pull
 requests and pushes to `main`: `lint` (ruff, yamllint, shellcheck on

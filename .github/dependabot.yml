@@ -13,7 +13,7 @@
 # scan of the published image instead.
 version: 2
 updates:
-  # The SHA pins in .github/workflows/ci.yml. Dependabot rewrites the SHA and
+  # The SHA pins in .github/workflows/cicd.yml. Dependabot rewrites the SHA and
   # the version comment beside it together.
   - package-ecosystem: github-actions
     directory: /
