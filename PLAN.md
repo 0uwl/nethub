@@ -72,10 +72,10 @@ function name.
 | 9 | `feat/parallel-phases` | Bounded parallelism, real heartbeat, scans not blocked | 8 | merged |
 | 10 | `feat/user-management` | Disable users, change passwords, revoke sessions | 6 | merged |
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | merged |
-| 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | in review |
+| 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | merged |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
 | 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
-| 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | todo |
+| 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | in review |
 | 16 | `feat/roles` | Admin and operator roles; optional two-person rules for artifacts, host keys and runs | 10 | todo |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
@@ -810,6 +810,44 @@ verified canary, with the warning on the form; a refused password or a
 NetHub fault returns the run to its gate instead of failing it; and the
 "mistyped password" item in "Found while working" is marked done.
 
+*As built*, the points the design above left open:
+
+- `failure_stage_for` counts `EOFError` as `connect` beside netmiko's,
+  paramiko's and `OSError`: paramiko raises it when the transport closes
+  under a read, which is the device's side. A raw
+  `paramiko.AuthenticationException` maps to `credential`, so it stops the
+  wave like the wrapped one.
+- A `not_attempted` row carries the `failure_stage` of what stopped the
+  phase (`credential`, `internal`, `store`, or the failed canary's stage),
+  so the reason a host was skipped is in its own row.
+- A stopped retry is not "a phase with a gate of its own": it came from
+  another gate. Its unreached hosts are failed again, retryable as before,
+  and the run goes back to the gate the retry was made from.
+- Hosts an activate reloaded before it stopped (say, a password refused
+  on the third host after the canary) stay `activated` while the run waits
+  at the activate gate; the `verify` after the next activate checks them
+  with the rest. Cancelling there leaves them unverified, which the run
+  page shows.
+- `upgrade_run_hosts` gets `UNIQUE(run_id, position)` as well as NOT NULL,
+  so two hosts cannot claim to be first.
+- Found in review of PR #39, and fixed there: point 4's "the host whose
+  credential was refused, or that hit `internal`, keeps its cursor" is
+  wrong for activate once the host is past its login. A refused login after
+  the reload (`install.wait_for_device` re-raises it), a refused canary
+  check, or a bug after `install add` all arrive when the switch may already
+  be on the new image, and a kept `staged` cursor let the next approval send
+  it a second `install add`. Such a host is now marked `failed`
+  (`phases.NOT_REPEATABLE`, `HostOutcome.ran`); a refusal at the first login
+  still keeps it, so the mistyped password still costs no host. Stage and
+  cleanup are safe to run twice and are unchanged. The run returns to the
+  gate only while some host is still eligible there.
+- Also from that review: a cancel is seen only as a host starts, so one
+  that landed while a stopped wave finished (or after the last host
+  started) used to park the run back at a gate with the cancel pending, and
+  the next approval was quietly finished `cancelled`. Every place the
+  sibling parks a run now goes through `Sibling._park`, which ends it
+  `cancelled` instead.
+
 ### WS-16: Roles and two-person rules
 
 Branch `feat/roles`. After WS-10: it guards WS-10's user pages, extends its
@@ -973,7 +1011,8 @@ a one-line description and the workstream it was found in.
   the run: the operator has to submit again, pre-check included. Parking the
   run at the same gate with the phase retryable would be kinder, and matters
   more for WS-14, where the mistake is found in the window. Found in WS-8;
-  belongs in WS-15 (design point 4).
+  done in WS-15 (design point 4): the run goes back to the same gate with
+  every host it did not reach where it was.
 - `design-document.md` still described the WS-7 socket in two places: §7.3
   ("The job row is committed only once its credential is held ... puts the
   credential in the store") and §8.1 ("§9.1 does open a second channel").

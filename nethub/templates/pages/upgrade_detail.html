@@ -1,4 +1,5 @@
 {% extends 'layouts/main.html' %}
+{% from 'partials/reload_count.html' import reload_count %}
 {% block title %}Run {{ run.id }}{% endblock %}
 {% block head %}
 {# Reload while the sibling has work on this run; stop once nothing moves. #}
@@ -62,11 +63,15 @@
     <label for="approve_device_password">Device password for <code>{{ current_user.device_username }}</code></label>
     <input type="password" id="approve_device_password" name="device_password"
            required autocomplete="off">
+    {% if run.awaiting_phase == 'activate' %}
+    {{ reload_count('approve_concurrency', gate_hosts|map(attribute='hostname')|list, reload_cap) }}
+    {% endif %}
     <label class="confirm">
       <input type="checkbox" name="confirm" value="yes" required>
       {% if run.awaiting_phase == 'activate' -%}
-      Reload {{ gate_hosts|length }} device(s) now. Each one drops traffic while it reboots,
-      and this releases your device credential against every address listed.
+      Reload {{ gate_hosts|length }} device(s) now{% if gate_hosts|length > 1 %}, the canary
+      first{% endif %}. Each one drops traffic while it reboots, and this releases your device
+      credential against every address listed.
       {%- elif run.awaiting_phase == 'cleanup' -%}
       Remove inactive packages on {{ gate_hosts|length }} device(s). This frees flash but
       removes what a rollback would need.
@@ -105,6 +110,9 @@
     <label for="retry_{{ phase }}_device_password">Device password for <code>{{ current_user.device_username }}</code></label>
     <input type="password" id="retry_{{ phase }}_device_password" name="device_password"
            required autocomplete="off">
+    {% if phase == 'activate' %}
+    {{ reload_count('retry_activate_concurrency', failed, reload_cap) }}
+    {% endif %}
     <label class="confirm">
       <input type="checkbox" name="confirm" value="yes" required>
       Retry {{ phase }} on {{ failed|length }} device(s){% if phase == 'activate' %}, reloading each{% endif %}.

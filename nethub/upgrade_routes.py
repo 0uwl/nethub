@@ -264,6 +264,7 @@ def show_run(run_id):
         'pages/upgrade_detail.html', run=run, jobs=jobs, results=results,
         retryable=upgrades.retryable_phases(run),
         users={u.id: u.username for u in User.query.all()},
+        reload_cap=current_app.config['PHASE_CONCURRENCY'],
         refresh=bool(live),
         stalled_ids={j.id for j in live if worker_status.is_stalled(j)},
         no_worker=any(j.status == 'queued' for j in live) and worker_status.no_worker(),
@@ -287,6 +288,8 @@ def approve(run_id):
         job = upgrades.approve(
             run=run, phase=phase, user=current_user, password=password,
             public_key=current_app.extensions['credential_public_key'],
+            concurrency=request.form.get('concurrency'),
+            cap=current_app.config['PHASE_CONCURRENCY'],
         )
         flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
     except upgrades.RequestError as exc:
@@ -311,6 +314,8 @@ def retry(run_id):
         job = upgrades.retry(
             run=run, phase=phase, user=current_user, password=password,
             public_key=current_app.extensions['credential_public_key'],
+            concurrency=request.form.get('concurrency'),
+            cap=current_app.config['PHASE_CONCURRENCY'],
         )
         flash(f'Retrying {phase} on the hosts that failed it; queued as job #{job.id}.',
               'success')

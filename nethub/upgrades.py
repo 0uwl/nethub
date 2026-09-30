@@ -85,10 +85,11 @@ from .sealed_credentials import CredentialError, check_credential, seal
 #:   verify    one read after the reload
 #:
 #: The per-host term assumes hosts run one at a time, and stays that way now
-#: that every phase but activate runs `PHASE_CONCURRENCY` hosts at once
-#: (PLAN.md WS-9). Activate is still serial, so for it the sum is exact. For
-#: the others it is an upper bound, loose by up to the concurrency, which is
-#: the direction this budget is meant to err in. Dividing by the concurrency
+#: that phases run `PHASE_CONCURRENCY` hosts at once (PLAN.md WS-9) and an
+#: activation runs its canary and then the approver's count (WS-15). For an
+#: activation approved at the default of one at a time the sum is exact; for
+#: everything else it is an upper bound, loose by up to the concurrency, which
+#: is the direction this budget is meant to err in. Dividing by the concurrency
 #: would tie a deadline Flask writes at submit to a sibling setting that can
 #: change before the job runs, and would be too tight if it were lowered.
 PHASE_BUDGET_SECONDS = {
@@ -328,10 +329,12 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
     db.session.add(run)
     db.session.flush()
 
-    for hostname, address in targets:
+    for position, (hostname, address) in enumerate(targets):
         db.session.add(UpgradeRunHost(
             run_id=run.id,
             hostname=hostname,
+            # Request order: the first host listed is activate's canary.
+            position=position,
             ansible_host=address,
             artifact_id=artifact.id,
             bundle_key=bundle,
@@ -367,7 +370,24 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
     return run, job
 
 
-def approve(*, run, phase, user, password, public_key):
+def reload_count(raw, cap):
+    """The approver's "reload N devices at a time after the first" (PLAN.md
+    WS-15), or refuse it. Blank means the default, 1. `cap` is the deployment's
+    `PHASE_CONCURRENCY`; the sibling caps it again, since the setting can be
+    lowered before the job runs."""
+    text = '' if raw is None else str(raw).strip()
+    if not text:
+        return 1
+    try:
+        count = int(text)
+    except ValueError:
+        count = 0
+    if count < 1 or count > cap:
+        raise RequestError(f'Reload count must be a whole number from 1 to {cap}.')
+    return count
+
+
+def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1):
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
@@ -377,7 +397,9 @@ def approve(*, run, phase, user, password, public_key):
     one, and `UNIQUE(run_id, phase, attempt)` holds either way.
 
     The approval is what supplies the credential, so it is sealed into the
-    job in the same transaction (see `_seal_into`).
+    job in the same transaction (see `_seal_into`). An activate approval also
+    chooses how many devices reload at once after the canary (`concurrency`,
+    at most `cap`); it is recorded on the job.
     """
     _check_gate(run)
     if phase not in APPROVABLE:
@@ -388,7 +410,8 @@ def approve(*, run, phase, user, password, public_key):
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=False,
-                            hosts=len(run.hosts))
+                            hosts=len(run.hosts),
+                            concurrency=_concurrency_for(phase, concurrency, cap))
 
 
 def retryable_phases(run):
@@ -406,7 +429,7 @@ def retryable_phases(run):
     return out
 
 
-def retry(*, run, phase, user, password, public_key):
+def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1):
     """Run a phase again on the hosts that failed it (PLAN.md WS-8).
 
     Allowed while the run waits at a gate, for a phase that ran since the gate
@@ -428,7 +451,14 @@ def retry(*, run, phase, user, password, public_key):
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=True,
-                            hosts=len(allowed[phase]))
+                            hosts=len(allowed[phase]),
+                            concurrency=_concurrency_for(phase, concurrency, cap))
+
+
+def _concurrency_for(phase, raw, cap):
+    """Only activate takes a reload count; every other phase runs at the
+    deployment's concurrency and records none."""
+    return reload_count(raw, cap) if phase == 'activate' else None
 
 
 def _check_gate(run):
@@ -442,7 +472,8 @@ def _check_gate(run):
         raise RequestError('This gate has expired. Submit a new run.')
 
 
-def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts):
+def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
+                     concurrency=None):
     """Queue `phase` from the gate the run is waiting at, and take it off the gate.
 
     The attempt is one past the highest so far for this phase, so an abandoned
@@ -470,7 +501,7 @@ def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts)
     job = UpgradePhaseJob(
         run_id=run.id, phase=phase, attempt=(previous or 0) + 1, status='queued',
         is_retry=is_retry, approved_by=user.id, approved_at=_utcnow(),
-        created_at=_utcnow(),
+        concurrency=concurrency, created_at=_utcnow(),
         deadline_at=phase_deadline(
             phase, hosts=hosts,
             image_bytes=max((h.file_size or 0) for h in run.hosts) if run.hosts else 0,

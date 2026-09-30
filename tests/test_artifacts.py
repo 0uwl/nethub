@@ -211,7 +211,7 @@ class TestDelete:
         db.session.add(run)
         db.session.flush()
         db.session.add(UpgradeRunHost(
-            run_id=run.id, hostname="sw01", ansible_host="192.0.2.10",
+            run_id=run.id, hostname="sw01", position=0, ansible_host="192.0.2.10",
             artifact_id=artifact.id, filename=artifact.filename,
             sha512=artifact.sha512, version=artifact.version,
             file_size=artifact.file_size))
@@ -247,7 +247,7 @@ class TestDelete:
             a = ingest(store)
             run = self.run_using(a, "completed")
             db.session.add(UpgradeRunHost(
-                run_id=run.id, hostname="sw02", ansible_host="192.0.2.11",
+                run_id=run.id, hostname="sw02", position=1, ansible_host="192.0.2.11",
                 artifact_id=a.id + 1000, filename="x", sha512="a" * 128, version="1"))
             with pytest.raises(IntegrityError):
                 db.session.commit()

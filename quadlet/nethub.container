@@ -115,6 +115,12 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # PublishPort= above to match if you change this.
 #Environment=NETHUB_PORT=8080
 
+# The most devices an activate approval may reload together after its
+# canary; the approve form offers 1 up to this. Set the SAME value in
+# nethub-sibling.container, which also runs the other phases this many hosts
+# at a time. Refuses to start on anything but a whole number of at least 1.
+Environment=PHASE_CONCURRENCY=4
+
 # --- Optional ---
 # Cap request size so an upload can't exhaust disk/memory. Bytes; 1.5 GB by
 # default, comfortably above a real IOS-XE image.

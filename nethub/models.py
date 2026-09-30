@@ -303,12 +303,15 @@ RETRYABLE_AT = {
 #: publish side: a publish stops at promote/render/commit, and §8.1's phases are
 #: themselves named `stage` and `verify`, so one vocabulary would produce a row
 #: reading phase='activate', failure_stage='stage' that is ambiguous on its face.
-#: `internal` is an error in NetHub's own code (`Sibling.recover_own`), which
-#: used to be recorded as `connect` and read as a device problem. Changing this
-#: tuple changes a CHECK constraint, so it needs a migration (see 0002).
+#: `internal` is an error in NetHub's own code (`Sibling.recover_own`, and any
+#: exception `phases.failure_stage_for` does not recognise), which used to be
+#: recorded as `connect` and read as a device problem. `store` is the image in
+#: NetHub's own artifact store missing or not matching its recorded digest,
+#: found before a stage touches any device (PLAN.md WS-15). Changing this
+#: tuple changes a CHECK constraint, so it needs a migration (see 0002, 0006).
 PHASE_FAILURE_STAGES = (
     'credential', 'connect', 'hostkey', 'privilege', 'precheck',
-    'transfer', 'checksum', 'install', 'reload', 'postcheck', 'internal',
+    'transfer', 'checksum', 'install', 'reload', 'postcheck', 'internal', 'store',
 )
 
 
@@ -456,7 +459,10 @@ class UpgradeRun(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     finished_at = db.Column(db.DateTime)
 
-    hosts = db.relationship('UpgradeRunHost', backref='run', cascade='all, delete-orphan')
+    #: In request order (`UpgradeRunHost.position`), which is what makes the
+    #: first host listed the activate canary (PLAN.md WS-15).
+    hosts = db.relationship('UpgradeRunHost', backref='run', cascade='all, delete-orphan',
+                            order_by='UpgradeRunHost.position')
     phase_jobs = db.relationship('UpgradePhaseJob', backref='run', cascade='all, delete-orphan')
 
 
@@ -469,9 +475,17 @@ class UpgradeRunHost(db.Model):
     """
 
     __tablename__ = 'upgrade_run_hosts'
+    __table_args__ = (
+        db.UniqueConstraint('run_id', 'position', name='uq_run_host_position'),
+    )
 
     run_id = db.Column(db.Integer, db.ForeignKey('upgrade_runs.id'), primary_key=True)
     hostname = db.Column(db.String(255), primary_key=True)
+    #: The host's line in the request, from 0 (PLAN.md WS-15). Activate
+    #: upgrades the first eligible host alone, as a canary, so the submitter's
+    #: order has to survive into the rows: phases read rows, never the request
+    #: document.
+    position = db.Column(db.Integer, nullable=False)
     ansible_host = db.Column(db.String(64), nullable=False)
 
     #: The artifact this host's snapshot was taken from. `SET NULL` rather
@@ -518,6 +532,8 @@ class UpgradePhaseJob(db.Model):
         # holding every writer to that, not a habit.
         db.CheckConstraint("status = 'queued' OR sealed_credential IS NULL",
                            name='ck_sealed_credential_only_while_queued'),
+        db.CheckConstraint('concurrency IS NULL OR concurrency >= 1',
+                           name='ck_phase_job_concurrency_positive'),
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -536,6 +552,11 @@ class UpgradePhaseJob(db.Model):
     #: sibling puts those hosts' cursors back when it starts the job, because
     #: §7.3 gives every per-host edge to the sibling and none to Flask.
     is_retry = db.Column(db.Boolean, nullable=False, default=False, server_default='0')
+    #: How many devices an activate reloads at once after its canary, chosen
+    #: by the approver (PLAN.md WS-15) and kept here so the audit trail shows
+    #: who chose to reload several together. The sibling caps it at its
+    #: `PHASE_CONCURRENCY`. Null on every other phase, which run at the cap.
+    concurrency = db.Column(db.Integer)
     failure_stage = db.Column(_enum(PHASE_FAILURE_STAGES, 'phase_failure_stage'))
     error_summary = db.Column(db.String(500))
 

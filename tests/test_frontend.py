@@ -62,10 +62,10 @@ def gate_run(app, logged_in_client):
                          state='awaiting_approval', awaiting_phase='activate')
         db.session.add(run)
         db.session.flush()
-        for name, address, state in (('sw01', '192.0.2.10', 'staged'),
-                                     ('sw02', '192.0.2.11', 'failed')):
+        for position, (name, address, state) in enumerate((('sw01', '192.0.2.10', 'staged'),
+                                                           ('sw02', '192.0.2.11', 'failed'))):
             db.session.add(UpgradeRunHost(
-                run_id=run.id, hostname=name, ansible_host=address,
+                run_id=run.id, hostname=name, position=position, ansible_host=address,
                 filename='image.bin', sha512='a' * 128, version='17.12.06',
                 file_size=1, state=state, last_phase='stage'))
         db.session.commit()
