@@ -1,5 +1,6 @@
 {% extends 'layouts/main.html' %}
 {% from 'partials/reload_count.html' import reload_count %}
+{% from 'partials/start_at.html' import start_at %}
 {% block title %}Run {{ run.id }}{% endblock %}
 {% block head %}
 {# Reload while the sibling has work on this run; stop once nothing moves. #}
@@ -23,6 +24,12 @@
   {{ j.phase }} (attempt {{ j.attempt }}) is stalled: no heartbeat since
   {{ j.heartbeat_at or j.started_at }}. Check the <code>nethub-sibling</code> unit.
 </div>
+{% endfor %}
+{% for j in scheduled %}
+<p class="muted">{{ j.phase }} (attempt {{ j.attempt }}) is scheduled for
+<strong>{{ j.not_before }} UTC</strong>, approved by
+{{ users.get(j.approved_by, '?') }} on {{ j.approved_at }}. Nothing runs until
+then; cancel the run to stop it.</p>
 {% endfor %}
 {% if refresh %}
 <p class="muted" aria-busy="true">Working. This page reloads itself every few seconds.</p>
@@ -66,6 +73,7 @@
     {% if run.awaiting_phase == 'activate' %}
     {{ reload_count('approve_concurrency', gate_hosts|map(attribute='hostname')|list, reload_cap) }}
     {% endif %}
+    {{ start_at('approve_start_at', max_schedule_hours) }}
     <label class="confirm">
       <input type="checkbox" name="confirm" value="yes" required>
       {% if run.awaiting_phase == 'activate' -%}
@@ -113,6 +121,7 @@
     {% if phase == 'activate' %}
     {{ reload_count('retry_activate_concurrency', failed, reload_cap) }}
     {% endif %}
+    {{ start_at('retry_' ~ phase ~ '_start_at', max_schedule_hours) }}
     <label class="confirm">
       <input type="checkbox" name="confirm" value="yes" required>
       Retry {{ phase }} on {{ failed|length }} device(s){% if phase == 'activate' %}, reloading each{% endif %}.
@@ -164,7 +173,7 @@
 <h2>Phase executions</h2>
 <div class="overflow-auto">
 <table class="striped">
-  <thead><tr><th>Phase</th><th>Attempt</th><th>Status</th><th>Approved by</th><th>Started</th><th>Heartbeat</th><th>Failure</th></tr></thead>
+  <thead><tr><th>Phase</th><th>Attempt</th><th>Status</th><th>Approved by</th><th>Scheduled</th><th>Started</th><th>Heartbeat</th><th>Failure</th></tr></thead>
   <tbody>
   {% for j in jobs %}
     <tr>
@@ -172,6 +181,9 @@
       <td>{{ j.attempt }}</td>
       <td>{{ j.status }}{% if j.id in stalled_ids %} (stalled){% endif %}</td>
       <td>{{ users.get(j.approved_by, '') if j.approved_by else '' }}</td>
+      {# approved_at, not_before and started_at together are the record that a
+         phase ran on a scheduled approval rather than with someone at the gate. #}
+      <td>{% if j.not_before %}{{ j.not_before }} UTC{% else %}&mdash;{% endif %}</td>
       <td>{{ j.started_at or '' }}</td>
       <td>{{ j.heartbeat_at or '' }}</td>
       <td>{{ j.failure_stage or '' }}{% if j.error_summary %} - {{ j.error_summary }}{% endif %}</td>

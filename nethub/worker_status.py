@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from .devices.phases import HEARTBEAT_INTERVAL, _aware
 from .extensions import db
-from .models import HostKeyScan, UpgradePhaseJob
+from .models import HostKeyScan, UpgradePhaseJob, due_at
 from .upgrades import _utcnow
 
 #: A running phase writes `heartbeat_at` every `HEARTBEAT_INTERVAL` while its
@@ -60,16 +60,32 @@ def _live_work(now):
                for scan in running_scans)
 
 
+def is_waiting(job, now=None):
+    """True for a queued job the sibling could take right now. A job approved
+    for a maintenance window is queued but not waiting until then (PLAN.md
+    WS-14), so it must not read as a job nothing is picking up."""
+    if job.status != 'queued':
+        return False
+    start = _aware(job.not_before)
+    return start is None or (now or _utcnow()) >= start
+
+
 def no_worker(now=None):
     """True when something has been queued longer than `NO_WORKER_AFTER` and
     no job or scan is running with a fresh heartbeat. Global, not per-run: the
     sibling takes rows from one FIFO queue, so a missing worker strands every
-    queued row at once."""
+    queued row at once.
+
+    A scheduled job is excluded by `due_at()`, the same expression the
+    sibling's queue uses: it is not queued behind a missing worker, it is
+    waiting for its window, and saying otherwise would put a "no worker"
+    warning on every run approved for tonight.
+    """
     now = now or _utcnow()
     cutoff = now - NO_WORKER_AFTER
     oldest = [
         db.session.query(db.func.min(UpgradePhaseJob.created_at))
-        .filter(UpgradePhaseJob.status == 'queued').scalar(),
+        .filter(UpgradePhaseJob.status == 'queued', due_at() <= now).scalar(),
         db.session.query(db.func.min(HostKeyScan.created_at))
         .filter(HostKeyScan.status == 'queued').scalar(),
     ]
@@ -78,13 +94,19 @@ def no_worker(now=None):
     return not _live_work(now)
 
 
-def queue_depth():
+def queue_depth(now=None):
     """`(queued, running)` phase jobs across every run: what an approval made
     now would wait behind. The sibling runs one phase execution at a time,
-    oldest first (§9), so this is the whole queue, not this run's share."""
+    oldest first (§9), so this is the whole queue, not this run's share.
+
+    Jobs scheduled for later are not counted: they are not ahead of an
+    approval made now, and the sibling skips them until they are due.
+    """
+    now = now or _utcnow()
     counts = dict(
         db.session.query(UpgradePhaseJob.status, db.func.count(UpgradePhaseJob.id))
-        .filter(UpgradePhaseJob.status.in_(('queued', 'running')))
+        .filter(UpgradePhaseJob.status.in_(('queued', 'running')),
+                db.or_(UpgradePhaseJob.status == 'running', due_at() <= now))
         .group_by(UpgradePhaseJob.status).all()
     )
     return counts.get('queued', 0), counts.get('running', 0)

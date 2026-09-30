@@ -1085,3 +1085,113 @@ class TestReloadCount:
         client.post(f"/upgrades/{run_id}/approve", data={**form, "concurrency": "2"})
         with app.app_context():
             assert UpgradePhaseJob.query.filter_by(phase="activate").one().concurrency == 2
+
+
+class TestScheduledApprovals:
+    """PLAN.md WS-14: an approval may carry a start time, in UTC, bounded by
+    the cap and by the gate it was made at."""
+
+    LATER = "2026-09-09T02:00"  # 2h after NOW
+
+    @pytest.fixture(autouse=True)
+    def clock(self, monkeypatch):
+        """`start_time` compares against now; NOW is the rest of this file's."""
+        monkeypatch.setattr(upgrades, "_utcnow", lambda: NOW)
+
+    def at_activate_gate(self, user):
+        run, _ = submit(user)
+        at_gate(run, "activate")
+        run.gate_expires_at = NOW + timedelta(days=7)
+        db.session.commit()
+        return run
+
+    def test_an_empty_start_time_still_means_now(self, app, user, confirmed):
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          not_before=upgrades.start_time("", gate_expires_at=None))
+            assert job.not_before is None
+
+    def test_a_window_is_recorded_on_the_job(self, app, user, confirmed):
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          not_before=when)
+            # SQLite hands the column back naive, as it does every timestamp.
+            assert upgrades._aware(job.not_before) == when
+            assert job.approved_at is not None, "approved now, running later"
+
+    def test_the_deadline_runs_from_the_window_not_the_approval(
+        self, app, user, confirmed
+    ):
+        """Otherwise a job approved for tonight arrives already expired, and
+        with it the credential sealed to that deadline."""
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          not_before=when)
+            assert upgrades._aware(job.deadline_at) > when
+
+    def test_the_sealed_credential_expires_with_that_deadline(
+        self, app, user, confirmed, credential_private_key
+    ):
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          not_before=when)
+            opened = SC.open_sealed(
+                credential_private_key, job.sealed_credential, job_id=job.id,
+                approved_by=user, now=when)
+            assert opened.password == PASSWORD, "it is still good inside the window"
+
+    @pytest.mark.parametrize("raw,message", [
+        ("2026-09-08T23:00", "has passed"),
+        ("2026-09-09T00:00", "has passed"),
+        ("2026-09-20T02:00", "hours ahead"),
+        ("tonight", "not a date and time"),
+    ])
+    def test_a_start_time_outside_the_bounds_is_refused(self, raw, message):
+        with pytest.raises(upgrades.RequestError, match=message):
+            upgrades.start_time(raw, gate_expires_at=None)
+
+    def test_a_start_time_after_the_gate_expires_is_refused(self):
+        with pytest.raises(upgrades.RequestError, match="after this gate expires"):
+            upgrades.start_time("2026-09-10T02:00",
+                                gate_expires_at=NOW + timedelta(hours=6))
+
+    def test_the_cap_bounds_how_long_a_credential_is_stored(self):
+        """The window is the only thing that lengthens it, so this cap plus one
+        phase's budget is the whole bound (design doc §9.1)."""
+        assert upgrades.MAX_SCHEDULE_AHEAD == timedelta(hours=72)
+
+    def test_the_route_refuses_a_bad_time_without_spending_the_gate(
+        self, app, client, user, confirmed
+    ):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        with app.app_context():
+            run_id = self.at_activate_gate(user).id
+        page = client.post(f"/upgrades/{run_id}/approve", data={
+            "phase": "activate", "device_password": PASSWORD, "confirm": "yes",
+            "concurrency": "1", "start_at": "2026-09-08T23:00",
+        }, follow_redirects=True).get_data(as_text=True)
+        assert "has passed" in page
+        with app.app_context():
+            assert UpgradePhaseJob.query.filter_by(phase="activate").count() == 0
+            assert db.session.get(UpgradeRun, run_id).state == "awaiting_approval"
+
+    def test_the_route_stores_a_window_and_says_so(self, app, client, user, confirmed):
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        with app.app_context():
+            run_id = self.at_activate_gate(user).id
+        page = client.post(f"/upgrades/{run_id}/approve", data={
+            "phase": "activate", "device_password": PASSWORD, "confirm": "yes",
+            "concurrency": "1", "start_at": self.LATER,
+        }, follow_redirects=True).get_data(as_text=True)
+        assert "scheduled for 2026-09-09 02:00 UTC" in page
+        with app.app_context():
+            job = UpgradePhaseJob.query.filter_by(phase="activate").one()
+            assert upgrades._aware(job.not_before) == datetime(
+                2026, 9, 9, 2, 0, tzinfo=timezone.utc)

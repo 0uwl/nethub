@@ -33,6 +33,7 @@ from nethub.models import (
     HostKeyScan,
     UpgradePhaseJob,
     UpgradeRun,
+    due_at,
 )
 from nethub.sealed_credentials import CredentialError, open_sealed
 
@@ -361,10 +362,20 @@ class Sibling:
 
     def next_queued(self) -> UpgradePhaseJob | None:
         """One FIFO queue, ordered by `created_at` -- `started_at` is null
-        until dispatch, so there is nothing else to order by (§5)."""
+        until dispatch, so there is nothing else to order by (§5) -- except
+        the start time an approver chose (`models.due_at`, PLAN.md WS-14).
+
+        A job scheduled for tonight is skipped rather than blocking the
+        queue: it is not "next", it is not due. Everything that follows is
+        unchanged, including the deadline check in `_stop_before_claim` --
+        `deadline_at` is measured from `not_before`, so a due job is never
+        already past it.
+        """
+        due = due_at()
         return (
-            UpgradePhaseJob.query.filter_by(status='queued')
-            .order_by(UpgradePhaseJob.created_at, UpgradePhaseJob.id)
+            UpgradePhaseJob.query.filter(UpgradePhaseJob.status == 'queued',
+                                         due <= self.now())
+            .order_by(due, UpgradePhaseJob.id)
             .first()
         )
 

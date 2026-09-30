@@ -104,7 +104,9 @@ def queue(run_id, phase="precheck", sealed=True, **kw):
     db.session.flush()
     at_phase(job)
     if sealed:
-        job.sealed_credential = sealed_for(job)
+        # `upgrades._seal_into` expires the credential with the job's deadline,
+        # so a test that moves the clock past one gets what production gets.
+        job.sealed_credential = sealed_for(job, expires_at=job.deadline_at)
     db.session.commit()
     return job
 
@@ -159,6 +161,65 @@ class TestClaim:
             newer.created_at = NOW + timedelta(minutes=5)
             db.session.commit()
             assert make_sibling().next_queued().id == older.id
+
+
+class TestScheduledJobs:
+    """PLAN.md WS-14: an approval may name a maintenance window, and the queue
+    has to treat "queued" and "waiting" as different things."""
+
+    def test_a_job_is_not_claimed_before_its_time(self, app, run):
+        with app.app_context():
+            job = queue(run, not_before=NOW + timedelta(hours=6))
+            worker = make_sibling()
+            assert worker.next_queued() is None
+            assert worker.run_once() is None
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert row.status == "queued"
+            assert row.sealed_credential is not None, "nothing is opened early either"
+
+    def test_it_is_claimed_once_its_time_comes(self, app, run, monkeypatch):
+        succeed(monkeypatch, "precheck")
+        with app.app_context():
+            job = queue(run, not_before=NOW + timedelta(hours=6),
+                        deadline_at=NOW + timedelta(hours=7))
+            tonight = make_sibling(now=lambda: NOW + timedelta(hours=6))
+            assert tonight.next_queued().id == job.id
+            assert tonight.run_once() == "succeeded"
+
+    def test_a_scheduled_job_does_not_block_an_unscheduled_one(self, app, run):
+        """The queue orders by when a job may start, not by when it was made:
+        an approval for tonight must not hold up work approved for now."""
+        with app.app_context():
+            tonight = queue(run, "stage", not_before=NOW + timedelta(hours=6))
+            tonight.created_at = NOW - timedelta(minutes=5)  # approved first
+            unscheduled = queue(run, "precheck")
+            db.session.commit()
+            assert make_sibling().next_queued().id == unscheduled.id
+
+    def test_a_job_that_missed_its_window_expires_with_its_credential_unused(
+        self, app, run
+    ):
+        with app.app_context():
+            job = queue(run, not_before=NOW + timedelta(hours=6),
+                        deadline_at=NOW + timedelta(hours=7))
+            assert make_sibling(now=lambda: NOW + timedelta(hours=8)).run_once() \
+                == "expired"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert (row.status, row.failure_stage) == ("expired", "credential")
+            assert row.sealed_credential is None
+            assert "discarded unused" in row.error_summary
+
+    def test_a_cancel_before_the_window_finishes_the_job_unclaimed(self, app, run):
+        with app.app_context():
+            job = queue(run, not_before=NOW + timedelta(hours=6))
+            cancel_as_flask(run)  # `upgrades.request_cancel` also drops the
+            # ciphertext at once (test_upgrade_routes); this is the other half:
+            # the job is finished without ever being claimed when its window
+            # comes, rather than running a reload nobody wants any more.
+            assert make_sibling(now=lambda: NOW + timedelta(hours=6)).run_once() \
+                == "cancelled"
+            row = db.session.get(UpgradePhaseJob, job.id)
+            assert (row.status, row.sealed_credential) == ("cancelled", None)
 
 
 class TestSweep:

@@ -115,6 +115,51 @@ DEADLINE_SAFETY = 2
 STAGE_SECONDS_PER_MB = 1.3
 
 
+#: How far ahead an approval may schedule its phase (PLAN.md WS-14). This is
+#: the bound on how long a sealed device password sits in a row: the
+#: credential expires with `deadline_at`, which is measured from `not_before`,
+#: so nothing is stored for longer than this plus one phase's budget. It is
+#: also why a start time is refused past `gate_expires_at` -- a window a
+#: closed gate could not open into.
+MAX_SCHEDULE_AHEAD = timedelta(hours=72)
+
+
+def start_time(raw, *, gate_expires_at, now=None):
+    """The approver's optional "start at", in UTC, or None for "now".
+
+    UTC throughout rather than a deployment time zone: the form field is a
+    `datetime-local`, which posts a wall-clock string with no offset, and
+    there is no JavaScript to tell us the browser's zone (WS-11's
+    `script-src 'none'`). So the field says UTC, the page shows UTC, and the
+    column stores UTC, like every other timestamp in the app.
+    """
+    text = '' if raw is None else str(raw).strip()
+    if not text:
+        return None
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise RequestError(
+            f'"{text}" is not a date and time. Use the form\'s picker, or type '
+            f'something like 2026-10-01T02:00.'
+        ) from None
+    when = (when.replace(tzinfo=timezone.utc) if when.tzinfo is None
+            else when.astimezone(timezone.utc))
+    now = now or _utcnow()
+    if when <= now:
+        raise RequestError('That start time has passed. Leave it empty to start now.')
+    if when > now + MAX_SCHEDULE_AHEAD:
+        hours = int(MAX_SCHEDULE_AHEAD.total_seconds() // 3600)
+        raise RequestError(f'A phase may be scheduled at most {hours} hours ahead.')
+    gate = _aware(gate_expires_at)
+    if gate is not None and when >= gate:
+        raise RequestError(
+            f'That start time is after this gate expires ({gate:%Y-%m-%d %H:%M} UTC). '
+            f'Approve it to run sooner, or submit a new run.'
+        )
+    return when
+
+
 def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
     """When a phase execution stops being allowed to run.
 
@@ -387,7 +432,8 @@ def reload_count(raw, cap):
     return count
 
 
-def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1):
+def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
+            not_before=None):
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
@@ -400,6 +446,12 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1):
     job in the same transaction (see `_seal_into`). An activate approval also
     chooses how many devices reload at once after the canary (`concurrency`,
     at most `cap`); it is recorded on the job.
+
+    `not_before` is the maintenance window an approver chose (PLAN.md WS-14):
+    the job is written exactly as it is today and simply not claimed until
+    then. Nothing is held in memory in the meantime -- the credential is
+    sealed in the row as always -- so an approval and its execution can be
+    hours apart without a person in between.
     """
     _check_gate(run)
     if phase not in APPROVABLE:
@@ -410,7 +462,7 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1):
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=False,
-                            hosts=len(run.hosts),
+                            hosts=len(run.hosts), not_before=not_before,
                             concurrency=_concurrency_for(phase, concurrency, cap))
 
 
@@ -429,7 +481,8 @@ def retryable_phases(run):
     return out
 
 
-def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1):
+def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
+          not_before=None):
     """Run a phase again on the hosts that failed it (PLAN.md WS-8).
 
     Allowed while the run waits at a gate, for a phase that ran since the gate
@@ -451,7 +504,7 @@ def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1):
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=True,
-                            hosts=len(allowed[phase]),
+                            hosts=len(allowed[phase]), not_before=not_before,
                             concurrency=_concurrency_for(phase, concurrency, cap))
 
 
@@ -473,7 +526,7 @@ def _check_gate(run):
 
 
 def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
-                     concurrency=None):
+                     concurrency=None, not_before=None):
     """Queue `phase` from the gate the run is waiting at, and take it off the gate.
 
     The attempt is one past the highest so far for this phase, so an abandoned
@@ -501,9 +554,13 @@ def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
     job = UpgradePhaseJob(
         run_id=run.id, phase=phase, attempt=(previous or 0) + 1, status='queued',
         is_retry=is_retry, approved_by=user.id, approved_at=_utcnow(),
-        concurrency=concurrency, created_at=_utcnow(),
+        concurrency=concurrency, created_at=_utcnow(), not_before=not_before,
+        # The budget runs from the window, not from the approval: a job
+        # scheduled for tonight must not arrive there already past its
+        # deadline. The sealed credential expires with it (`_seal_into`), so
+        # `MAX_SCHEDULE_AHEAD` plus this budget is the whole storage bound.
         deadline_at=phase_deadline(
-            phase, hosts=hosts,
+            phase, hosts=hosts, now=not_before,
             image_bytes=max((h.file_size or 0) for h in run.hosts) if run.hosts else 0,
         ),
     )

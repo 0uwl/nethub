@@ -74,8 +74,8 @@ function name.
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | merged |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | merged |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
-| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | todo |
-| 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | in review |
+| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | in review |
+| 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | merged |
 | 16 | `feat/roles` | Admin and operator roles; optional two-person rules for artifacts, host keys and runs | 10 | todo |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
@@ -713,6 +713,30 @@ window completes activate and verify.
 **Done when:** an admin can stage a fleet during the day, approve the reload
 for a start time that night, and the end-to-end test runs it at that time
 with no further input.
+
+*As built*, the points the design above left open:
+
+- **The time zone is UTC throughout**, not a deployment setting. The field
+  is a `datetime-local`, which posts a wall-clock string with no offset, and
+  WS-11's `script-src 'none'` leaves nothing to tell the server the
+  browser's zone. So the field says UTC, the page says UTC, and the column
+  stores UTC, which is what every other timestamp in the app already
+  renders. A local-time setting is a display change on top of the same
+  column if operators ask for one.
+- **A retry may carry a start time for any phase it may retry**, not only
+  stage/activate/cleanup. The design's restriction exists so pre-check
+  still runs at submit, and the submit form having no such field already
+  enforces that; narrowing the retry form as well would have been a branch
+  with nothing behind it. A retry of `verify` at the cleanup gate is the
+  same maintenance-window case as any other.
+- `models.due_at()` (`coalesce(not_before, created_at)`) is one expression
+  shared by the sibling's queue and by `worker_status`, because "queued"
+  and "waiting for a worker" stopped being the same thing: without it a run
+  approved for tonight would have shown the "No worker has picked this up"
+  warning and meta-refreshed every five seconds until the window.
+- A scheduled job is not counted in the "queued ahead of you" depth an
+  approve form shows, for the same reason: it is not ahead of an approval
+  made now.
 
 ### WS-15: Canary activation, parallel reloads, stop only on NetHub's faults
 

@@ -150,6 +150,15 @@ Once you're logged in as an admin:
    before anything is copied). The run then comes back to the same gate
    with nothing marked failed that wasn't the device's fault: approve it
    again, with the right password, to carry on.
+
+   Each gate also takes an optional **start at** time, in UTC, so a fleet can
+   be staged during the day and reloaded in a maintenance window that night
+   with nobody at the gate. The approval is an ordinary approval — it names
+   you, and your password is sealed into that job as always — the dispatch
+   process simply does not pick the job up until then, and other work is not
+   held up behind it. A time is refused if it has passed, is more than 72
+   hours ahead, or is after the gate itself expires. To change it, cancel the
+   run and submit a new one.
 6. `flask --app nethub check-store` re-hashes every published image against
    what is on disk and flags a missing file or a digest that no longer
    matches. It is a command rather than a page, because it hashes

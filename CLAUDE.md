@@ -828,8 +828,9 @@ gate), `provisioning_log` with an `outcome` enum and a
 `settings_audit`, and `sessions`. `user_admin_audit` exists since WS-10
 (see "User management"). Of the upgrade
 tables it describes, all exist, including `upgrade_host_phase_results`.
-`upgrade_phase_jobs` carries three columns §7/§9 depend on: `created_at`
-(the queue has nothing else to order by, since `started_at` is null until
+`upgrade_phase_jobs` carries four columns §7/§9 depend on: `created_at`,
+`not_before` (the approver's optional start time; the queue orders by
+`models.due_at()`, the coalesce of the two, since `started_at` is null until
 dispatch), `deadline_at` and `runner_instance_id`. Two constraints
 are load-bearing rather than tidy: `UNIQUE(run_id, phase, attempt)` is
 what makes two admins clicking "approve: reload" a `409` instead of two
@@ -1619,6 +1620,19 @@ lets two readers both see `queued` and both claim it, and nothing enforces
 that only one sibling runs (§9.1). `runner_instance_id` is a UUID minted per
 start and never a PID.
 
+**Queued and waiting are not the same thing (PLAN.md WS-14).** An approval may
+name a start time (`upgrade_phase_jobs.not_before`, UTC, null for now), and
+`next_queued()` takes the oldest *due* job by `models.due_at()` --
+`coalesce(not_before, created_at)`. A job scheduled for tonight is skipped
+rather than blocking work approved for now, and `worker_status` reads the same
+expression, or a run approved for a maintenance window would raise "no worker"
+all day and refresh every five seconds until then. Nothing after the claim
+changes: `deadline_at` is written from `not_before`, so a due job is never
+already past it, and a job that missed its window still ends `expired` with
+`failure_stage='credential'`. Don't add a reschedule: changing the time means
+cancelling the run, because Flask writing a queued job after dispatch is
+exactly what §7.3's actor table forbids.
+
 **Sealed credentials (PLAN.md WS-7, `nethub/sealed_credentials.py`).** The
 approver's device password is sealed with libsodium's sealed box (PyNaCl
 `SealedBox`) to the sibling's public key, and stored in the job row it was
@@ -1640,7 +1654,11 @@ collected for. These things are load-bearing:
   supplying identity (the approver, or the submitter for pre-check, which has
   no gate: `Sibling._supplier`; refusing a null there once failed every
   pre-check), and `expires_at`, which is the job's `deadline_at`. A credential
-  waits exactly as long as its job may, so there is no separate TTL.
+  waits exactly as long as its job may, so there is no separate TTL. That is
+  also what bounds how long ciphertext sits in the database once an approval
+  can name a window: `upgrades.MAX_SCHEDULE_AHEAD` (72 hours) plus the phase's
+  own budget, hours rather than the days a run can spend parked at a gate.
+  Don't raise the cap without re-reading design doc §9.1's storage claim.
 - **The claim takes the ciphertext off the row in the same statement.**
   `Sibling._claim` reads the column, then runs the conditional `UPDATE ...
   WHERE status='queued' AND sealed_credential = <what was read>` setting it
@@ -1899,6 +1917,17 @@ pre-check, and each half looked correct alone. The rule is "the identity that
 supplied it": the approver for a gated phase, the submitter for pre-check
 (`Sibling._supplier`). Don't tighten that back to a non-null check.
 
+**An approval may carry a start time, and pre-check may not (PLAN.md
+WS-14).** `upgrades.start_time()` parses the approve/retry form's optional
+`start_at` (a `datetime-local`, so UTC throughout -- there is no JavaScript to
+report the browser's zone, and every other timestamp in the app is UTC too)
+and refuses one in the past, past `MAX_SCHEDULE_AHEAD`, or at/after
+`gate_expires_at`. It is validated in the route *before* `approve` takes the
+run off its gate, since leaving the gate clears the column it is checked
+against. Submit has no such field: pre-check runs at submit so a wrong
+password or an unreachable device surfaces when the run is created, not in the
+window.
+
 **The credential is sealed into the queued row in the transaction that
 creates it** (`upgrades._seal_into`; see "Sealed credentials" under
 "Dispatch"). The sibling claims any committed `queued` row, and under the
@@ -2071,8 +2100,10 @@ load-bearing:
   wraps (`overflow-wrap: anywhere` in `dl.facts`), and `p[aria-busy]` is
   reset to wrap, because Pico keeps a busy element on one line.
 - **What the pages say about the sibling is inferred from rows, read-only**
-  (`nethub/worker_status.py`). A run or scan page with anything `queued` or
-  `running` reloads every 5 s. A running job stalls after
+  (`nethub/worker_status.py`). A run or scan page with anything `running` or
+  *due* and `queued` reloads every 5 s; a job scheduled for later is neither
+  (`worker_status.is_waiting`), and gets a line saying when it starts and who
+  approved it. A running job stalls after
   `STALLED_AFTER` (3 × `HEARTBEAT_INTERVAL`). "No worker has picked this up"
   shows when a job or scan has been queued over `NO_WORKER_AFTER` (a minute)
   and no job is running with a fresh heartbeat and no scan started within

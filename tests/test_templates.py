@@ -523,13 +523,14 @@ def test_every_destructive_form_carries_a_confirmation_box(
 
 # --- WS-11: the run page says what the sibling is doing ----------------------
 
-def _add_job(app, run_id, status, *, phase='stage', age=timedelta(0), beat_age=None):
+def _add_job(app, run_id, status, *, phase='stage', age=timedelta(0), beat_age=None,
+             not_before=None):
     """A job on `run_id`, created `age` ago, last heartbeat `beat_age` ago."""
     now = datetime.now(timezone.utc)
     with app.app_context():
         attempt = 1 + UpgradePhaseJob.query.filter_by(run_id=run_id, phase=phase).count()
         job = UpgradePhaseJob(run_id=run_id, phase=phase, attempt=attempt, status=status,
-                              created_at=now - age)
+                              created_at=now - age, not_before=not_before)
         if status == 'running':
             job.started_at = now - age
             job.heartbeat_at = now - (beat_age if beat_age is not None else timedelta(0))
@@ -734,3 +735,47 @@ def test_a_retry_of_activate_asks_for_a_reload_count(operator, make_run):
     form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
                             f'/upgrades/{run}/retry')
     assert 'id="retry_activate_concurrency"' in form
+
+
+# --- WS-14: the start time on an approval ------------------------------------
+
+def test_the_approve_form_offers_a_start_time_in_utc(operator, make_run):
+    run = make_run(awaiting_phase='activate')
+    form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
+                            f'/upgrades/{run}/approve')
+    assert 'type="datetime-local" id="approve_start_at" name="start_at"' in form
+    assert 'Start at (UTC)' in form
+    assert '72 hours ahead' in ' '.join(form.split())
+
+
+def test_a_retry_form_offers_one_too(operator, make_run):
+    run = make_run(awaiting_phase='cleanup', failed_phase='activate')
+    form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
+                            f'/upgrades/{run}/retry')
+    assert 'id="retry_activate_start_at"' in form
+
+
+def test_a_scheduled_job_is_shown_with_its_window_and_does_not_refresh(
+    operator, app, make_run
+):
+    """A run approved for tonight is not "working": refreshing every five
+    seconds until then, or warning that no worker picked it up, would both be
+    wrong (PLAN.md WS-14)."""
+    run = make_run(state='running', awaiting_phase=None)
+    _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
+             not_before=datetime.now(timezone.utc) + timedelta(hours=6))
+    body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert 'is scheduled for' in body
+    assert 'http-equiv="refresh"' not in body
+    assert 'No worker has picked this up' not in body
+
+
+def test_a_due_job_still_refreshes_and_still_reports_a_missing_worker(
+    operator, app, make_run
+):
+    run = make_run(state='running', awaiting_phase=None)
+    _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
+             not_before=datetime.now(timezone.utc) - timedelta(minutes=1))
+    body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert '<meta http-equiv="refresh" content="5">' in body
+    assert 'No worker has picked this up' in body

@@ -20,7 +20,7 @@ from nethub import models, schema
 from nethub.extensions import db
 
 FIXTURES = Path(__file__).parent / "fixtures" / "schemas"
-HEAD = "0006_canary_activation"
+HEAD = "0007_scheduled_approvals"
 
 
 def url(path):
