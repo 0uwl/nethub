@@ -32,16 +32,41 @@ ARTIFACT_STORE = os.getenv('ARTIFACT_STORE', os.path.join(basedir, 'instance', '
 # table with an append-only audit; alpha has neither, so they are env vars and
 # this is the honest stand-in rather than a stand-in for one.
 
-# Comma-separated CIDRs a submitted target address must fall inside. One of
-# the two constraints on `ansible_host`, the only connection var a request may
-# supply (design doc §4.3/§8.1); the other is the fail-closed host-key check.
-# Empty means no run may be submitted -- fail closed rather than open.
 # The sibling's public key (PLAN.md WS-7, nethub/sealed_credentials.py). Flask
 # seals device credentials to it; the sibling checks its private key matches
 # it before taking work. Public, so an environment variable is fine; both
 # units set it. create_app() refuses to start without it.
 NETHUB_CREDENTIAL_PUBLIC_KEY = os.getenv('NETHUB_CREDENTIAL_PUBLIC_KEY')
 
+# Comma-separated CIDRs a submitted target address must fall inside. One of
+# the two constraints on `ansible_host`, the only connection var a request may
+# supply (design doc §4.3/§8.1); the other is the fail-closed host-key check.
+# Empty means no run may be submitted -- fail closed rather than open.
 DEVICE_TARGET_CIDRS = [
     c.strip() for c in os.getenv('DEVICE_TARGET_CIDRS', '').split(',') if c.strip()
 ]
+
+#: Hosts a phase runs at once (PLAN.md decision 6).
+DEFAULT_PHASE_CONCURRENCY = 4
+
+
+def phase_concurrency(value: str | None) -> int:
+    """`PHASE_CONCURRENCY`, or refuse to start. Unset means the default."""
+    if value is None or not value.strip():
+        return DEFAULT_PHASE_CONCURRENCY
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise SystemExit(f'PHASE_CONCURRENCY must be a whole number of at least 1, '
+                         f'not {value!r}')
+    return number
+
+
+# How many hosts the sibling runs a phase on at once, and the most devices an
+# activate approval may reload together after its canary (PLAN.md WS-15). Here
+# rather than in the sibling alone because the web process shows it as that
+# cap on the approve form, so both units set it, to the same value. Both
+# processes refuse to start on anything but a whole number of at least 1.
+PHASE_CONCURRENCY = phase_concurrency(os.getenv('PHASE_CONCURRENCY'))

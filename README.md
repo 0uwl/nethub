@@ -133,13 +133,23 @@ Once you're logged in as an admin:
    device password again for that one phase. It is stored only encrypted,
    sealed to a key only the dispatch process holds, and only until that
    phase starts; never in the clear in a row, a log, or the session.
-   Activate reloads the device; verify runs after it comes back, on the
-   password the activate approval supplied.
+   Activate reloads the devices; verify runs after they come back, on the
+   password the activate approval supplied. The **first host you listed is
+   the canary**: it is reloaded alone and checked for the new version before
+   any other device starts, so list a representative one, and put stacks
+   and standalone switches in separate runs. After it, the approve form lets
+   you reload several devices at a time (default one, at most
+   `PHASE_CONCURRENCY`). NetHub does not know which devices back each other
+   up, so don't reload both halves of a redundant pair at once.
    A host that fails a phase does not stop the others: the run carries on
    with the hosts that passed, and the next gate offers to **retry** the
-   failed ones (collecting your password again). If your password is
-   refused, the phase stops at that host instead of trying it on every
-   device, so a typo cannot lock your account out.
+   failed ones (collecting your password again). What does stop a phase is
+   a refused password (tried on one device, not all of them, so a typo
+   cannot lock your account out), an error in NetHub itself, a canary that
+   fails, or an image missing from or altered in NetHub's store (checked
+   before anything is copied). The run then comes back to the same gate
+   with nothing marked failed that wasn't the device's fault: approve it
+   again, with the right password, to carry on.
 6. `flask --app nethub check-store` re-hashes every published image against
    what is on disk and flags a missing file or a digest that no longer
    matches. It is a command rather than a page, because it hashes

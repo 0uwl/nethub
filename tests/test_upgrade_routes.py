@@ -1001,3 +1001,87 @@ class TestSubmitRacingADelete:
             with pytest.raises(upgrades.RequestError, match='No published image'):
                 submit(user)
             assert UpgradeRun.query.count() == 0
+
+
+class TestReloadCount:
+    """PLAN.md WS-15: the request's order reaches the rows (the first host is
+    the activate canary), and an activate approval chooses how many devices
+    reload at once after it, recorded on the job and capped."""
+
+    @staticmethod
+    def pins(user, *addresses):
+        for address in addresses:
+            db.session.add(DeviceHostKey(
+                ansible_host=address, key_type="ssh-rsa", fingerprint_sha256="SHA256:x",
+                confirmed_by=user, confirmed_at=NOW))
+        db.session.commit()
+
+    def test_hosts_keep_the_order_they_were_listed_in(self, app, user):
+        with app.app_context():
+            self.pins(user, "192.0.2.10", "192.0.2.11", "192.0.2.12")
+            run, _ = submit(user, hosts="sw09, 192.0.2.12\nsw01, 192.0.2.10\nsw05, 192.0.2.11")
+            assert [(h.hostname, h.position) for h in run.hosts] == [
+                ("sw09", 0), ("sw01", 1), ("sw05", 2)]
+
+    def test_an_activate_approval_records_its_count(self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "activate")
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          concurrency="3", cap=4)
+            assert job.concurrency == 3
+
+    def test_the_default_is_one_at_a_time(self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "activate")
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          concurrency="", cap=4)
+            assert job.concurrency == 1
+
+    @pytest.mark.parametrize("raw", ["0", "5", "two", "-1", "1.5"])
+    def test_a_count_outside_one_to_the_cap_is_refused(self, app, user, confirmed, raw):
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "activate")
+            with pytest.raises(upgrades.RequestError, match="from 1 to 4"):
+                approve(run=run, phase="activate", user=db.session.get(User, user),
+                        concurrency=raw, cap=4)
+            assert UpgradePhaseJob.query.filter_by(phase="activate").count() == 0
+            assert run.state == "awaiting_approval", "a refusal leaves the gate as it was"
+
+    def test_only_activate_takes_a_count(self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "stage")
+            job = approve(run=run, phase="stage", user=db.session.get(User, user),
+                          concurrency="3", cap=4)
+            assert job.concurrency is None
+
+    def test_a_retry_of_activate_records_its_count(self, app, user, confirmed):
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "cleanup")
+            host = run.hosts[0]
+            host.state, host.last_phase = "failed", "activate"
+            db.session.commit()
+            job = upgrades.retry(run=run, phase="activate", user=db.session.get(User, user),
+                                 password=PASSWORD,
+                                 public_key=current_app.extensions["credential_public_key"],
+                                 concurrency="2", cap=4)
+            assert (job.is_retry, job.concurrency) == (True, 2)
+
+    def test_the_route_caps_at_phase_concurrency(self, app, client, user, confirmed):
+        app.config["PHASE_CONCURRENCY"] = 2
+        client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
+        with app.app_context():
+            run, _ = submit(user)
+            at_gate(run, "activate")
+            run_id = run.id
+        form = {"phase": "activate", "device_password": PASSWORD, "confirm": "yes"}
+        page = client.post(f"/upgrades/{run_id}/approve", data={**form, "concurrency": "3"},
+                           follow_redirects=True).get_data(as_text=True)
+        assert "from 1 to 2" in page
+        client.post(f"/upgrades/{run_id}/approve", data={**form, "concurrency": "2"})
+        with app.app_context():
+            assert UpgradePhaseJob.query.filter_by(phase="activate").one().concurrency == 2

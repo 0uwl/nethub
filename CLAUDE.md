@@ -161,8 +161,9 @@ python -m nethub.sibling           # the dispatcher; needs NETHUB_SEARCH_DIR, it
                                     # Flask process. NOTHING IS DISPATCHED WITHOUT IT:
                                     # scans and phase jobs sit at `queued` forever, with no
                                     # staleness story -- sweep() only reclaims `running`.
-                                    # Optional PHASE_CONCURRENCY (default 4): hosts per phase
-                                    # at once; activate is always one.
+                                    # PHASE_CONCURRENCY (default 4, set in both units): hosts
+                                    # per phase at once, and the most devices an activate
+                                    # approval may reload together after its canary.
 
 python -m nethub.upgrade_cli --scan <host>          # the manual escape hatch: print a
 python -m nethub.upgrade_cli --host <host> --user <name> \
@@ -477,7 +478,7 @@ Environment variables the unit (or a plain `podman run`) can set:
 | `ARTIFACT_STORE` | `<repo root>/instance/artifacts` | Where NetHub keeps the image bytes it was given, and what `Artifact.storage_path` points inside. NetHub owns it (§3.3), unlike the `REGISTRIES_ROOT` it replaced at build step 7. One flat directory: the SCP push addresses it by filename. Usually a large mounted volume. |
 | `NETHUB_CREDENTIAL_PUBLIC_KEY` | none — required (both units) | The sibling's public key, base64. Flask seals device credentials to it (`nethub/sealed_credentials.py`), and `create_app()` refuses to start without a valid one, before migrating. The sibling checks its private key matches it and refuses to start otherwise. Public, so an env var is fine. Printed by `python -m nethub.sealed_credentials keygen`. |
 | `NETHUB_CREDENTIAL_KEY_FILE` | none (sibling unit only) | Path to the sibling's private key file, mounted read-only into the sibling container only. A systemd credential named `credential_private_key` takes priority. Never the key itself in an env var: `/proc/<pid>/environ` is readable and every child inherits it. |
-| `PHASE_CONCURRENCY` | `4` (sibling unit only) | Hosts pre-check, stage, verify and cleanup run at once. Activate always runs one (`phases.SERIAL_PHASES`). The sibling refuses to start on anything but a whole number ≥ 1. Stage is device-bound at ~1.4 MB/s per switch, so the cap protects NetHub's link to a narrow-link site rather than NetHub itself. |
+| `PHASE_CONCURRENCY` | `4` (both units, same value) | Hosts pre-check, stage, verify and cleanup run at once, and the cap on how many devices an activate approval may reload together after its canary (the approver chooses, default 1; see "Canary activation"). In `shared_config.py` since WS-15 because the web unit shows it as that cap. Both processes refuse to start on anything but a whole number ≥ 1. Stage is device-bound at ~1.4 MB/s per switch, so the cap protects NetHub's link to a narrow-link site rather than NetHub itself. |
 | `DEVICE_TARGET_CIDRS` | none — empty refuses every submit | Comma-separated CIDRs a submitted target address must fall inside. Fail-closed: an unset security setting is not "allow all". |
 | `SESSION_COOKIE_INSECURE` | unset — cookie is `Secure` | Local HTTP dev only. `config.py` sets `SESSION_COOKIE_SECURE` on by default, plus `SameSite=Strict` (§4.5: a cross-site "approve: reload" is a fleet outage) and an explicit `HttpOnly`. Set to `1` to serve over plain HTTP locally — `dev.sh` does. `PERMANENT_SESSION_LIFETIME` (12h) works *because* `auth.py` sets `session.permanent` at login; the two halves landed on separate branches and neither is effective alone, so removing that line turns the lifetime back into dead configuration with no error. Verified live: a real login emits `Expires=` ~12h out. |
 | `MAX_CONTENT_LENGTH` | `1_500 * 1024 * 1024` | Upload size cap, bytes. An oversize request gets a real `413` page (`nethub/__init__.py`'s `too_large_error`) stating the configured limit, not Werkzeug's bare default (WS-5.6). |
@@ -1372,10 +1373,11 @@ nothing more. There is a test that raises a
 
 **Hosts run in parallel within a phase; phases do not (PLAN.md WS-9).**
 `phases.execute_phase` hands hosts to a `ThreadPoolExecutor` of
-`PHASE_CONCURRENCY` workers (sibling env var, default 4, `Sibling.phase_concurrency`);
-activate is in `phases.SERIAL_PHASES` and gets one worker, through the same
-code. The sibling still runs one phase execution at a time. What keeps this
-safe, each pinned by a test in `tests/test_phases.py`:
+`PHASE_CONCURRENCY` workers (`shared_config`, default 4, `Sibling.phase_concurrency`);
+activate runs its canary alone and then the approver's count, through the
+same code (see "Canary activation" below). The sibling still runs one phase
+execution at a time. What keeps this safe, each pinned by a test in
+`tests/test_phases.py`:
 
 - **Workers do device I/O only and never touch `db.session`.** They have no
   app context, and an ORM object read after a commit reloads itself. The
@@ -1418,9 +1420,10 @@ green over inert machinery. The budgets are derived from the hardware timings
 in "Device layer" times a safety factor of 2, and they are a first cut from
 *single-device* measurements: re-derive them from a real multi-host wave when
 there is one rather than trusting the arithmetic. They still assume hosts run
-one at a time, which is exact for activate and loose by up to the concurrency
-for the rest, on purpose: dividing by `PHASE_CONCURRENCY` would tie a deadline
-Flask writes at submit to a sibling setting that can change before the job runs.
+one at a time, which is exact for an activate at the default reload count and
+loose by up to the concurrency otherwise, on purpose: dividing by
+`PHASE_CONCURRENCY` would tie a deadline Flask writes at submit to a sibling
+setting that can change before the job runs.
 
 **`phase_activate` owns the reconnect**, not `phase_verify`: a device that
 never returns is a `reload` failure, a different `failure_stage` and a
@@ -1478,16 +1481,87 @@ Four things hold this together:
   gate. A chained `verify` after a retried activate takes the next attempt
   number, and is skipped when nothing was activated.
 - **A refused credential stops the phase.** The first `failure_stage:
-  credential` ends the wave, and the hosts it did not reach get a
-  `not_attempted` row and `failed`, so they are retryable. Every host gets
-  the same password, so going on would only add failed logins toward the
-  AAA server's lockout. Don't make the loop continue past it, and don't let
-  hosts in flight log in around it: that is `LoginGate`'s job (see above).
+  credential` ends the wave. Every host gets the same password, so going on
+  would only add failed logins toward the AAA server's lockout. Don't make
+  the loop continue past it, and don't let hosts in flight log in around it:
+  that is `LoginGate`'s job (see above). Since WS-15 what happens to the
+  hosts it did not reach depends on the phase: see "Canary activation and
+  what stops a wave".
 - **Attempt numbers are `1 + max`**, not `1 + count(abandoned)`, so an
   abandoned attempt and a retry share one rule, and `UNIQUE(run_id, phase,
   attempt)` still holds. An abandoned retry of `precheck` or `verify`, which
   nobody approves, goes back to the gate it was made from
   (`Sibling._return_to_gate`) rather than failing the run.
+
+**Canary activation and what stops a wave (PLAN.md WS-15, decisions 6 and
+13).** Activate no longer runs one host at a time by rule. What is
+load-bearing:
+
+- **The canary is the first eligible host in request order.**
+  `upgrade_run_hosts.position` (migration 0006, NOT NULL,
+  `UNIQUE(run_id, position)`) is the host's line in the request, set by
+  `upgrades.submit`, and `UpgradeRun.hosts` is ordered by it, so
+  `eligible_hosts()` is in request order. Never derive the canary from
+  hostname order or from `request_document`: phases read rows. Existing
+  hosts were numbered by `rowid`, which is insertion order. Every test that
+  builds an `UpgradeRunHost` by hand must give it a `position`.
+- **With more than one eligible host the canary runs alone, and is checked
+  before anything else starts:** `run_host(..., canary=True)` runs activate,
+  then `_check_canary` opens a fresh session and runs `PHASE_RUNNERS['verify']`
+  on it (the reload took activate's own). Only when that passes do the rest
+  start, `min(job.concurrency or 1, PHASE_CONCURRENCY)` at a time. One host
+  gets no canary check; `verify` still checks every host afterwards,
+  canary included. A retried activate uses a canary too. Tests that patch
+  the activate runner with more than one host must patch `verify` as well.
+- **The approver chooses the reload count; the deployment caps it.**
+  `upgrade_phase_jobs.concurrency` (CHECK `>= 1`, null on every phase but
+  activate) is written at approval or retry of activate by
+  `upgrades.reload_count` (blank means 1; outside 1..`PHASE_CONCURRENCY` is
+  a refusal), so the audit trail shows who chose to reload several at once.
+  The sibling caps it again, since the setting can be lowered before the
+  job runs. The form (`partials/reload_count.html`) names the canary and
+  carries the four warnings from the plan; don't drop them to tidy the
+  page, they are what makes a parallel reload the operator's informed
+  choice rather than NetHub's.
+- **A wave stops on NetHub's own faults and on a failed canary, nothing
+  else.** `phases.STOPPING_STAGES` is `credential` and `internal`: both
+  repeat on every host. A canary that fails for any reason stops it too,
+  and so does `store`: before a stage hands out any host, the main thread
+  hashes the image under `search_dir` against the hosts' snapshotted digest
+  (`phases.check_source`, seconds for 1.2 GB), so a missing or altered file
+  is one clear message instead of every host failing `transfer`/`checksum`
+  after a 15-minute push. Every other `failure_stage` fails its host alone.
+- **`failure_stage_for` falls back to `internal`, not `connect`.** Only the
+  SSH and network libraries' exceptions (`NetmikoBaseException`,
+  `paramiko.SSHException`, `OSError`, and `EOFError`, which paramiko raises
+  when the transport closes under a read) are `connect`; a raw
+  `paramiko.AuthenticationException` is `credential`. Anything else is a bug
+  in our code, which runs on every host, so it stops the wave. Adding a
+  broad `except` that maps to a device stage would undo that.
+- **A stopped phase with a gate of its own returns to it rather than
+  failing hosts.** For stage, activate or cleanup on its first attempt
+  (`keep_cursor`), `record_kept` writes the result row and leaves the
+  cursor alone for every host not reached (a `not_attempted` row carrying
+  the stop's `failure_stage`) and for the host whose credential was
+  refused or that hit `internal`; a failed canary is marked `failed`, its
+  fault being its own. `execute_phase` returns a `PhaseResult(status,
+  stopped_by)`, and `Sibling._advance_run` sends such a run back to the
+  same gate with a fresh `gate_expires_at`. Approving again runs the hosts
+  still eligible; a re-approved activate picks a new canary. That is what
+  closed the "mistyped password fails the run" item, and what WS-14's
+  scheduled approvals rely on. Pre-check and `verify` have no gate of their
+  own and a retry came from another gate, so there the hosts not reached
+  are failed (retryable), as before. Don't mark kept hosts `failed`: that
+  brings the run-killing typo back. Hosts an activate reloaded before it
+  stopped sit at `activated` until the `verify` after the next activate.
+- **`record()` now clears a host's `error_summary` when it passes**, so a
+  "not attempted" note from a stopped attempt does not outlive the attempt
+  that succeeded.
+- **`check_source` is a module-level hook so tests with a fake store can
+  replace it.** `tests/test_phases.py` and `tests/test_sibling.py` stub it
+  with an autouse fixture (their digests are made up); `TestSourceCheck`
+  tests the real one, and the end-to-end test stages real ingested bytes
+  through it.
 
 **A credential failure is finished in `run_once`, never left to the loop.**
 The claim has already committed `running` under this instance's own

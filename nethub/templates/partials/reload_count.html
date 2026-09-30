@@ -1,0 +1,31 @@
+{#
+  PLAN.md WS-15. The activate approve and retry forms: which host is the
+  canary, how many devices reload at once after it (recorded on the job, and
+  capped by PHASE_CONCURRENCY in the sibling as well as here), and what NetHub
+  cannot know on the approver's behalf.
+#}
+{% macro reload_count(field_id, names, cap) -%}
+{% if names|length > 1 %}
+<p><strong>{{ names[0] }}</strong> is upgraded alone first, as the canary: it is
+reloaded and checked for the target version before any other device starts. If
+it fails, nothing else is reloaded and the run comes back to this gate.</p>
+{% endif %}
+<label for="{{ field_id }}">Devices to reload at a time after the first</label>
+<input type="number" id="{{ field_id }}" name="concurrency" min="1" max="{{ cap }}"
+       value="1" required aria-describedby="{{ field_id }}_help">
+<small id="{{ field_id }}_help">From 1 to {{ cap }} (this deployment's
+<code>PHASE_CONCURRENCY</code>).</small>
+<div class="warning">
+  <ul>
+    <li>The first host listed is the canary. List a representative one, and put
+    mixed hardware (stacks and standalone switches) in separate runs: the canary
+    only speaks for devices like itself.</li>
+    <li>NetHub does not know which devices back each other up. Reloading both
+    halves of a redundant pair at once drops service.</li>
+    <li>Cancel stops further reloads from starting, not ones already in
+    progress.</li>
+    <li>After the canary, a device that fails its reload does not stop the
+    others.</li>
+  </ul>
+</div>
+{%- endmacro %}

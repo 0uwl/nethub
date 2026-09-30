@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_
 
+from nethub import shared_config
 from nethub.devices import connection, install, phases
 from nethub.extensions import db
 from nethub.models import (
@@ -50,8 +51,10 @@ NEXT_PHASE = {
 DEFAULT_GATE_TTL = timedelta(days=7)
 
 #: Hosts a phase runs at once unless `PHASE_CONCURRENCY` says otherwise
-#: (PLAN.md decision 6).
-DEFAULT_PHASE_CONCURRENCY = 4
+#: (PLAN.md decision 6). The setting lives in `shared_config`, because the
+#: web process shows it as the cap on an activate approval (WS-15).
+DEFAULT_PHASE_CONCURRENCY = shared_config.DEFAULT_PHASE_CONCURRENCY
+phase_concurrency = shared_config.phase_concurrency
 
 log = logging.getLogger('nethub.sibling')
 
@@ -88,8 +91,8 @@ class Sibling:
     #: Handed to every `PhaseContext`; None means `phases.default_connect`.
     #: Only the end-to-end test sets it, to put a fake device behind a real run.
     connect: Callable | None = None
-    #: Hosts a phase runs at once (PLAN.md WS-9). Activate ignores it and runs
-    #: one at a time (`phases.SERIAL_PHASES`). `main()` reads it from
+    #: Hosts a phase runs at once (PLAN.md WS-9), and the cap on the reload
+    #: count an activate approval chose (WS-15). `main()` reads it from
     #: `PHASE_CONCURRENCY`.
     phase_concurrency: int = DEFAULT_PHASE_CONCURRENCY
     #: How often a running phase writes its heartbeat and runs queued scans.
@@ -483,13 +486,13 @@ class Sibling:
         )
         try:
             while True:
-                status = phases.execute_phase(
+                result = phases.execute_phase(
                     job, ctx, now=self.now, concurrency=self.phase_concurrency,
                     tick_interval=self.heartbeat_interval, on_tick=self._between_hosts)
-                following = self._advance_run(job, status)
+                following = self._advance_run(job, result)
                 db.session.commit()
                 if following is None:
-                    return status
+                    return result.status
                 # Go through the same checks and the same conditional claim as
                 # a job taken off the queue, so a cancel that landed during
                 # activate still stops verify.
@@ -497,7 +500,7 @@ class Sibling:
                 if stopped is not None:
                     return stopped
                 if not self.claim(following.id):
-                    return status
+                    return result.status
                 job = following
         finally:
             # The credential is bound to the approval's executions and nothing
@@ -549,11 +552,20 @@ class Sibling:
         run.gate_expires_at = None
         run.finished_at = self.now()
 
-    def _advance_run(self, job: UpgradePhaseJob, status: str) -> UpgradePhaseJob | None:
-        """Move the run on after `job` ended with `status`.
+    def _advance_run(self, job: UpgradePhaseJob,
+                     result: phases.PhaseResult) -> UpgradePhaseJob | None:
+        """Move the run on after `job` ended as `result` says.
 
         Returns the job queued for a phase with no gate, which the caller runs
         on the same credential (see `run_once`); None otherwise.
+
+        A phase with a gate of its own that stopped on its first attempt goes
+        back to that gate (PLAN.md WS-15, decision 13): a refused password, a
+        fault in NetHub's code, a failed canary or a bad image in the store
+        left the hosts it did not reach where they were, so approving the gate
+        again runs them. That is what keeps a mistyped password from failing
+        the run. Hosts that activated before an activate stopped wait for the
+        `verify` that follows the next activate.
 
         A `partial` phase moves the run on with the hosts that passed (PLAN.md
         WS-8). So does a `failed` one while hosts that passed earlier phases
@@ -563,8 +575,15 @@ class Sibling:
         in the run has failed, and the run fails.
         """
         run = job.run
+        status = result.status
         if status == 'cancelled':
             run.state, run.finished_at = 'cancelled', self.now()
+            return None
+        if (result.stopped_by is not None and job.phase in APPROVABLE
+                and not job.is_retry):
+            run.state = 'awaiting_approval'
+            run.awaiting_phase = job.phase
+            run.gate_expires_at = self.now() + self.gate_ttl
             return None
         carries_on = status in ('succeeded', 'partial') or (
             status == 'failed' and any(h.state not in ('failed', 'skipped') for h in run.hosts)
@@ -630,20 +649,6 @@ def _database_app():
     return app
 
 
-def phase_concurrency(value: str | None) -> int:
-    """`PHASE_CONCURRENCY`, or refuse to start. Unset means the default."""
-    if value is None or not value.strip():
-        return DEFAULT_PHASE_CONCURRENCY
-    try:
-        number = int(value)
-    except ValueError:
-        number = 0
-    if number < 1:
-        raise SystemExit(f'PHASE_CONCURRENCY must be a whole number of at least 1, '
-                         f'not {value!r}')
-    return number
-
-
 def main(poll_interval: float = 5.0) -> None:
     """Wait for the schema, sweep once, then work the queue until killed.
 
@@ -681,7 +686,7 @@ def main(poll_interval: float = 5.0) -> None:
     from . import schema
 
     worker = Sibling(private_key=private_key, search_dir=search_dir,
-                     phase_concurrency=phase_concurrency(os.environ.get('PHASE_CONCURRENCY')))
+                     phase_concurrency=shared_config.PHASE_CONCURRENCY)
     app = _database_app()
     schema.wait_for_current_schema(app.config['SQLALCHEMY_DATABASE_URI'])
     with app.app_context():

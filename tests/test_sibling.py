@@ -63,13 +63,20 @@ def run(app):
         db.session.add(run)
         db.session.commit()
         db.session.add(UpgradeRunHost(
-            run_id=run.id, hostname="sw01", ansible_host="192.0.2.10",
+            run_id=run.id, hostname="sw01", position=0, ansible_host="192.0.2.10",
             filename="img.bin", sha512=DIGEST, version="17.12.06", file_size=1000))
         db.session.add(DeviceHostKey(
             ansible_host="192.0.2.10", key_type="ssh-rsa",
             fingerprint_sha256="SHA256:x", confirmed_by=user.id, confirmed_at=NOW))
         db.session.commit()
         yield run.id
+
+
+@pytest.fixture(autouse=True)
+def store_is_intact(monkeypatch):
+    """The runs here use a made-up digest under /images, so the stage's source
+    check (PLAN.md WS-15) is taken as passing; test_phases tests it."""
+    monkeypatch.setattr(phases, "check_source", lambda hosts, search_dir: None)
 
 
 def make_sibling(**kw):
@@ -265,7 +272,7 @@ class TestPerHostContinuation:
         """sw02 beside the fixture's sw01, pinned like it."""
         run = db.session.get(UpgradeRun, run_id)
         db.session.add(UpgradeRunHost(
-            run_id=run_id, hostname="sw02", ansible_host="192.0.2.11",
+            run_id=run_id, hostname="sw02", position=1, ansible_host="192.0.2.11",
             filename="img.bin", sha512=DIGEST, version="17.12.06", file_size=1000,
             state=state))
         db.session.add(DeviceHostKey(
@@ -324,7 +331,12 @@ class TestPerHostContinuation:
             seen = []
             self.runner(monkeypatch, "verify", seen=seen)
             make_sibling().run_once()
-            assert seen == ["sw01"]
+            # sw01 is activate's canary, so the verify runner checks it once
+            # there and once in the verify phase; sw02 never reaches verify.
+            assert seen == ["sw01", "sw01"]
+            verified = {r.hostname for r in UpgradeHostPhaseResult.query.filter_by(
+                phase="verify")}
+            assert verified == {"sw01"}
             row = db.session.get(UpgradeRun, run)
             assert (row.state, row.awaiting_phase) == ("awaiting_approval", "cleanup")
 
@@ -455,13 +467,16 @@ class TestPerHostContinuation:
 
 class TestCredentialFailureStopsTheWave:
     """A refused password is refused on every host, and each attempt counts
-    toward the AAA server's lockout (PLAN.md "Found while working", WS-8)."""
+    toward the AAA server's lockout (PLAN.md "Found while working", WS-8).
+    Since WS-15 the stopped phase goes back to its gate instead of failing
+    the hosts it did not reach."""
 
     def three_hosts(self, run_id):
         run = db.session.get(UpgradeRun, run_id)
-        for name, address in (("sw02", "192.0.2.11"), ("sw03", "192.0.2.12")):
+        for position, (name, address) in enumerate((("sw02", "192.0.2.11"),
+                                                    ("sw03", "192.0.2.12")), start=1):
             db.session.add(UpgradeRunHost(
-                run_id=run_id, hostname=name, ansible_host=address,
+                run_id=run_id, hostname=name, position=position, ansible_host=address,
                 filename="img.bin", sha512=DIGEST, version="17.12.06", file_size=1000))
             db.session.add(DeviceHostKey(
                 ansible_host=address, key_type="ssh-rsa", fingerprint_sha256="SHA256:y",
@@ -490,8 +505,14 @@ class TestCredentialFailureStopsTheWave:
             rows = {r.hostname: (r.status, r.failure_stage)
                     for r in UpgradeHostPhaseResult.query}
             assert rows["sw02"] == rows["sw03"] == ("not_attempted", "credential")
-            assert "stopped after the credential was refused on sw01" in (
-                db.session.get(UpgradeRun, run).hosts[2].error_summary)
+            row = db.session.get(UpgradeRun, run)
+            assert "not attempted: the credential was refused on sw01" in (
+                row.hosts[2].error_summary)
+            # The mistyped-password item in PLAN.md's "Found while working":
+            # the run waits at the same gate rather than failing.
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "stage")
+            assert row.gate_expires_at is not None
+            assert {h.state for h in row.hosts} == {"precheck_ok"}
 
     def test_hosts_before_the_refusal_keep_their_progress(self, app, run, monkeypatch):
         with app.app_context():
@@ -504,10 +525,13 @@ class TestCredentialFailureStopsTheWave:
             assert logins == ["sw01", "sw02"]
             states = {h.hostname: (h.state, h.last_phase)
                       for h in db.session.get(UpgradeRun, run).hosts}
-            assert states == {"sw01": ("staged", "stage"), "sw02": ("failed", "stage"),
-                              "sw03": ("failed", "stage")}
+            # sw02's password was refused and sw03 was never tried: neither
+            # moves, so approving the stage gate again runs exactly those two.
+            assert states == {"sw01": ("staged", "stage"), "sw02": ("precheck_ok", None),
+                              "sw03": ("precheck_ok", None)}
             row = db.session.get(UpgradeRun, run)
-            assert upgrades.retryable_phases(row) == [("stage", ["sw02", "sw03"])]
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "stage")
+            assert upgrades.retryable_phases(row) == []
 
     def test_other_failures_do_not_stop_the_phase(self, app, run, monkeypatch):
         with app.app_context():
@@ -1034,7 +1058,7 @@ class TestPhaseConcurrencySetting:
             seen.update(kw)
             job.status = "succeeded"
             db.session.commit()
-            return "succeeded"
+            return phases.PhaseResult("succeeded")
 
         monkeypatch.setattr(phases, "execute_phase", execute_phase)
         with app.app_context():
@@ -1255,3 +1279,88 @@ class TestNoSecretKey:
         result = self.run("from nethub import create_app; create_app()", tmp_path)
         assert result.returncode != 0
         assert "SECRET_KEY" in result.stderr
+
+
+class TestStoppedPhaseReturnsToItsGate:
+    """PLAN.md WS-15, decision 13: a phase with a gate of its own that stopped
+    goes back to that gate, with the hosts it did not reach where they were."""
+
+    add_hosts = TestCredentialFailureStopsTheWave.three_hosts
+    connect_refusing = TestCredentialFailureStopsTheWave.connect_refusing
+
+    @staticmethod
+    def approve(run_id, phase, attempt, **kw):
+        row = db.session.get(UpgradeRun, run_id)
+        row.state, row.awaiting_phase = "running", None
+        return queue(run_id, phase, attempt=attempt, approved_by=row.submitted_by,
+                     approved_at=NOW, **kw)
+
+    @staticmethod
+    def activate(monkeypatch, fail=(), started=None, checked=None):
+        def run(conn, host, ctx):
+            started.append(host.hostname)
+            if host.hostname in fail:
+                raise install.ReloadTimeout("never came back", status="reload_timeout")
+            return phases.HostOutcome(host.hostname, "activated")
+
+        def check(conn, host, ctx):
+            checked.append(host.hostname)
+            return phases.HostOutcome(host.hostname, "verified")
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", run)
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "verify", check)
+
+    def test_a_failed_canary_goes_back_to_the_gate_and_the_next_host_is_the_canary(
+            self, app, run, monkeypatch):
+        with app.app_context():
+            self.add_hosts(run)
+            job = queue(run, "activate", concurrency=2)
+            started, checked = [], []
+            self.activate(monkeypatch, fail={"sw01"}, started=started, checked=checked)
+            assert make_sibling().run_once() == "failed"
+            assert started == ["sw01"]
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "activate")
+            assert [h.state for h in row.hosts] == ["failed", "staged", "staged"]
+            assert db.session.get(UpgradePhaseJob, job.id).concurrency == 2
+
+            started.clear()
+            checked.clear()
+            self.approve(run, "activate", attempt=2, concurrency=2)
+            make_sibling().run_once()
+            assert started[0] == "sw02", "the first host still staged is the new canary"
+            assert checked[0] == "sw02", "and it is checked before the rest go"
+            row = db.session.get(UpgradeRun, run)
+            assert [h.state for h in row.hosts] == ["failed", "verified", "verified"]
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "cleanup")
+
+    def test_a_bad_store_goes_back_to_the_stage_gate(self, app, run, monkeypatch):
+        with app.app_context():
+            self.add_hosts(run)
+            queue(run, "stage")
+            monkeypatch.setattr(phases, "check_source",
+                                lambda hosts, search_dir: "img.bin is missing")
+            assert make_sibling().run_once() == "failed"
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "stage")
+            assert {h.state for h in row.hosts} == {"precheck_ok"}
+
+    def test_a_stopped_retry_goes_back_to_the_gate_it_came_from(self, app, run, monkeypatch):
+        """A retry of stage is made at the activate gate. Stopped by a refused
+        password, its hosts are failed again (retryable as before) and the run
+        is back at the activate gate, not at stage's."""
+        with app.app_context():
+            self.add_hosts(run)
+            for host in db.session.get(UpgradeRun, run).hosts:
+                host.state, host.last_phase = (
+                    ("staged", "stage") if host.hostname == "sw01" else ("failed", "stage"))
+            db.session.commit()
+            self.approve(run, "stage", attempt=2, is_retry=True)
+            logins = []
+            self.connect_refusing(monkeypatch, {"sw02", "sw03"}, logins)
+            succeed(monkeypatch, "stage")
+            make_sibling().run_once()
+            assert logins == ["sw02"]
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "activate")
+            assert [h.state for h in row.hosts] == ["staged", "failed", "failed"]
+            assert upgrades.retryable_phases(row) == [("stage", ["sw02", "sw03"])]

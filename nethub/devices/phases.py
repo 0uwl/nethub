@@ -24,15 +24,21 @@ slip past.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
+
+import paramiko
+from netmiko.exceptions import NetmikoBaseException
 
 from nethub.devices import connection, facts, install, transfer
 from nethub.extensions import db
 from nethub.models import (
+    APPROVABLE,
     STATE_BEFORE,
     DeviceHostKey,
     UpgradeHostPhaseResult,
@@ -51,10 +57,13 @@ _STATE_AFTER = {
     'cleanup': 'verified',
 }
 
-#: Phases that run one host at a time whatever `concurrency` says. Activate
-#: reloads switches; a fleet is not reloaded four at a time (PLAN.md
-#: decision 6). It still goes through the same driver as the others.
-SERIAL_PHASES = frozenset({'activate'})
+#: Faults that stop a wave (PLAN.md decision 13). Both are NetHub's side, not
+#: the device's, so they would repeat on every host: the same refused password
+#: goes to each of them (and enough refusals lock the account out of
+#: TACACS+/RADIUS for the whole fleet), and the same bug in our code runs on
+#: each of them. Every other `failure_stage` is one device's own failure and
+#: fails that host alone. A failed activate canary stops the wave as well.
+STOPPING_STAGES = frozenset({'credential', 'internal'})
 
 #: Seconds between the driver's ticks while hosts are running: how often it
 #: writes `heartbeat_at`, checks cancel and the deadline, and runs anything
@@ -90,6 +99,29 @@ class HostOutcome:
     @property
     def ok(self) -> bool:
         return self.failure_stage is None
+
+
+@dataclass(frozen=True)
+class PhaseResult:
+    """How an execution ended. `status` is the job's terminal status.
+
+    `stopped_by` is the `failure_stage` that stopped the wave before every
+    eligible host was attempted (`STOPPING_STAGES`, a failed canary's own
+    stage, or `store`), and None when every host was attempted or cancel or
+    the deadline ended it. The sibling returns a run whose gated phase was
+    stopped to that phase's gate (PLAN.md WS-15).
+    """
+
+    status: str
+    stopped_by: str | None = None
+
+
+@dataclass(frozen=True)
+class _Stop:
+    stage: str
+    #: The job's `error_summary`, and the reason each unreached host's
+    #: `not_attempted` row gives.
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -239,7 +271,9 @@ def failure_stage_for(exc: BaseException) -> str:
 
     Ordered most specific first. The point of the mapping living here rather
     than in each device module is that the modules stay usable without the
-    database, and this is the only place that has to know the enum.
+    database, and this is the only place that has to know the enum. The
+    fallback is `internal`, not `connect`: only the SSH and network libraries'
+    exceptions are a device's connection problem.
     """
     if isinstance(exc, (connection.HostKeyError, UnconfirmedHost)):
         return 'hostkey'
@@ -262,7 +296,20 @@ def failure_stage_for(exc: BaseException) -> str:
         return 'privilege' if exc.status == 'privilege' else 'install'
     if isinstance(exc, facts.FactsError):
         return 'precheck'
-    return 'connect'
+    if isinstance(exc, paramiko.AuthenticationException):
+        # Normally wrapped as connection.AuthenticationError above; a raw one
+        # (from a session our code did not open, say) is still a refused
+        # credential, and must stop the wave like one.
+        return 'credential'
+    if isinstance(exc, (NetmikoBaseException, paramiko.SSHException, OSError, EOFError)):
+        # The session or the network: one device's problem. EOFError is what
+        # paramiko raises when the transport closes under a read.
+        return 'connect'
+    # Anything else is a bug in NetHub's own code. It used to fall through to
+    # `connect`, which recorded our bug as a network problem; as `internal` it
+    # also stops the wave (PLAN.md WS-15), since the same code runs on every
+    # host.
+    return 'internal'
 
 
 def _summarise(exc: BaseException) -> str:
@@ -400,13 +447,17 @@ PHASE_RUNNERS: dict[str, Callable] = {
 # --------------------------------------------------------------------------
 
 def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
-             gate: LoginGate | None = None) -> HostOutcome:
+             gate: LoginGate | None = None, *, canary: bool = False) -> HostOutcome:
     """One host, one phase. Turns success or any exception into an outcome.
 
     Runs in a worker thread, so it sees a `HostTarget` and a phase name and
     never the job or the session. Never raises: a host that fails is a row,
     not an aborted execution -- the other hosts in the wave still have to be
     attempted and recorded. The first login waits at `gate` (see `LoginGate`).
+
+    `canary` (activate only) adds the check `verify` would make, on a fresh
+    session once the device is back: the rest of the wave waits on this host
+    being on the target version, not merely on it answering again.
     """
     runner = PHASE_RUNNERS[phase]
     gate = gate if gate is not None else LoginGate()
@@ -414,7 +465,9 @@ def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
     try:
         turn = gate.enter()
         if turn == 'stop':
-            return _not_attempted_outcome(host.hostname, gate.refused_on)
+            return _not_attempted_outcome(
+                host.hostname, f"the credential was refused on {gate.refused_on}",
+                'credential')
         learned = None
         try:
             conn = ctx.open(host)
@@ -427,18 +480,42 @@ def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
             # hosts waiting behind it go on.
             if turn == 'probe':
                 gate.settle(learned, host.hostname)
-        return runner(conn, host, ctx)
+        outcome = runner(conn, host, ctx)
+        if canary and outcome.ok:
+            outcome = _check_canary(host, ctx, outcome)
+        return outcome
     except Exception as exc:  # noqa: BLE001 -- every failure becomes a row
         outcome = _failed_outcome(host.hostname, exc)
         if outcome.failure_stage == 'credential':
             gate.refuse(host.hostname)
         return outcome
     finally:
-        if conn is not None:
-            try:
-                conn.disconnect()
-            except Exception:  # noqa: BLE001, S110 -- a dead session is already gone
-                pass
+        _close(conn)
+
+
+def _check_canary(host: HostTarget, ctx: PhaseContext, activated: HostOutcome) -> HostOutcome:
+    """Run `verify`'s check on the canary, which activate has just reloaded.
+
+    A new session: activate's own went with the reload, and the one it
+    reconnected on is closed by the time it returns. Raises what the check
+    raises; `run_host` turns that into the canary's failure.
+    """
+    conn = ctx.open(host)
+    try:
+        checked = PHASE_RUNNERS['verify'](conn, host, ctx)
+    finally:
+        _close(conn)
+    if not checked.ok:
+        return checked
+    return replace(activated, version_post=checked.version_post)
+
+
+def _close(conn) -> None:
+    if conn is not None:
+        try:
+            conn.disconnect()
+        except Exception:  # noqa: BLE001, S110 -- a dead session is already gone
+            pass
 
 
 def _failed_outcome(hostname: str, exc: BaseException) -> HostOutcome:
@@ -451,22 +528,20 @@ def _failed_outcome(hostname: str, exc: BaseException) -> HostOutcome:
     )
 
 
-def _not_attempted_outcome(hostname: str, after: str | None) -> HostOutcome:
-    """A host the phase stopped before logging in to, failed and retryable."""
+def _not_attempted_outcome(hostname: str, reason: str, stage: str) -> HostOutcome:
+    """A host the phase stopped before trying.
+
+    It carries the `failure_stage` of what stopped the phase: the host did
+    not fail, but that is why it was not tried.
+    """
     return HostOutcome(
-        hostname, 'not_attempted', failure_stage='credential',
-        error_summary=(f"not attempted: the phase stopped after the credential "
-                       f"was refused on {after}"),
+        hostname, 'not_attempted', failure_stage=stage,
+        error_summary=f"not attempted: {reason}",
     )
 
 
-def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
-           started_at: datetime) -> None:
-    """Write the result row and advance the host cursor.
-
-    The result row is the record of what happened; `UpgradeRunHost.state` is a
-    cursor for the dashboard's default view and is derived from it (§5).
-    """
+def _result_row(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
+                started_at: datetime) -> None:
     db.session.add(UpgradeHostPhaseResult(
         run_id=job.run_id,
         hostname=host.hostname,
@@ -479,18 +554,44 @@ def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
         started_at=started_at,
         finished_at=_utcnow(),
     ))
+
+
+def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
+           started_at: datetime) -> None:
+    """Write the result row and advance the host cursor.
+
+    The result row is the record of what happened; `UpgradeRunHost.state` is a
+    cursor for the dashboard's default view and is derived from it (§5).
+    """
+    _result_row(host, job, outcome, started_at)
     host.last_phase = job.phase
     host.state = _STATE_AFTER[job.phase] if outcome.ok else 'failed'
-    if outcome.error_summary:
-        host.error_summary = outcome.error_summary
+    # A host that passes loses the message an earlier stop or failure left:
+    # it is no longer true of it.
+    host.error_summary = outcome.error_summary
     if outcome.version_pre:
         host.reported_version_pre = outcome.version_pre
     if outcome.version_post:
         host.reported_version_post = outcome.version_post
 
 
+def record_kept(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
+                started_at: datetime) -> None:
+    """Write the result row and leave the cursor where it was.
+
+    For a phase that stopped and goes back to its own gate (PLAN.md WS-15):
+    a host it did not reach, or whose credential was refused, or that hit an
+    error in NetHub's code, did nothing wrong, so it is still eligible when
+    the gate is approved again. The message stays on the host so the run page
+    says why it did not move.
+    """
+    _result_row(host, job, outcome, started_at)
+    host.error_summary = outcome.error_summary
+
+
 def eligible_hosts(job: UpgradePhaseJob) -> list[UpgradeRunHost]:
-    """The hosts `job`'s phase runs on: those whose cursor sits just before it.
+    """The hosts `job`'s phase runs on, in request order: those whose cursor
+    sits just before it.
 
     Not "every host that has not failed". A phase re-approved after it was
     abandoned would otherwise run again on hosts it had already finished --
@@ -516,6 +617,41 @@ def reset_for_retry(job: UpgradePhaseJob) -> None:
             host.error_summary = None
 
 
+def check_source(hosts: list[UpgradeRunHost], search_dir: str) -> str | None:
+    """Is each image the stage is about to push in the store, unaltered?
+
+    Returns why not, or None. Hashes the file under `search_dir` against the
+    digest the hosts snapshotted at submit, which takes seconds for a 1.2 GB
+    image. Without it, a missing or altered file failed every host, each only
+    after a transfer of up to 15 minutes, and as `transfer` or `checksum`,
+    which reads as the devices' fault (PLAN.md WS-15). The text is ours
+    alone: nothing from the OS error, since it is kept a year.
+
+    Main thread only. A module-level function, so tests with a fake store can
+    replace it.
+    """
+    for filename, digest in sorted({(h.filename, h.sha512) for h in hosts}):
+        path = Path(search_dir) / filename
+        try:
+            actual = _sha512_file(path)
+        except OSError:
+            return (f"{filename} is missing from the artifact store, or cannot be "
+                    f"read; run `flask --app nethub check-store` on the NetHub host")
+        if actual != transfer._normalise_digest(digest):
+            return (f"{filename} in the artifact store no longer matches its "
+                    f"recorded SHA-512; run `flask --app nethub check-store` on "
+                    f"the NetHub host")
+    return None
+
+
+def _sha512_file(path: Path) -> str:
+    digest = hashlib.sha512()
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _stop_reason(job: UpgradePhaseJob, now: Callable[[], datetime]) -> str | None:
     """Why no further host may start, or None. Main thread only: it reads the
     run, and it is what Flask's cancel reaches through."""
@@ -527,53 +663,109 @@ def _stop_reason(job: UpgradePhaseJob, now: Callable[[], datetime]) -> str | Non
     return None
 
 
+def _stop_for(outcome: HostOutcome, host: UpgradeRunHost, gate: LoginGate,
+              canary: bool) -> _Stop | None:
+    """Does this outcome stop the wave? Decision 13: a NetHub-side fault does,
+    and so does a canary that failed for any reason."""
+    stage = outcome.failure_stage
+    if stage == 'credential':
+        return _Stop('credential',
+                     f"the credential was refused on {gate.refused_on or host.hostname}")
+    if stage == 'internal':
+        return _Stop('internal', f"an error in NetHub's own code on {host.hostname}")
+    if canary and stage is not None:
+        return _Stop(stage, f"the canary {host.hostname} failed ({stage})")
+    return None
+
+
 def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
                   now: Callable[[], datetime] = _utcnow, *,
                   concurrency: int = 1,
                   tick_interval: float = HEARTBEAT_INTERVAL,
-                  on_tick: Callable[[], None] | None = None) -> str:
-    """Run `job`'s phase across every eligible host. Returns the job's status.
+                  on_tick: Callable[[], None] | None = None) -> PhaseResult:
+    """Run `job`'s phase across every eligible host.
 
     The caller has already claimed the job and set it `running`; this writes
     the terminal edge and the per-host rows, and nothing else touches the job.
 
-    Up to `concurrency` hosts run at once, each in a worker thread
-    (PLAN.md WS-9); a phase in `SERIAL_PHASES` runs one at a time through the
-    same code. Workers do device I/O and nothing else. This thread, the one
-    holding the session, builds each host's `HostTarget` before handing it
-    over, writes every row, and every `tick_interval` seconds while hosts run
-    it writes `heartbeat_at` and calls `on_tick` (the sibling runs queued
+    **How many at once.** Up to `concurrency` hosts (the sibling's
+    `PHASE_CONCURRENCY`) run at once, each in a worker thread (PLAN.md WS-9).
+    Activate is different (WS-15): with more than one eligible host, the first
+    in request order runs alone as a canary, reloaded and checked for the
+    target version, and only then do the rest start, `job.concurrency` at a
+    time (what the approver chose, default 1), capped at `concurrency`.
+
+    **Workers do device I/O and nothing else.** This thread, the one holding
+    the session, builds each host's `HostTarget` before handing it over,
+    writes every row, and every `tick_interval` seconds while hosts run it
+    writes `heartbeat_at` and calls `on_tick` (the sibling runs queued
     host-key scans there). The pool is closed before this returns, so no
     worker outlives the phase or the credential the caller clears after it.
 
-    `succeeded` means every host the phase ran on passed, `failed` none, and
-    `partial` the rest (PLAN.md WS-8). A host that fails does not stop the
-    others -- except on a refused credential. The same password goes to every
-    host, so it would be refused on each of them in turn, and enough failed
-    logins lock the account out of TACACS+/RADIUS for the whole fleet. So no
-    host starts after one, `LoginGate` keeps the hosts already running from
-    trying their own login, and every host that never tried is recorded as
-    failed (`not_attempted`) so a retry with the right password picks it up.
+    **What stops the wave** (decision 13): a refused credential, an error in
+    NetHub's own code (`internal`), a failed canary, and, before a stage
+    touches anything, an image missing from or altered in the store (`store`).
+    Any other failure is that device's alone and the others carry on. After a
+    stop no host starts (`LoginGate` keeps the ones already running from
+    trying their own login), hosts already running finish, and each host not
+    reached gets a `not_attempted` row. For a phase with a gate of its own,
+    on its first attempt, those hosts -- and the one whose credential was
+    refused or that hit `internal`, whose fault it was not -- keep their
+    cursor, and the sibling returns the run to the gate: approving it again
+    runs the hosts still eligible. Anywhere else (pre-check, verify, a retry)
+    they are marked failed, so a retry can pick them up.
 
-    Cancel and the deadline stop further hosts from starting; hosts already
-    running finish and are recorded (§7.3). There is no safe place to stop
-    inside an activation, and a job row polled more finely would still not
-    give one.
+    `succeeded` means every host the phase ran on passed, `partial` that some
+    did, `failed` none (PLAN.md WS-8). Cancel and the deadline stop further
+    hosts from starting; hosts already running finish and are recorded
+    (§7.3). There is no safe place to stop inside an activation.
     """
     if job.is_retry:
         reset_for_retry(job)
     hosts = eligible_hosts(job)
-    workers = 1 if job.phase in SERIAL_PHASES else max(1, concurrency)
+    keep_cursor = job.phase in APPROVABLE and not job.is_retry
     gate = LoginGate()
+    stop = None
+    if job.phase == 'stage' and hosts:
+        problem = check_source(hosts, ctx.search_dir)
+        if problem is not None:
+            stop = _Stop('store', problem)
+
+    if job.phase == 'activate':
+        workers = max(1, min(job.concurrency or 1, concurrency))
+    else:
+        workers = max(1, concurrency)
+    canary = hosts[0] if job.phase == 'activate' and len(hosts) > 1 else None
     waiting = list(hosts)
     running: dict = {}
     stopped = None
-    refused = False
+    passed = 0
+    failed: list[UpgradeRunHost] = []
+
+    def settle(host, outcome, started):
+        nonlocal stop, canary, passed
+        was_canary = host is canary
+        if was_canary:
+            canary = None
+        if stop is None:
+            stop = _stop_for(outcome, host, gate, was_canary)
+        kept = keep_cursor and (outcome.status == 'not_attempted'
+                                or outcome.failure_stage in STOPPING_STAGES)
+        if kept:
+            record_kept(host, job, outcome, started)
+            return
+        record(host, job, outcome, started)
+        if outcome.ok:
+            passed += 1
+        else:
+            failed.append(host)
 
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix=f'nethub-{job.phase}') as pool:
         while True:
-            while waiting and len(running) < workers and not refused:
+            # While the canary runs, nothing else starts.
+            width = 1 if canary is not None else workers
+            while waiting and len(running) < width and stop is None:
                 stopped = _stop_reason(job, now)
                 if stopped is not None:
                     break
@@ -582,10 +774,11 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
                 try:
                     target = HostTarget.of(host)
                 except UnconfirmedHost as exc:
-                    record(host, job, _failed_outcome(host.hostname, exc), started)
+                    settle(host, _failed_outcome(host.hostname, exc), started)
                     db.session.commit()
                     continue
-                future = pool.submit(run_host, target, job.phase, ctx, gate)
+                future = pool.submit(run_host, target, job.phase, ctx, gate,
+                                     canary=host is canary)
                 running[future] = (host, started)
             if not running:
                 break
@@ -593,10 +786,7 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
             done, _ = wait(running, timeout=tick_interval, return_when=FIRST_COMPLETED)
             for future in done:
                 host, started = running.pop(future)
-                outcome = future.result()
-                record(host, job, outcome, started)
-                if outcome.failure_stage == 'credential':
-                    refused = True
+                settle(host, future.result(), started)
             job.heartbeat_at = now()
             db.session.commit()
             if on_tick is not None:
@@ -604,23 +794,31 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
             if stopped is not None and not running:
                 break
 
-    if refused:
+    if stop is not None:
         for host in waiting:
-            record(host, job, _not_attempted_outcome(host.hostname, gate.refused_on), now())
+            outcome = _not_attempted_outcome(host.hostname, stop.reason, stop.stage)
+            if keep_cursor:
+                record_kept(host, job, outcome, now())
+            else:
+                record(host, job, outcome, now())
+                failed.append(host)
         db.session.commit()
-    if stopped is None:
-        failed = [h for h in hosts if h.state == 'failed']
-        if not failed:
-            stopped = 'succeeded'
-        else:
-            stopped = 'partial' if len(failed) < len(hosts) else 'failed'
-            job.failure_stage = _last_failure_stage(job, failed[0].hostname)
-            job.error_summary = failed[0].error_summary
+        status = 'partial' if passed else 'failed'
+        job.failure_stage = stop.stage
+        job.error_summary = f"stopped: {stop.reason}"[:500]
+    elif stopped is not None:
+        status = stopped
+    elif not failed:
+        status = 'succeeded'
+    else:
+        status = 'partial' if passed else 'failed'
+        job.failure_stage = _last_failure_stage(job, failed[0].hostname)
+        job.error_summary = failed[0].error_summary
 
-    job.status = stopped
+    job.status = status
     job.finished_at = now()
     db.session.commit()
-    return stopped
+    return PhaseResult(status, stop.stage if stop is not None else None)
 
 
 def _last_failure_stage(job: UpgradePhaseJob, hostname: str) -> str | None:

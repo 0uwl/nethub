@@ -1608,11 +1608,15 @@ described there are `upgrade_phase_jobs`-only now.
     a few KB and expires with the run. It does not become an `artifacts`
     row: that would need a fourth `kind` for something that is a request
     rather than a served byte.
-- `upgrade_run_hosts` table: `run_id`, `hostname`, `ansible_host`,
-  `artifact_id`, `bundle_key`, `filename`, `sha512`, `version`,
-  `file_size`, `flash_dir`, `config_backup_path`, `reported_version_pre`,
-  `reported_version_post`, `state`, `last_phase`, `error_summary`, with
-  `PRIMARY KEY (run_id, hostname)`. `artifact_id` is a foreign key with
+- `upgrade_run_hosts` table: `run_id`, `hostname`, `position`,
+  `ansible_host`, `artifact_id`, `bundle_key`, `filename`, `sha512`,
+  `version`, `file_size`, `flash_dir`, `config_backup_path`,
+  `reported_version_pre`, `reported_version_post`, `state`, `last_phase`,
+  `error_summary`, with `PRIMARY KEY (run_id, hostname)` and
+  `UNIQUE(run_id, position)`. `position` is the host's line in the request:
+  activation upgrades the first eligible host alone as a canary (§8.1), so
+  the submitter's order is part of the run, and phases read it from the
+  rows rather than from the request document. `artifact_id` is a foreign key with
   `ON DELETE SET NULL`: a finished run keeps its snapshot columns and
   loses only the link if the artifact is later deleted, and
   `artifacts.delete()` refuses while a run in `pre_checking`,
@@ -1764,7 +1768,9 @@ described there are `upgrade_phase_jobs`-only now.
   `sealed_credential` (the approval's device credential, sealed to the
   sibling's key and non-null only while `queued`, by CHECK; §9.1),
   `is_retry` (the job re-runs its phase on the hosts that failed it;
-  §8.1). One row
+  §8.1), `concurrency` (on an activation only: how many devices the
+  approver chose to reload at once after the canary, so the record shows
+  who chose to reload several together; §8.1). One row
   per phase execution, reusing the same status vocabulary and startup
   sweep (§7.3) a publish job would need if one still existed as a
   dispatched job kind — it no longer does (above), so this table is the
@@ -2324,10 +2330,15 @@ short operator-facing reason. With no publish job status left to share a
 vocabulary with, `failure_stage` for a phase job is free to be exactly
 the phase-specific vocabulary this design always needed: `credential`,
 `connect`, `hostkey`, `privilege`, `precheck`, `transfer`, `checksum`,
-`install`, `reload`, `postcheck`, and `internal` for an error in NetHub's
-own code rather than anything the device or the network did (recorded when
-the sibling recovers from an exception nothing else handled; before it had a
-word of its own this read as `connect`). That it no longer has to avoid
+`install`, `reload`, `postcheck`, `internal` for an error in NetHub's
+own code rather than anything the device or the network did, and `store`
+for the image in NetHub's own store being missing or no longer matching its
+recorded digest, found before a stage touches any device (§8.1). `internal`
+is what the sibling records when it recovers from an exception nothing else
+handled, and what any exception the phase driver does not recognise maps
+to: only the SSH and network libraries' own exceptions mean `connect`.
+Before it had a word of its own an error in our code read as `connect`,
+which sent operators looking at the network for a bug in NetHub. That it no longer has to avoid
 colliding with a publish-side `promote`/`render`/`commit` set is a side
 effect of that set no longer existing, not the original reason for
 keeping the vocabularies separate — the original reason survives anyway,
@@ -2477,7 +2488,7 @@ sibling's, which is §9's rule expressed as a table rather than as prose.
 | `awaiting_approval` | `running` | Flask, on approval or on a retry of failed hosts (writes the phase job row; leaving the gate is a conditional update, so only one request can) |
 | `awaiting_approval` | `expired` | sibling, past `gate_expires_at` (checked every loop) |
 | `awaiting_approval` | `cancelled` / `completed` | Flask: an operator cancels, or declines the optional cleanup gate |
-| `running` | `awaiting_approval` | sibling, at the next gate, including after a `partial` phase or a retry that failed again while other hosts carry on; or its startup sweep, parking an abandoned `stage`/`activate`/`cleanup` for re-approval, or an abandoned retry of `precheck`/`verify` back at the gate it was made from |
+| `running` | `awaiting_approval` | sibling, at the next gate, including after a `partial` phase or a retry that failed again while other hosts carry on; back at the *same* gate when a first-attempt `stage`/`activate`/`cleanup` stopped on a refused credential, an `internal` error, a failed canary or a bad image in the store (§8.1); or its startup sweep, parking an abandoned `stage`/`activate`/`cleanup` for re-approval, or an abandoned retry of `precheck`/`verify` back at the gate it was made from |
 | `running` | `completed` | sibling, after cleanup succeeds |
 
 `activate` succeeding queues `verify` directly, so the run stays `running`
@@ -2838,11 +2849,27 @@ What follows from the split:
   is nothing left for a final summary pass to compute that the dashboard
   can't already read.
 - **Pre-check, stage, verify and cleanup run several hosts at once;
-  activation runs one at a time** (PLAN.md WS-9). `phases.execute_phase()`
-  hands hosts to a thread pool of `PHASE_CONCURRENCY` workers (a
-  deployment setting on the sibling, default 4); activation goes through
-  the same code with one worker, because it reloads switches and a fleet
-  is not reloaded four at a time. Copying is where a wave spends its
+  activation runs a canary alone, then as many as the approver chose**
+  (PLAN.md WS-9, WS-15). `phases.execute_phase()` hands hosts to a thread
+  pool of `PHASE_CONCURRENCY` workers (a deployment setting both units
+  carry, default 4). Activation goes through the same code differently:
+  with more than one host, the first in request order is upgraded alone
+  -- `install add`, reload, reconnect, and `verify`'s version check -- and
+  only once it is on the target version do the rest start, as many at a
+  time as the approver chose on the approve form (default 1, at most
+  `PHASE_CONCURRENCY`, recorded on the job). Reloading one at a time
+  protects a network whose redundancy NetHub cannot see, but that is the
+  operator's knowledge and the operator's decision, so NetHub warns and
+  lets them choose: the form says the canary only speaks for devices like
+  itself (split stacks from standalone switches), that reloading both
+  halves of a redundant pair at once drops service, that cancel stops
+  further reloads rather than ones in progress, and that after the canary
+  one device failing its reload does not stop the others. What a serial
+  wave used to buy -- a first device that fails before the rest reload --
+  the canary gives back explicitly, at the cost of one serial activation
+  (about 14 minutes; 20 switches four at a time then take about 84 minutes
+  rather than 4.7 hours). The later `verify` phase still checks every host,
+  the canary included, and a retried activation uses a canary too. Copying is where a wave spends its
   wall-clock time (§8's measured push throughput, ~1.4 MB/s per device,
   made a serial stage the dominant cost of a large wave: about two hours
   for twenty switches), and copying to flash drops no traffic. The cap
@@ -2932,15 +2959,38 @@ What follows from the split:
   hosts stay retryable. A run fails only when a phase leaves no host able
   to carry on. There is no retry of cleanup, since no gate follows it;
   a cleanup failure on one host completes the run with that host marked.
-- **A refused credential stops the phase at once.** Every host in a
-  phase gets the same password, so a refusal on one is a refusal on all,
-  and each attempt counts toward the AAA server's lockout: a mistyped
-  password across a 40-host wave could lock the account out fleet-wide.
-  The phase stops at the first `credential` failure, and the hosts it did
-  not reach are recorded as failed (`not_attempted`, `failure_stage:
-  credential`) so a retry with the right password picks them up. With
-  hosts running in parallel that needs the login gate above, or every
-  host logging in at that moment would be refused too.
+- **A wave stops only on NetHub's own faults, and on a failed canary**
+  (PLAN.md decision 13, WS-15). A refused credential will be refused on
+  every host -- and each attempt counts toward the AAA server's lockout,
+  so a mistyped password across a 40-host wave could lock the account out
+  fleet-wide -- and an error in NetHub's own code (`internal`) runs on
+  every host too, so the phase stops at the first of either. So does a
+  failed activation canary, and, before any device is touched, an image
+  missing from or altered in the store (`store`: the sibling hashes it
+  against the hosts' snapshotted digest first, seconds for 1.2 GB, rather
+  than finding out per host after a 15-minute transfer). A device's own
+  failure (`connect`, `reload`, `postcheck` and the rest) affects that
+  device, and the others carry on. With hosts running in parallel the
+  credential rule needs the login gate above, or every host logging in at
+  that moment would be refused too.
+
+  **A stopped phase returns the run to its gate rather than failing
+  hosts.** For a phase with a gate of its own (stage, activation,
+  cleanup), on its first attempt, the hosts it did not reach keep their
+  cursor and get a `not_attempted` row carrying the stop's
+  `failure_stage`; the host whose credential was refused or that hit
+  `internal` keeps its cursor too, since the fault was not the device's; a
+  failed canary is marked failed, since that one was. The job ends
+  `partial` if any host passed and `failed` otherwise, and the run goes
+  back to the same gate with a fresh expiry, so approving it again -- with
+  the right password -- runs the hosts still eligible, and a re-approved
+  activation picks a new canary. A mistyped password therefore costs one
+  refused login and a second approval, not the run. Hosts an activation
+  reloaded before it stopped wait at `activated` for the `verify` that
+  follows the next activation. Pre-check and `verify` have no gate of
+  their own, and a retry came from another gate, so there the hosts not
+  reached are recorded as failed (`not_attempted`), retryable as before,
+  and the run carries on or fails as §7.3 says.
 - **Cancelling means different things at different phases, and the UI
   says which.** `cancel_requested_at` (§5) is polled by the sibling
   before it starts each host. Cancelling a `queued` phase stops it before it starts.

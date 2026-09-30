@@ -37,9 +37,11 @@ def make_run(user_id, **kw):
     return run
 
 
-def make_host(run, hostname="sw01"):
+def make_host(run, hostname="sw01", position=None):
+    if position is None:
+        position = UpgradeRunHost.query.filter_by(run_id=run.id).count()
     host = UpgradeRunHost(
-        run_id=run.id, hostname=hostname, ansible_host="192.0.2.10",
+        run_id=run.id, hostname=hostname, position=position, ansible_host="192.0.2.10",
         filename="img.bin", sha512=DIGEST, version="17.12.06", file_size=471177027,
     )
     db.session.add(host)

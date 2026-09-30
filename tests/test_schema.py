@@ -20,7 +20,7 @@ from nethub import models, schema
 from nethub.extensions import db
 
 FIXTURES = Path(__file__).parent / "fixtures" / "schemas"
-HEAD = "0005_user_management"
+HEAD = "0006_canary_activation"
 
 
 def url(path):
@@ -218,6 +218,61 @@ class TestUpgradeDatabase:
         before = schema.describe(url(path))
         with pytest.raises(Exception, match="CHECK constraint failed"):
             command.downgrade(schema.alembic_config(url(path)), "0003_sealed_credential")
+        assert version(path) == HEAD
+        assert schema.differences(schema.describe(url(path)), before) == []
+
+    def test_0006_numbers_existing_hosts_in_the_order_they_were_submitted(self, tmp_path):
+        """Insertion order is request order (`submit` adds the hosts line by
+        line), so the migration numbers each run's hosts by rowid."""
+        path = tmp_path / "a.db"
+        migrate_to(path, "0005_user_management")
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_runs (id, platform, submitted_by, "
+                      "device_username_used, request_document, request_sha512, state, "
+                      "created_at) VALUES (2, 'iosxe', 1, 'j', '{}', 'y', 'running', 'x')")
+            for run_id, name in ((1, "sw09"), (2, "core1"), (1, "sw01"), (1, "sw05")):
+                c.execute("INSERT INTO upgrade_run_hosts (run_id, hostname, ansible_host, "
+                          "filename, sha512, version, file_size, flash_dir, state) VALUES "
+                          "(?, ?, '192.0.2.1', 'f', 'x', '1', 1, 'flash:', 'pending')",
+                          (run_id, name))
+        assert schema.upgrade_database(url(path)) == HEAD
+        with raw(path) as c:
+            assert c.execute("SELECT run_id, hostname, position FROM upgrade_run_hosts "
+                             "ORDER BY run_id, position").fetchall() == [
+                (1, "sw09", 0), (1, "sw01", 1), (1, "sw05", 2), (2, "core1", 0)]
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+                c.execute("UPDATE upgrade_run_hosts SET position = 0 WHERE hostname = 'sw01'")
+
+    def test_0006_accepts_store_and_only_a_positive_reload_count(self, tmp_path):
+        path = tmp_path / "a.db"
+        schema.upgrade_database(url(path))
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, status, "
+                      "failure_stage, concurrency, created_at) "
+                      "VALUES (1, 1, 'activate', 1, 'failed', 'store', 3, 'x')")
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, "
+                          "status, concurrency, created_at) "
+                          "VALUES (2, 1, 'activate', 2, 'queued', 0, 'x')")
+            with pytest.raises(sqlite3.IntegrityError, match="terminal"):
+                c.execute("UPDATE upgrade_phase_jobs SET status = 'queued' WHERE id = 1")
+
+    def test_0006_downgrades_only_while_nothing_says_store(self, tmp_path):
+        path = tmp_path / "a.db"
+        schema.upgrade_database(url(path))
+        command.downgrade(schema.alembic_config(url(path)), "0005_user_management")
+        assert version(path) == "0005_user_management"
+        schema.upgrade_database(url(path))
+        with raw(path) as c:
+            self.seed_run(c)
+            c.execute("INSERT INTO upgrade_phase_jobs (id, run_id, phase, attempt, status, "
+                      "failure_stage, created_at) VALUES (1, 1, 'stage', 1, 'failed', "
+                      "'store', 'x')")
+        before = schema.describe(url(path))
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            command.downgrade(schema.alembic_config(url(path)), "0005_user_management")
         assert version(path) == HEAD
         assert schema.differences(schema.describe(url(path)), before) == []
 

@@ -56,7 +56,7 @@ def make_run(app, make_user):
             # Where the gate's phase starts, so the approve form counts it:
             # a phase runs only on the hosts whose cursor sits just before it.
             db.session.add(UpgradeRunHost(
-                run_id=run.id, hostname='sw01', ansible_host='192.0.2.10',
+                run_id=run.id, hostname='sw01', position=0, ansible_host='192.0.2.10',
                 filename='cat9k_lite_iosxe.17.12.06.SPA.bin',
                 sha512='a' * 128, version='17.12.06', file_size=1234,
                 state=STATE_BEFORE.get(awaiting_phase, 'pending'),
@@ -65,7 +65,7 @@ def make_run(app, make_user):
                 # A second host that failed `failed_phase`, so the run page
                 # has something to offer a retry for (PLAN.md WS-8).
                 db.session.add(UpgradeRunHost(
-                    run_id=run.id, hostname='sw02', ansible_host='192.0.2.11',
+                    run_id=run.id, hostname='sw02', position=1, ansible_host='192.0.2.11',
                     filename='cat9k_lite_iosxe.17.12.06.SPA.bin',
                     sha512='a' * 128, version='17.12.06', file_size=1234,
                     state='failed', last_phase=failed_phase,
@@ -687,3 +687,50 @@ def test_the_row_action_boxes_are_short_and_explain_themselves_on_hover(
         assert f'data-tooltip="{explainer}"' in label.group(0), path
         described = re.search(r'aria-describedby="([^"]+)"', label.group(0)).group(1)
         assert f'<small id="{described}" class="explainer">{explainer}</small>' in form, path
+
+
+# --- WS-15: the reload count and the canary, on the forms that reload --------
+
+def test_the_activate_form_asks_for_a_reload_count_and_names_the_canary(
+    operator, app, make_run
+):
+    app.config['PHASE_CONCURRENCY'] = 6
+    run = make_run(awaiting_phase='activate')
+    with app.app_context():
+        # A second staged host, so there is a canary to name.
+        db.session.add(UpgradeRunHost(
+            run_id=run, hostname='sw02', position=1, ansible_host='192.0.2.11',
+            filename='cat9k_lite_iosxe.17.12.06.SPA.bin', sha512='a' * 128,
+            version='17.12.06', file_size=1234, state='staged'))
+        db.session.commit()
+    body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
+    form = _form_containing(body, f'/upgrades/{run}/approve')
+    assert re.search(r'<input type="number" id="approve_concurrency" name="concurrency" '
+                     r'min="1" max="6"\s+value="1" required', form)
+    assert '<strong>sw01</strong> is upgraded alone first, as the canary' in form
+    for warning in ('mixed hardware', 'redundant pair', 'Cancel stops further reloads',
+                    'does not stop the'):
+        assert warning in form, warning
+    assert 'Reload 2 device(s) now, the canary first.' in ' '.join(form.split())
+
+
+def test_a_single_host_has_no_canary_to_name(operator, make_run):
+    run = make_run(awaiting_phase='activate')
+    form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
+                            f'/upgrades/{run}/approve')
+    assert 'name="concurrency"' in form
+    assert 'as the canary' not in form
+
+
+def test_only_the_activate_form_asks_for_a_reload_count(operator, make_run):
+    run = make_run(awaiting_phase='stage')
+    form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
+                            f'/upgrades/{run}/approve')
+    assert form and 'name="concurrency"' not in form
+
+
+def test_a_retry_of_activate_asks_for_a_reload_count(operator, make_run):
+    run = make_run(awaiting_phase='cleanup', failed_phase='activate')
+    form = _form_containing(operator.get(f'/upgrades/{run}').get_data(as_text=True),
+                            f'/upgrades/{run}/retry')
+    assert 'id="retry_activate_concurrency"' in form

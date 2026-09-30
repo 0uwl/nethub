@@ -21,6 +21,7 @@ import hashlib
 import io
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -581,10 +582,10 @@ HOSTNAME2 = "sw02"
 
 
 class Fleet:
-    """Two `FakeSwitch`es behind one `connect`, picked by address."""
+    """`FakeSwitch`es behind one `connect`, picked by address (two by default)."""
 
-    def __init__(self):
-        self.switches = {ADDRESS: FakeSwitch(), ADDRESS2: FakeSwitch()}
+    def __init__(self, addresses=(ADDRESS, ADDRESS2)):
+        self.switches = {address: FakeSwitch() for address in addresses}
 
     def __getitem__(self, address):
         return self.switches[address]
@@ -692,3 +693,106 @@ class TestOneHostFailing:
         assert wrong == [(DEVICE_USER, "typo")]
         assert state(app, run_id)["failure"] == [("stage", "credential")]
         assert switch[ADDRESS2].flash == {}
+
+    def test_a_mistyped_password_at_the_reload_gate_leaves_the_run_at_the_gate(
+        self, app, web, work, switch, run_id
+    ):
+        """PLAN.md WS-15: the mistyped-password item in "Found while working".
+        Nothing is failed; the same gate is approved again, correctly."""
+        approve(web, run_id, "stage")
+        assert work() == ["succeeded"]
+        web.post(f"/upgrades/{run_id}/approve",
+                 data={"phase": "activate", "device_password": "typo", "confirm": "yes"})
+        assert work() == ["failed"]
+        assert state(app, run_id)["run"] == ("awaiting_approval", "activate")
+        assert self.hosts(app, run_id) == {HOSTNAME: "staged", HOSTNAME2: "staged"}
+        assert [a for a in (ADDRESS, ADDRESS2)
+                if any(p == "typo" for _, p in switch[a].logins)] == [ADDRESS]
+        assert all(switch[a].version == "17.12.06" for a in (ADDRESS, ADDRESS2))
+
+        approve(web, run_id, "activate")
+        assert work() == ["succeeded"]
+        assert state(app, run_id)["run"] == ("awaiting_approval", "cleanup")
+        assert self.hosts(app, run_id) == {HOSTNAME: "verified", HOSTNAME2: "verified"}
+        for address in (ADDRESS, ADDRESS2):
+            assert switch[address].version == TARGET
+            assert switch[address].unexpected == []
+
+
+# ---------------------------------------------------------------------------
+# Three switches: the canary, then the rest together (PLAN.md WS-15)
+# ---------------------------------------------------------------------------
+
+ADDRESS3 = "192.0.2.12"
+HOSTNAME3 = "sw03"
+
+
+class TestCanaryActivation:
+    @pytest.fixture
+    def switch(self, monkeypatch):
+        fleet = Fleet((ADDRESS, ADDRESS2, ADDRESS3))
+        monkeypatch.setattr(connection, "scan_host_key", fleet.scan)
+        monkeypatch.setattr(transfer, "_scp_put", _scp_put)
+        return fleet
+
+    @pytest.fixture
+    def run_id(self, web, work):
+        for address in (ADDRESS, ADDRESS2, ADDRESS3):
+            scan_id = _location_id(web.post("/hostkeys/scan", data={"address": address}))
+            assert work() == ["succeeded"]
+            web.post("/hostkeys/confirm", data={"scan_id": str(scan_id)})
+        publish_image(web)
+        run_id = _location_id(web.post("/upgrades/new", data={
+            "bundle": BUNDLE,
+            "hosts": f"{HOSTNAME}, {ADDRESS}\n{HOSTNAME2}, {ADDRESS2}\n{HOSTNAME3}, {ADDRESS3}",
+            "device_password": DEVICE_PASS,
+        }))
+        assert work() == ["succeeded"]
+        approve(web, run_id, "stage")
+        assert work() == ["succeeded"]
+        return run_id
+
+    def test_the_canary_reloads_first_and_the_other_two_together(
+        self, app, web, work, switch, run_id, monkeypatch
+    ):
+        log = []
+        lock = threading.Lock()
+        # sw02 and sw03 each wait here inside `install add` for the other: the
+        # barrier releases only if both are in flight at once, so reaching it
+        # at all proves they reloaded together. A serial wave would time out.
+        together = threading.Barrier(2, timeout=10)
+
+        for address in (ADDRESS, ADDRESS2, ADDRESS3):
+            device = switch[address]
+
+            def run(command, device=device, address=address):
+                with lock:
+                    log.append((address, command))
+                if command.startswith("install add") and address != ADDRESS:
+                    together.wait()
+                return FakeSwitch.run(device, command)
+            monkeypatch.setattr(device, "run", run)
+
+        web.post(f"/upgrades/{run_id}/approve", data={
+            "phase": "activate", "device_password": DEVICE_PASS, "confirm": "yes",
+            "concurrency": "2",
+        })
+        assert work() == ["succeeded"]
+
+        installs = [i for i, (_, c) in enumerate(log) if c.startswith("install add")]
+        assert log[installs[0]][0] == ADDRESS, "the canary is the first listed"
+        canary_checked = [i for i, (a, c) in enumerate(log)
+                          if a == ADDRESS and c == "show version" and i > installs[0]]
+        assert canary_checked and canary_checked[0] < installs[1], (
+            "the canary's version was checked before anything else reloaded")
+        assert not together.broken
+
+        final = state(app, run_id)
+        assert final["run"] == ("awaiting_approval", "cleanup")
+        with app.app_context():
+            job = UpgradePhaseJob.query.filter_by(run_id=run_id, phase="activate").one()
+            assert job.concurrency == 2
+            assert {h.state for h in db.session.get(UpgradeRun, run_id).hosts} == {"verified"}
+        for address in (ADDRESS, ADDRESS2, ADDRESS3):
+            assert switch[address].version == TARGET
+            assert switch[address].unexpected == []
