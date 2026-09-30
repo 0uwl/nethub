@@ -300,16 +300,12 @@ def approve(run_id):
     if not confirmed(f'approving {phase}'):
         return redirect(url_for('upgrades.show_run', run_id=run_id))
     try:
-        # Validated before `approve` takes the run off its gate, since the
-        # window is checked against `gate_expires_at`, which that clears.
-        not_before = upgrades.start_time(request.form.get('start_at'),
-                                         gate_expires_at=run.gate_expires_at)
         job = upgrades.approve(
             run=run, phase=phase, user=current_user, password=password,
             public_key=current_app.extensions['credential_public_key'],
             concurrency=request.form.get('concurrency'),
             cap=current_app.config['PHASE_CONCURRENCY'],
-            not_before=not_before,
+            start_at=request.form.get('start_at'),
         )
         flash(f'Approved {phase}; queued as job #{job.id}{_when(job)}.', 'success')
     except upgrades.RequestError as exc:
@@ -331,14 +327,12 @@ def retry(run_id):
     if not confirmed(f'retrying {phase}'):
         return redirect(url_for('upgrades.show_run', run_id=run_id))
     try:
-        not_before = upgrades.start_time(request.form.get('start_at'),
-                                         gate_expires_at=run.gate_expires_at)
         job = upgrades.retry(
             run=run, phase=phase, user=current_user, password=password,
             public_key=current_app.extensions['credential_public_key'],
             concurrency=request.form.get('concurrency'),
             cap=current_app.config['PHASE_CONCURRENCY'],
-            not_before=not_before,
+            start_at=request.form.get('start_at'),
         )
         flash(f'Retrying {phase} on the hosts that failed it; '
               f'queued as job #{job.id}{_when(job)}.', 'success')

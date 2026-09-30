@@ -370,11 +370,22 @@ class Sibling:
         unchanged, including the deadline check in `_stop_before_claim` --
         `deadline_at` is measured from `not_before`, so a due job is never
         already past it.
+
+        **A cancelled run's job is due at once, whatever its window.** A
+        scheduled approval leaves the run `running`, so `request_cancel`
+        only sets the column and leaves the job for the sibling to finish
+        (`_stop_before_claim`) -- which is reachable only from here. Without
+        this the cancel would not take effect until the window opened, up to
+        `MAX_SCHEDULE_AHEAD` later: the run would sit `running` with its
+        artifact undeletable and no further approval possible, while the page
+        told the operator to cancel a run they had already cancelled.
         """
         due = due_at()
         return (
-            UpgradePhaseJob.query.filter(UpgradePhaseJob.status == 'queued',
-                                         due <= self.now())
+            UpgradePhaseJob.query.join(
+                UpgradeRun, UpgradePhaseJob.run_id == UpgradeRun.id)
+            .filter(UpgradePhaseJob.status == 'queued',
+                    or_(due <= self.now(), UpgradeRun.cancel_requested_at.isnot(None)))
             .order_by(due, UpgradePhaseJob.id)
             .first()
         )

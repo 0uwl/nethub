@@ -2452,7 +2452,11 @@ Several rules fall out of this:
   picking this up" from the same expression, or every run approved for a
   maintenance window would raise that warning all day. Everything after
   the claim is unchanged — a due job still waits for whatever is running,
-  and its deadline covers that wait.
+  and its deadline covers that wait. One carve-out keeps the `queued` →
+  `cancelled` edge above reachable: a job whose run has been cancelled is
+  due immediately whatever its start time, since a scheduled approval
+  leaves the run `running` and the sibling is the only actor that may
+  finish the job.
 - **A failed ingest doesn't leave a partial artifact.** §7.2 already
   covers this at the mechanism level: the row commits only after the
   bytes are linked into place, so a failure at any point before that

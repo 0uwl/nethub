@@ -737,6 +737,17 @@ with no further input.
 - A scheduled job is not counted in the "queued ahead of you" depth an
   approve form shows, for the same reason: it is not ahead of an approval
   made now.
+- Three things found in review of PR #40, and fixed there. **A cancel must
+  not wait for the window**: a scheduled approval leaves the run `running`,
+  so `request_cancel` only sets the column and the sibling finishes the job
+  — which it could no longer reach until the window, leaving the run stuck
+  `running` for up to 72 hours with its artifact undeletable and no further
+  approval possible. A cancelled run's job is now due at once. **The "no
+  worker" notice keys on `min(due_at())`, not `min(created_at)`**, or a job
+  approved at noon for 02:00 reads as six hours unclaimed the moment it
+  becomes due. And **`approve`/`retry` validate the start time themselves**
+  rather than trusting the route, since the cap is a security bound (§9.1)
+  rather than a form nicety — the same shape as the reload count.
 
 ### WS-15: Canary activation, parallel reloads, stop only on NetHub's faults
 

@@ -1109,17 +1109,17 @@ class TestScheduledApprovals:
         with app.app_context():
             run = self.at_activate_gate(user)
             job = approve(run=run, phase="activate", user=db.session.get(User, user),
-                          not_before=upgrades.start_time("", gate_expires_at=None))
+                          start_at="")
             assert job.not_before is None
 
     def test_a_window_is_recorded_on_the_job(self, app, user, confirmed):
         with app.app_context():
             run = self.at_activate_gate(user)
-            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
             job = approve(run=run, phase="activate", user=db.session.get(User, user),
-                          not_before=when)
+                          start_at=self.LATER)
             # SQLite hands the column back naive, as it does every timestamp.
-            assert upgrades._aware(job.not_before) == when
+            assert upgrades._aware(job.not_before) == datetime(
+                2026, 9, 9, 2, 0, tzinfo=timezone.utc)
             assert job.approved_at is not None, "approved now, running later"
 
     def test_the_deadline_runs_from_the_window_not_the_approval(
@@ -1129,22 +1129,20 @@ class TestScheduledApprovals:
         with it the credential sealed to that deadline."""
         with app.app_context():
             run = self.at_activate_gate(user)
-            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
             job = approve(run=run, phase="activate", user=db.session.get(User, user),
-                          not_before=when)
-            assert upgrades._aware(job.deadline_at) > when
+                          start_at=self.LATER)
+            assert upgrades._aware(job.deadline_at) > upgrades._aware(job.not_before)
 
     def test_the_sealed_credential_expires_with_that_deadline(
         self, app, user, confirmed, credential_private_key
     ):
         with app.app_context():
             run = self.at_activate_gate(user)
-            when = upgrades.start_time(self.LATER, gate_expires_at=run.gate_expires_at)
             job = approve(run=run, phase="activate", user=db.session.get(User, user),
-                          not_before=when)
+                          start_at=self.LATER)
             opened = SC.open_sealed(
                 credential_private_key, job.sealed_credential, job_id=job.id,
-                approved_by=user, now=when)
+                approved_by=user, now=upgrades._aware(job.not_before))
             assert opened.password == PASSWORD, "it is still good inside the window"
 
     @pytest.mark.parametrize("raw,message", [
@@ -1161,6 +1159,33 @@ class TestScheduledApprovals:
         with pytest.raises(upgrades.RequestError, match="after this gate expires"):
             upgrades.start_time("2026-09-10T02:00",
                                 gate_expires_at=NOW + timedelta(hours=6))
+
+    def test_approve_enforces_the_bounds_itself_not_only_the_route(
+        self, app, user, confirmed
+    ):
+        """`MAX_SCHEDULE_AHEAD` bounds how long a sealed password is stored,
+        so nothing should reach `deadline_at` without passing it -- the same
+        reason `approve` checks the reload count rather than trusting a
+        caller."""
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            with pytest.raises(upgrades.RequestError, match="hours ahead"):
+                approve(run=run, phase="activate", user=db.session.get(User, user),
+                        start_at="2026-09-20T02:00")
+            assert UpgradePhaseJob.query.filter_by(phase="activate").count() == 0
+            assert run.state == "awaiting_approval", "a refusal leaves the gate as it was"
+
+    def test_a_scheduled_gate_can_still_be_cancelled_at_once(
+        self, app, user, confirmed
+    ):
+        """The run is `running` once approved, so `request_cancel` leaves the
+        job for the sibling -- which must not mean waiting for the window."""
+        with app.app_context():
+            run = self.at_activate_gate(user)
+            job = approve(run=run, phase="activate", user=db.session.get(User, user),
+                          start_at=self.LATER)
+            upgrades.request_cancel(run=run, user=db.session.get(User, user))
+            assert db.session.get(UpgradePhaseJob, job.id).sealed_credential is None
 
     def test_the_cap_bounds_how_long_a_credential_is_stored(self):
         """The window is the only thing that lengthens it, so this cap plus one

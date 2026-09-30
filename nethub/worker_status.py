@@ -84,7 +84,10 @@ def no_worker(now=None):
     now = now or _utcnow()
     cutoff = now - NO_WORKER_AFTER
     oldest = [
-        db.session.query(db.func.min(UpgradePhaseJob.created_at))
+        # `min(due_at())`, not `min(created_at)`: a job approved at noon for
+        # 02:00 has waited zero seconds at 02:00, and its creation time would
+        # report every scheduled run as one nothing picked up.
+        db.session.query(db.func.min(due_at()))
         .filter(UpgradePhaseJob.status == 'queued', due_at() <= now).scalar(),
         db.session.query(db.func.min(HostKeyScan.created_at))
         .filter(HostKeyScan.status == 'queued').scalar(),

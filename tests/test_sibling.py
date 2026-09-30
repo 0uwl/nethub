@@ -213,13 +213,27 @@ class TestScheduledJobs:
         with app.app_context():
             job = queue(run, not_before=NOW + timedelta(hours=6))
             cancel_as_flask(run)  # `upgrades.request_cancel` also drops the
-            # ciphertext at once (test_upgrade_routes); this is the other half:
-            # the job is finished without ever being claimed when its window
-            # comes, rather than running a reload nobody wants any more.
-            assert make_sibling(now=lambda: NOW + timedelta(hours=6)).run_once() \
-                == "cancelled"
+            # ciphertext at once (test_upgrade_routes); this is the other half.
+            # It must not wait for the window: a scheduled approval leaves the
+            # run `running`, so the sibling is the only thing that can finish
+            # the job, and until it does the run cannot be approved again and
+            # its artifact cannot be deleted.
+            assert make_sibling().run_once() == "cancelled"
             row = db.session.get(UpgradePhaseJob, job.id)
             assert (row.status, row.sealed_credential) == ("cancelled", None)
+            assert db.session.get(UpgradeRun, run).state == "cancelled"
+
+    def test_a_cancel_elsewhere_does_not_make_a_scheduled_job_due(self, app, run):
+        """The cancel carve-out is per run, not a hole in the schedule."""
+        with app.app_context():
+            other = UpgradeRun(submitted_by=db.session.get(UpgradeRun, run).submitted_by,
+                               device_username_used="jsmith", request_document="{}",
+                               request_sha512=DIGEST, state="running",
+                               cancel_requested_at=NOW)
+            db.session.add(other)
+            db.session.commit()
+            queue(run, not_before=NOW + timedelta(hours=6))
+            assert make_sibling().next_queued() is None
 
 
 class TestSweep:

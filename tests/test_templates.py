@@ -770,12 +770,25 @@ def test_a_scheduled_job_is_shown_with_its_window_and_does_not_refresh(
     assert 'No worker has picked this up' not in body
 
 
+def test_a_job_whose_window_has_just_opened_is_not_a_missing_worker(
+    operator, app, make_run
+):
+    """It has waited seconds, not the hours since it was approved: the notice
+    keys on when the job became due, not on when the row was written."""
+    run = make_run(state='running', awaiting_phase=None)
+    _add_job(app, run, 'queued', phase='activate', age=timedelta(hours=6),
+             not_before=datetime.now(timezone.utc) - timedelta(seconds=2))
+    body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
+    assert '<meta http-equiv="refresh" content="5">' in body, 'it is due, so it refreshes'
+    assert 'No worker has picked this up' not in body
+
+
 def test_a_due_job_still_refreshes_and_still_reports_a_missing_worker(
     operator, app, make_run
 ):
     run = make_run(state='running', awaiting_phase=None)
     _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
-             not_before=datetime.now(timezone.utc) - timedelta(minutes=1))
+             not_before=datetime.now(timezone.utc) - timedelta(minutes=30))
     body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
     assert '<meta http-equiv="refresh" content="5">' in body
     assert 'No worker has picked this up' in body

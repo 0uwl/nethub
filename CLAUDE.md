@@ -1629,9 +1629,14 @@ expression, or a run approved for a maintenance window would raise "no worker"
 all day and refresh every five seconds until then. Nothing after the claim
 changes: `deadline_at` is written from `not_before`, so a due job is never
 already past it, and a job that missed its window still ends `expired` with
-`failure_stage='credential'`. Don't add a reschedule: changing the time means
-cancelling the run, because Flask writing a queued job after dispatch is
-exactly what §7.3's actor table forbids.
+`failure_stage='credential'`. **A cancelled run's job is due at once**, which
+is a carve-out in that same query and not optional: a scheduled approval
+leaves the run `running`, so `request_cancel` only sets the column and the
+sibling is the only thing that can finish the job -- without it a cancel would
+wait for the window, up to 72 hours, with the run stuck `running`, its
+artifact undeletable and no further approval possible. Don't add a reschedule:
+changing the time means cancelling the run, because Flask writing a queued job
+after dispatch is exactly what §7.3's actor table forbids.
 
 **Sealed credentials (PLAN.md WS-7, `nethub/sealed_credentials.py`).** The
 approver's device password is sealed with libsodium's sealed box (PyNaCl
@@ -1922,11 +1927,12 @@ WS-14).** `upgrades.start_time()` parses the approve/retry form's optional
 `start_at` (a `datetime-local`, so UTC throughout -- there is no JavaScript to
 report the browser's zone, and every other timestamp in the app is UTC too)
 and refuses one in the past, past `MAX_SCHEDULE_AHEAD`, or at/after
-`gate_expires_at`. It is validated in the route *before* `approve` takes the
-run off its gate, since leaving the gate clears the column it is checked
-against. Submit has no such field: pre-check runs at submit so a wrong
-password or an unreachable device surfaces when the run is created, not in the
-window.
+`gate_expires_at`. The route passes the raw field and `approve`/`retry` call
+it themselves, the same shape as `concurrency`: the cap is what bounds how
+long a sealed password sits in a row (§9.1), so nothing may reach
+`deadline_at` without passing it. Submit has no such field: pre-check runs at
+submit so a wrong password or an unreachable device surfaces when the run is
+created, not in the window.
 
 **The credential is sealed into the queued row in the transaction that
 creates it** (`upgrades._seal_into`; see "Sealed credentials" under

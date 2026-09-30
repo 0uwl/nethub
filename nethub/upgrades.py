@@ -433,7 +433,7 @@ def reload_count(raw, cap):
 
 
 def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
-            not_before=None):
+            start_at=None):
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
@@ -447,11 +447,15 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
     chooses how many devices reload at once after the canary (`concurrency`,
     at most `cap`); it is recorded on the job.
 
-    `not_before` is the maintenance window an approver chose (PLAN.md WS-14):
-    the job is written exactly as it is today and simply not claimed until
-    then. Nothing is held in memory in the meantime -- the credential is
-    sealed in the row as always -- so an approval and its execution can be
-    hours apart without a person in between.
+    `start_at` is the maintenance window an approver chose (PLAN.md WS-14),
+    still raw as the form sent it: the job is written exactly as it is today
+    and simply not claimed until then. Nothing is held in memory in the
+    meantime -- the credential is sealed in the row as always -- so an
+    approval and its execution can be hours apart without a person in
+    between. It is bounded here rather than in the route, like `concurrency`:
+    `MAX_SCHEDULE_AHEAD` is what bounds how long a sealed password sits in a
+    row (§9.1), so nothing should be able to reach `deadline_at` without
+    passing it.
     """
     _check_gate(run)
     if phase not in APPROVABLE:
@@ -462,7 +466,9 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=False,
-                            hosts=len(run.hosts), not_before=not_before,
+                            hosts=len(run.hosts),
+                            not_before=start_time(start_at,
+                                                  gate_expires_at=run.gate_expires_at),
                             concurrency=_concurrency_for(phase, concurrency, cap))
 
 
@@ -482,7 +488,7 @@ def retryable_phases(run):
 
 
 def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
-          not_before=None):
+          start_at=None):
     """Run a phase again on the hosts that failed it (PLAN.md WS-8).
 
     Allowed while the run waits at a gate, for a phase that ran since the gate
@@ -504,7 +510,9 @@ def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
         )
     return _queue_from_gate(run=run, phase=phase, user=user, password=password,
                             public_key=public_key, is_retry=True,
-                            hosts=len(allowed[phase]), not_before=not_before,
+                            hosts=len(allowed[phase]),
+                            not_before=start_time(start_at,
+                                                  gate_expires_at=run.gate_expires_at),
                             concurrency=_concurrency_for(phase, concurrency, cap))
 
 
