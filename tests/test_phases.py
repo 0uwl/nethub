@@ -799,6 +799,60 @@ class TestWhatStopsAWave:
             assert (row.failure_stage, row.error_summary) == ("internal", "unexpected KeyError")
             assert db.session.get(UpgradePhaseJob, job.id).failure_stage == "internal"
 
+    @pytest.mark.parametrize("fail,check_fails,stage", [
+        # install.wait_for_device re-raises a refused login after the reload.
+        ({"sw02": connection.AuthenticationError("refused after the reload")}, {},
+         "credential"),
+        ({"sw02": KeyError("a bug after install add")}, {}, "internal"),
+        # The canary's own check logs in again once it is back.
+        ({}, {"sw01": connection.AuthenticationError("refused after the reload")},
+         "credential"),
+    ])
+    def test_an_activate_host_past_its_login_is_never_kept(
+        self, app, fleet, monkeypatch, fail, check_fails, stage
+    ):
+        """PR #39 review: these faults stop the wave, but they arrive after
+        `install add` may have reloaded the switch. Keeping its cursor at
+        `staged` would let a re-approval activate it a second time."""
+        timeline = Timeline(seconds=0, fail=fail, check_fails=check_fails).install(monkeypatch)
+        failing = next(iter(fail or check_fails))
+        with app.app_context():
+            job = job_for(fleet, phase="activate", concurrency=1)
+            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            assert result.stopped_by == stage
+            now = states()
+            assert now.pop(failing) == "failed"
+            assert "staged" in now.values(), "hosts not reached still keep theirs"
+
+            # Approving the gate again reaches every host still staged, and
+            # never the one that failed.
+            timeline.events.clear()
+            again = UpgradePhaseJob(run_id=fleet, phase="activate", attempt=2,
+                                    status="running", concurrency=4)
+            db.session.add(again)
+            db.session.commit()
+            phases.execute_phase(again, ctx_returning(None), concurrency=4)
+            assert failing not in timeline.started()
+            assert timeline.started(), "the rest were activated"
+
+    def test_a_refused_login_before_activate_still_keeps_the_cursor(
+        self, app, fleet, monkeypatch
+    ):
+        """The mistyped password: refused at the first login, nothing ran, so
+        every host stays staged for the next approval."""
+        def refusing(host, username, password):
+            raise connection.AuthenticationError("authentication failed")
+
+        timeline = Timeline(seconds=0).install(monkeypatch)
+        ctx = phases.PhaseContext(device_username="jsmith", device_password=PASSWORD,
+                                  search_dir="/images", connect=refusing)
+        with app.app_context():
+            job = job_for(fleet, phase="activate", concurrency=2)
+            result = phases.execute_phase(job, ctx, concurrency=4)
+            assert result.stopped_by == "credential"
+            assert set(states().values()) == {"staged"}
+        assert timeline.started() == []
+
     def test_a_netmiko_timeout_fails_that_host_alone(self, app, fleet, monkeypatch):
         def stage(conn, host, ctx):
             if host.hostname == "sw02":

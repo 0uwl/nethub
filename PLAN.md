@@ -830,6 +830,23 @@ NetHub fault returns the run to its gate instead of failing it; and the
   page shows.
 - `upgrade_run_hosts` gets `UNIQUE(run_id, position)` as well as NOT NULL,
   so two hosts cannot claim to be first.
+- Found in review of PR #39, and fixed there: point 4's "the host whose
+  credential was refused, or that hit `internal`, keeps its cursor" is
+  wrong for activate once the host is past its login. A refused login after
+  the reload (`install.wait_for_device` re-raises it), a refused canary
+  check, or a bug after `install add` all arrive when the switch may already
+  be on the new image, and a kept `staged` cursor let the next approval send
+  it a second `install add`. Such a host is now marked `failed`
+  (`phases.NOT_REPEATABLE`, `HostOutcome.ran`); a refusal at the first login
+  still keeps it, so the mistyped password still costs no host. Stage and
+  cleanup are safe to run twice and are unchanged. The run returns to the
+  gate only while some host is still eligible there.
+- Also from that review: a cancel is seen only as a host starts, so one
+  that landed while a stopped wave finished (or after the last host
+  started) used to park the run back at a gate with the cancel pending, and
+  the next approval was quietly finished `cancelled`. Every place the
+  sibling parks a run now goes through `Sibling._park`, which ends it
+  `cancelled` instead.
 
 ### WS-16: Roles and two-person rules
 

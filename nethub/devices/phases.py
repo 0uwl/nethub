@@ -65,6 +65,16 @@ _STATE_AFTER = {
 #: fails that host alone. A failed activate canary stops the wave as well.
 STOPPING_STAGES = frozenset({'credential', 'internal'})
 
+#: Phases a host must not be sent again once its runner has started, even when
+#: the fault that stopped the wave was NetHub's. Activate is the one: a refused
+#: login after the reload (`install.wait_for_device` re-raises it), a refused
+#: canary check, or a bug after `install add` all arrive once the switch may
+#: already be on the new image, and keeping its cursor at `staged` would let a
+#: re-approval issue a second `install add` to it. Stage skips an image already
+#: staged by digest and cleanup removes what is inactive, so both are safe to
+#: run twice.
+NOT_REPEATABLE = frozenset({'activate'})
+
 #: Seconds between the driver's ticks while hosts are running: how often it
 #: writes `heartbeat_at`, checks cancel and the deadline, and runs anything
 #: the sibling hands it (a queued host-key scan). A healthy job's heartbeat
@@ -95,6 +105,9 @@ class HostOutcome:
     version_pre: str | None = None
     version_post: str | None = None
     config_backup: str | None = None
+    #: The phase's runner was called: past the login, so the device may have
+    #: been changed. False for a host that failed or stopped before that.
+    ran: bool = False
 
     @property
     def ok(self) -> bool:
@@ -462,6 +475,7 @@ def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
     runner = PHASE_RUNNERS[phase]
     gate = gate if gate is not None else LoginGate()
     conn = None
+    ran = False
     try:
         turn = gate.enter()
         if turn == 'stop':
@@ -480,12 +494,13 @@ def run_host(host: HostTarget, phase: str, ctx: PhaseContext,
             # hosts waiting behind it go on.
             if turn == 'probe':
                 gate.settle(learned, host.hostname)
+        ran = True
         outcome = runner(conn, host, ctx)
         if canary and outcome.ok:
             outcome = _check_canary(host, ctx, outcome)
-        return outcome
+        return replace(outcome, ran=True)
     except Exception as exc:  # noqa: BLE001 -- every failure becomes a row
-        outcome = _failed_outcome(host.hostname, exc)
+        outcome = replace(_failed_outcome(host.hostname, exc), ran=ran)
         if outcome.failure_stage == 'credential':
             gate.refuse(host.hostname)
         return outcome
@@ -582,8 +597,9 @@ def record_kept(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome
     For a phase that stopped and goes back to its own gate (PLAN.md WS-15):
     a host it did not reach, or whose credential was refused, or that hit an
     error in NetHub's code, did nothing wrong, so it is still eligible when
-    the gate is approved again. The message stays on the host so the run page
-    says why it did not move.
+    the gate is approved again -- unless it is an activate host that got past
+    its login (`NOT_REPEATABLE`), which `execute_phase` records as failed. The
+    message stays on the host so the run page says why it did not move.
     """
     _result_row(host, job, outcome, started_at)
     host.error_summary = outcome.error_summary
@@ -712,8 +728,11 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     on its first attempt, those hosts -- and the one whose credential was
     refused or that hit `internal`, whose fault it was not -- keep their
     cursor, and the sibling returns the run to the gate: approving it again
-    runs the hosts still eligible. Anywhere else (pre-check, verify, a retry)
-    they are marked failed, so a retry can pick them up.
+    runs the hosts still eligible. Except an activate host that got past its
+    login (`NOT_REPEATABLE`): it may already have reloaded, so it is marked
+    failed and never activated again by a re-approval. Anywhere else
+    (pre-check, verify, a retry) they are marked failed, so a retry can pick
+    them up.
 
     `succeeded` means every host the phase ran on passed, `partial` that some
     did, `failed` none (PLAN.md WS-8). Cancel and the deadline stop further
@@ -749,8 +768,10 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
             canary = None
         if stop is None:
             stop = _stop_for(outcome, host, gate, was_canary)
-        kept = keep_cursor and (outcome.status == 'not_attempted'
-                                or outcome.failure_stage in STOPPING_STAGES)
+        kept = keep_cursor and (
+            outcome.status == 'not_attempted'
+            or (outcome.failure_stage in STOPPING_STAGES
+                and not (outcome.ran and job.phase in NOT_REPEATABLE)))
         if kept:
             record_kept(host, job, outcome, started)
             return

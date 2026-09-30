@@ -2979,8 +2979,12 @@ What follows from the split:
   cleanup), on its first attempt, the hosts it did not reach keep their
   cursor and get a `not_attempted` row carrying the stop's
   `failure_stage`; the host whose credential was refused or that hit
-  `internal` keeps its cursor too, since the fault was not the device's; a
-  failed canary is marked failed, since that one was. The job ends
+  `internal` keeps its cursor too, since the fault was not the device's --
+  unless it is an activation host that got past its login, which may
+  already have reloaded onto the new image and is marked failed so that no
+  re-approval sends it a second `install add`; a
+  failed canary is marked failed, since that one was. A cancel requested
+  while the phase ran ends the run rather than returning it to a gate. The job ends
   `partial` if any host passed and `failed` otherwise, and the run goes
   back to the same gate with a fresh expiry, so approving it again -- with
   the right password -- runs the hosts still eligible, and a re-approved

@@ -1554,6 +1554,20 @@ load-bearing:
   are failed (retryable), as before. Don't mark kept hosts `failed`: that
   brings the run-killing typo back. Hosts an activate reloaded before it
   stopped sit at `activated` until the `verify` after the next activate.
+- **An activate host that got past its login is never kept**
+  (`phases.NOT_REPEATABLE`, `HostOutcome.ran`; found in review of PR #39).
+  A refused login after the reload (`wait_for_device` re-raises it), a
+  refused canary check or a bug after `install add` arrive when the switch
+  may already be on the new image, so a kept `staged` cursor let the next
+  approval send it a second `install add`. It is marked `failed` instead;
+  a refusal at the *first* login still keeps it, which is the typo case.
+  Stage and cleanup are safe to repeat and keep theirs. The run goes back
+  to the gate only while some host is still eligible there.
+- **Every place the sibling parks a run goes through `Sibling._park`,
+  which ends it `cancelled` if a cancel is pending.** Cancel is read only
+  as a host starts, so one landing while a stopped wave finishes, or after
+  the last host started, used to leave the run parked at a gate with the
+  cancel still set, and the next approval was quietly finished `cancelled`.
 - **`record()` now clears a host's `error_summary` when it passes**, so a
   "not attempted" note from a stopped attempt does not outlive the attempt
   that succeeded.

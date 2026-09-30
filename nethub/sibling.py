@@ -182,9 +182,26 @@ class Sibling:
                 return
             self._fail_run(job.run)
             return
-        run = job.run
+        self._park(job.run, job.phase)
+
+    def _park(self, run: UpgradeRun, phase: str) -> None:
+        """Put the run at `phase`'s gate, or end it if a cancel is waiting.
+
+        Every place the sibling parks a run comes through here. A cancel
+        requested while a phase ran is only seen as each host starts, so one
+        that lands after the last host started (or while a stopped wave
+        finishes) is still pending when the run comes back to a gate. Parking
+        it anyway put a cancelled run back in front of approvers, and the next
+        approval was then quietly finished `cancelled` by `run_once`.
+        """
+        if run.cancel_requested_at is not None:
+            run.state = 'cancelled'
+            run.awaiting_phase = None
+            run.gate_expires_at = None
+            run.finished_at = self.now()
+            return
         run.state = 'awaiting_approval'
-        run.awaiting_phase = job.phase
+        run.awaiting_phase = phase
         run.gate_expires_at = self.now() + self.gate_ttl
         run.finished_at = None
 
@@ -202,11 +219,7 @@ class Sibling:
                 host.state = 'failed'
                 host.error_summary = 'runner exited while this phase was being retried'
         following, _gated = NEXT_PHASE[job.phase]
-        run = job.run
-        run.state = 'awaiting_approval'
-        run.awaiting_phase = following
-        run.gate_expires_at = self.now() + self.gate_ttl
-        run.finished_at = None
+        self._park(job.run, following)
 
     def recover_own(self) -> int:
         """Fail rows this instance left `running` after an unexpected error.
@@ -565,7 +578,13 @@ class Sibling:
         left the hosts it did not reach where they were, so approving the gate
         again runs them. That is what keeps a mistyped password from failing
         the run. Hosts that activated before an activate stopped wait for the
-        `verify` that follows the next activate.
+        `verify` that follows the next activate. It goes back only while some
+        host is still eligible for the phase: an activate host that failed
+        after its login is marked failed rather than kept (it may have
+        reloaded), and a gate with nobody left to run on is no gate.
+
+        Parking goes through `_park`, so a cancel requested while the phase
+        ran ends the run instead of putting it back in front of approvers.
 
         A `partial` phase moves the run on with the hosts that passed (PLAN.md
         WS-8). So does a `failed` one while hosts that passed earlier phases
@@ -580,10 +599,9 @@ class Sibling:
             run.state, run.finished_at = 'cancelled', self.now()
             return None
         if (result.stopped_by is not None and job.phase in APPROVABLE
-                and not job.is_retry):
-            run.state = 'awaiting_approval'
-            run.awaiting_phase = job.phase
-            run.gate_expires_at = self.now() + self.gate_ttl
+                and not job.is_retry
+                and any(h.state == STATE_BEFORE[job.phase] for h in run.hosts)):
+            self._park(run, job.phase)
             return None
         carries_on = status in ('succeeded', 'partial') or (
             status == 'failed' and any(h.state not in ('failed', 'skipped') for h in run.hosts)
@@ -609,9 +627,7 @@ class Sibling:
             # one. `awaiting_phase` says which gate -- inferring it from the
             # highest phase row present cannot tell "awaiting cleanup" from
             # "cleanup declined" (§5).
-            run.state = 'awaiting_approval'
-            run.awaiting_phase = following
-            run.gate_expires_at = self.now() + self.gate_ttl
+            self._park(run, following)
             return None
         run.state = 'running'
         run.awaiting_phase = None

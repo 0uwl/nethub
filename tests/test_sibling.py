@@ -1344,6 +1344,93 @@ class TestStoppedPhaseReturnsToItsGate:
             assert (row.state, row.awaiting_phase) == ("awaiting_approval", "stage")
             assert {h.state for h in row.hosts} == {"precheck_ok"}
 
+    def test_a_host_refused_after_its_reload_is_not_activated_again(
+            self, app, run, monkeypatch):
+        """PR #39 review: `install.wait_for_device` re-raises a refused login
+        once the switch is back, which stops the wave. The switch may be on
+        the new image by then, so it must not be `staged` for the next
+        approval, or that approval sends it a second `install add`."""
+        started, checked = [], []
+
+        def activate(conn, host, ctx):
+            started.append(host.hostname)
+            if host.hostname == "sw02":
+                raise connection.AuthenticationError("refused after the reload")
+            return phases.HostOutcome(host.hostname, "activated")
+
+        def check(conn, host, ctx):
+            checked.append(host.hostname)
+            return phases.HostOutcome(host.hostname, "verified")
+
+        with app.app_context():
+            self.add_hosts(run)
+            queue(run, "activate", concurrency=1)
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", activate)
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "verify", check)
+            make_sibling().run_once()
+            assert started == ["sw01", "sw02"]
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "activate")
+            assert [h.state for h in row.hosts] == ["activated", "failed", "staged"]
+
+            started.clear()
+            self.approve(run, "activate", attempt=2, concurrency=1)
+            make_sibling().run_once()
+            assert started == ["sw03"], "sw02 is never sent install add again"
+            row = db.session.get(UpgradeRun, run)
+            assert [h.state for h in row.hosts] == ["verified", "failed", "verified"]
+            assert (row.state, row.awaiting_phase) == ("awaiting_approval", "cleanup")
+
+    def test_a_gate_with_nobody_left_is_not_returned_to(self, app, run, monkeypatch):
+        """One host, refused after its reload: nothing is still staged, so
+        there is nothing for a re-approval to run on, and the run fails
+        rather than waiting at an empty gate."""
+        def activate(conn, host, ctx):
+            raise connection.AuthenticationError("refused after the reload")
+
+        with app.app_context():
+            queue(run, "activate")
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", activate)
+            assert make_sibling().run_once() == "failed"
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("failed", None)
+
+    def test_a_cancel_while_the_canary_fails_ends_the_run(self, app, run, monkeypatch):
+        """PR #39 review: the operator watches the canary go wrong and cancels
+        during its reload. Cancel is only checked as a host starts, and none
+        starts after a stop, so the stopped phase must not park the run back
+        at the gate with the cancel still pending."""
+        def activate(conn, host, ctx):
+            cancel_as_flask(run)
+            raise install.ReloadTimeout("never came back", status="reload_timeout")
+
+        with app.app_context():
+            self.add_hosts(run)
+            job = queue(run, "activate", concurrency=2)
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", activate)
+            assert make_sibling().run_once() == "failed"
+            assert db.session.get(UpgradePhaseJob, job.id).failure_stage == "reload"
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase, row.gate_expires_at) == (
+                "cancelled", None, None)
+            assert row.finished_at is not None
+
+    def test_a_cancel_after_the_last_host_started_is_not_parked_either(
+            self, app, run, monkeypatch):
+        """The same gap without a stop: a stage whose every host passed, with
+        a cancel that landed after the last one started, used to park at the
+        reload gate anyway."""
+        def stage(conn, host, ctx):
+            cancel_as_flask(run)
+            return phases.HostOutcome(host.hostname, "ok")
+
+        with app.app_context():
+            queue(run, "stage")
+            monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", stage)
+            assert make_sibling().run_once() == "succeeded"
+            row = db.session.get(UpgradeRun, run)
+            assert (row.state, row.awaiting_phase) == ("cancelled", None)
+
     def test_a_stopped_retry_goes_back_to_the_gate_it_came_from(self, app, run, monkeypatch):
         """A retry of stage is made at the activate gate. Stopped by a refused
         password, its hosts are failed again (retryable as before) and the run
