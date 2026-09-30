@@ -17,7 +17,7 @@ pip-tools==7.6.1
 # widened its default rule set over 0.15, so an unpinned local ruff passed
 # while CI failed on byte-identical files. Bumping any of these is a deliberate
 # diff, and new findings are fixed rather than the pin loosened.
-ruff==0.16.7
+ruff==0.16.8
 yamllint==1.38.0
 # Audits .github/workflows for unpinned actions, over-broad permissions,
 # template injection and cache poisoning (PLAN.md WS-12).
