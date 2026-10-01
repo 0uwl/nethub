@@ -1,0 +1,72 @@
+name: Trivy scan and report
+description: >
+  Scan a container image for CVEs with Trivy, report the findings in the job
+  summary and as a warning annotation, and upload the SARIF to GitHub code
+  scanning. Never fails the job on a finding. Modelled on DynaForm's action of
+  the same name, which gates instead. Reads SCAN_SEVERITY and SCAN_VULN_TYPE
+  from the calling workflow's env, so every scan follows one severity policy.
+  The caller must have checked out the repository (for
+  scripts/trivy_report.sh) and grant security-events write for the upload.
+
+inputs:
+  image-ref:
+    description: Image to scan (a local tag, or ghcr.io/<repo>:latest).
+    required: true
+  category:
+    description: >
+      Code scanning category. Scans of the image built from current source
+      (the image job on a pull request or main, publish on a tag) share
+      trivy-image. The already-published image, which can lag behind source,
+      gets its own (trivy-published). An analysis replaces the previous one
+      with the same category on the same ref only, so the image job and
+      publish never overwrite each other's results.
+    required: true
+  label:
+    description: How the job summary and the warning annotation name this scan.
+    required: true
+  cache:
+    description: >
+      Whether Trivy may restore its vulnerability database from the Actions
+      cache. publish passes 'false': nothing on the release path reads a
+      cache another run wrote (zizmor's cache-poisoning audit).
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # No exit-code: a finding must not fail the job (maintainer, 2026-10-01).
+    # limit-severities-for-sarif is load-bearing. Without it the action drops
+    # `severity` whenever the format is SARIF and reports every fixable LOW
+    # and MEDIUM as well (46 results against 7 on the pinned base, measured).
+    - name: Scan image for CVEs
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        format: sarif
+        output: ${{ runner.temp }}/trivy-results.sarif
+        limit-severities-for-sarif: true
+        ignore-unfixed: true
+        vuln-type: ${{ env.SCAN_VULN_TYPE }}
+        severity: ${{ env.SCAN_SEVERITY }}
+        cache: ${{ inputs.cache }}
+    - name: Report findings
+      shell: bash
+      env:
+        SARIF: ${{ runner.temp }}/trivy-results.sarif
+        LABEL: ${{ inputs.label }}
+      run: scripts/trivy_report.sh "$SARIF" "$LABEL"
+    # A pull request from a fork gets a read-only token and cannot upload;
+    # its findings are still in the summary. A failed upload on a pull request
+    # does not fail the job either, by the same reasoning as the scan. On main,
+    # a tag or the weekly scan, which the Security tab's alerts come from, it
+    # does.
+    - name: Upload findings to code scanning
+      if: >-
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      continue-on-error: ${{ github.event_name == 'pull_request' }}
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+      with:
+        sarif_file: ${{ runner.temp }}/trivy-results.sarif
+        category: ${{ inputs.category }}

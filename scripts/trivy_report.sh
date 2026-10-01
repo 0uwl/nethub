@@ -1,48 +1,60 @@
 #!/usr/bin/env bash
-# Report a Trivy scan's findings without failing the job.
+# Report a Trivy SARIF file's findings without failing the job.
 #
-#   scripts/trivy_report.sh <report.sarif> <report.txt> <label>
+#   scripts/trivy_report.sh <report.sarif> <label>
 #
-# CI scans every image it builds, but a finding there is almost always in the
-# Debian base image, which NetHub cannot patch and which reaches it only
-# through Dependabot's base-digest bump. Failing the build on those blocked
-# every merge and release on someone else's fix, so the scans report instead
-# (maintainer, 2026-10-01): the full list goes to GitHub code scanning as
-# SARIF, the table goes to the job log and its summary page, and any finding
-# raises a warning annotation on the run. This script is the last two of those.
+# Called by .github/actions/trivy-scan after the scan. CI scans every image it
+# builds, but nearly every finding is in the Debian base image, which NetHub
+# cannot patch and which reaches it only through Dependabot's base-digest
+# bump. Failing the build on those blocked every merge and release on someone
+# else's fix, so the scans report instead (maintainer, 2026-10-01): the SARIF
+# goes to GitHub code scanning, and this script writes the findings to the job
+# summary and raises a warning annotation on the run.
 #
-# It counts SARIF results rather than parsing the table: the SARIF is the copy
-# the Security tab shows, so the warning and the tab cannot disagree.
-# SCAN_SEVERITY comes from the workflow's env block.
+# Everything is read from the one SARIF file, the copy the Security tab shows,
+# so the warning, the summary and the tab cannot disagree. Trivy writes each
+# result's message as "Key: value" lines (Package, Installed Version, Fixed
+# Version, Severity); a line that does not parse leaves its cell blank rather
+# than failing the report. A missing or unreadable file does fail: a scanner
+# that did not run must not read as zero findings. SCAN_SEVERITY comes from
+# the workflow's env block.
 set -euo pipefail
 
-if [ $# -ne 3 ]; then
-    echo "usage: $0 <report.sarif> <report.txt> <label>" >&2
+if [ $# -ne 2 ]; then
+    echo "usage: $0 <report.sarif> <label>" >&2
     exit 2
 fi
 sarif=$1
-table=$2
-label=$3
+label=$2
 severity=${SCAN_SEVERITY:-}
 summary=${GITHUB_STEP_SUMMARY:-/dev/stdout}
 
 count=$(jq '[.runs[].results[]] | length' "$sarif")
-
-cat "$table"
+rows=$(jq -r '
+    .runs[] | .results[]
+    | (.message.text // "" | split("\n")
+       | map(capture("^(?<key>[^:]+): (?<value>.*)$")?) | from_entries) as $m
+    | "| \(.ruleId) | \($m.Package // "") | \($m["Installed Version"] // "")"
+      + " | \($m["Fixed Version"] // "") | \($m.Severity // "") |"
+' "$sarif")
 
 {
     echo "### ${label}: ${count} fixable ${severity} finding(s)"
     echo
     if [ "$count" -gt 0 ]; then
-        echo '```'
-        cat "$table"
-        echo '```'
+        echo "| Vulnerability | Package | Installed | Fixed in | Severity |"
+        echo "|---|---|---|---|---|"
+        echo "$rows"
         echo
-        echo "Advisory only: this does not fail the build. Each finding is also"
-        echo "listed under Security > Code scanning when this run uploads SARIF."
+        echo "Advisory only: this does not fail the build. A finding in the"
+        echo "Debian base is fixed by Dependabot's base-image digest bump; one in"
+        echo "a pinned Python package is fixed by bumping the pin."
     fi
 } >> "$summary"
 
 if [ "$count" -gt 0 ]; then
+    echo "$rows"
     echo "::warning title=${label}::${count} fixable ${severity} vulnerabilities found. Advisory only: see the job summary and Security > Code scanning."
+else
+    echo "No fixable ${severity} vulnerabilities."
 fi

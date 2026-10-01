@@ -140,11 +140,11 @@ python scripts/check_device_facts.py --replay <dir>         # re-parse a capture
 ruff check .                       # Python lint (pyproject.toml: 100-char lines,
                                     # N999 ignored for nethub/gunicorn.conf.py --
                                     # gunicorn requires that exact filename)
-yamllint .                         # YAML lint (.yamllint.yaml). Only two YAML files
-                                    # are left -- this config and the CI workflow -- but
-                                    # document-start/truthy stay disabled for new
-                                    # reasons: cicd.yml has no `---`, and Actions' `on:`
-                                    # key is a YAML 1.1 boolean.
+yamllint .                         # YAML lint (.yamllint.yaml). The only YAML left is
+                                    # this config, the CI workflow, dependabot.yml and the
+                                    # trivy-scan action, but document-start/truthy stay
+                                    # disabled for new reasons: cicd.yml has no `---`, and
+                                    # Actions' `on:` key is a YAML 1.1 boolean.
 
 python -m nethub.sealed_credentials keygen --out <file>   # the sibling's key pair:
                                     # private key to <file> (0600, never overwritten),
@@ -264,15 +264,23 @@ publishes nothing. What is load-bearing:
   The scans were gates until 2026-10-01, when the maintainer made them
   advisory: nearly every finding is in the Debian base image, which NetHub
   cannot patch, and the gate was blocking every merge on someone else's
-  fix (the pinned base carried 7 fixable HIGHs that day). Each scan runs
-  Trivy twice, SARIF then a table, against one downloaded database;
-  `scripts/trivy_report.sh` writes the table to the job summary and raises a
-  warning annotation per finding count, and `image` (PR and `main`) and
-  `scan-published` upload the SARIF to GitHub code scanning under
-  categories `trivy-image` and `trivy-published`. `publish` uploads nothing:
-  code scanning tracks branches, and `main` already uploaded for that code.
+  fix (the pinned base carried 7 fixable HIGHs that day). Every scan goes
+  through one composite action, `.github/actions/trivy-scan`, modelled on
+  DynaForm's action of the same name minus its `exit-code`: one Trivy pass
+  writing SARIF, `scripts/trivy_report.sh` turning that SARIF into a table in
+  the job summary plus a warning annotation, and an upload to GitHub code
+  scanning. `image` (PR and `main`) and `publish` share the category
+  `trivy-image`, since both scan the image built from current source;
+  `scan-published` uses `trivy-published`, since `:latest` can lag behind it.
+  Workflows call it as `uses: $/.github/actions/trivy-scan`, GitHub's
+  self-repository syntax (July 2026), which zizmor ≥1.30 requires over
+  `./`; Dependabot lists `/.github/actions/*` beside `/`, or it never sees
+  the action's own pins. NetHub has no shared build action like DynaForm's
+  `build-scan-image`: its two pre-scan builds differ on purpose (the PR/main
+  one uses the gha cache, the release one builds with `no-cache` and a
+  job-local cache; see below).
   Two settings are load-bearing: **`limit-severities-for-sarif: true`**,
-  without which the action drops `severity` for SARIF and uploads every LOW
+  without which the action drops `severity` for SARIF and reports every LOW
   and MEDIUM (46 results against 7, measured on the pinned base), and **no
   `exit-code`**. A scan that produces no SARIF at all still fails the job:
   a scanner that did not run must not read as zero findings. A finding in
@@ -284,7 +292,7 @@ publishes nothing. What is load-bearing:
   protection requires it.
 - **Permissions default to `contents: read`.** Only `publish` gets
   `packages: write` and `contents: write` (the release), `scan-published`
-  `packages: read`, and `image` and `scan-published` `security-events: write`
+  `packages: read`, and the three scanning jobs `security-events: write`
   (the SARIF upload). Checkouts use `persist-credentials: false`. Untrusted
   values reach shell through `env:`, never `${{ }}` inside `run:`.
 - **Nothing on the release path reads a cache another run wrote.** zizmor's
@@ -292,7 +300,8 @@ publishes nothing. What is load-bearing:
   `lint` and `test` (which run on the tag push) use no pip cache, `publish`
   builds with `no-cache` and hands its amd64 layers to the pushing build
   through a job-local `type=local` cache in `runner.temp` (so what is pushed
-  is what was tested), and its Trivy step sets `cache: false`. The PR/main
+  is what was tested), and its scan passes `cache: 'false'` to the
+  trivy-scan action. The PR/main
   `image` job may use the shared gha cache: it pushes nothing.
 - **Dependabot keeps the pins moving** (`.github/dependabot.yml`): actions,
   pip (it regenerates pip-compile lockfiles; if it leaves the dev one stale,

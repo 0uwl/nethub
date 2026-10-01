@@ -46,8 +46,9 @@ concurrency:
 # through Dependabot's base-digest bump, and failing every merge and release
 # until then stopped development on someone else's schedule. Each scan instead
 # uploads SARIF to GitHub code scanning (Security > Code scanning, and on the
-# pull request), writes its table to the job summary, and raises a warning
-# annotation when it finds anything (scripts/trivy_report.sh). A finding in
+# pull request), lists its findings in the job summary, and raises a warning
+# annotation when it finds anything: .github/actions/trivy-scan, the same
+# composite action DynaForm uses, minus its exit-code. A finding in
 # NetHub's own pinned Python packages shows up the same way, and that one *is*
 # ours: bump the pin.
 #
@@ -190,49 +191,18 @@ jobs:
         run: |
           podman pull docker-daemon:localhost/nethub:ci
           scripts/smoke_test.sh localhost/nethub:ci
-      # Two passes over one image: SARIF for code scanning, a table for people.
-      # The second reuses the vulnerability database the first downloaded into
-      # the workspace, so both report against the same data. No exit-code: a
-      # finding must not fail the job. limit-severities-for-sarif, because
-      # without it the action drops `severity` for SARIF and uploads every
-      # LOW and MEDIUM as well.
-      - name: Scan image for CVEs (SARIF)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      # Same category as publish's scan: both scan the image built from
+      # current source. See .github/actions/trivy-scan. `$/` is GitHub's
+      # self-repository syntax (July 2026): the action is loaded from this
+      # repository at this commit, never from whatever is on the runner's disk,
+      # and it counts as pinned under a "fully pinned" actions policy. zizmor
+      # flags the older `./` form.
+      - name: Scan image for CVEs
+        uses: $/.github/actions/trivy-scan
         with:
           image-ref: localhost/nethub:ci
-          format: sarif
-          output: ${{ runner.temp }}/trivy.sarif
-          limit-severities-for-sarif: true
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
-      - name: Scan image for CVEs (table)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref: localhost/nethub:ci
-          format: table
-          output: ${{ runner.temp }}/trivy.txt
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
-      - name: Report CVE findings
-        env:
-          REPORT_DIR: ${{ runner.temp }}
-        run: scripts/trivy_report.sh "$REPORT_DIR/trivy.sarif" "$REPORT_DIR/trivy.txt" "Trivy (built image)"
-      # A pull request from a fork gets a read-only token, so there is nothing
-      # to upload with; its findings are still in the summary above. A failed
-      # upload on a pull request is reported but does not fail the job, by
-      # the same reasoning as the scan itself; on main, where the Security
-      # tab's alerts come from, it does.
-      - name: Upload findings to code scanning
-        if: >-
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: ${{ github.event_name == 'pull_request' }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
-        with:
-          sarif_file: ${{ runner.temp }}/trivy.sarif
           category: trivy-image
+          label: Trivy (built image)
 
   scan-published:
     name: Scan published image
@@ -247,8 +217,8 @@ jobs:
       packages: read  # pull the published image from ghcr.io to scan it
       security-events: write  # upload the scan's SARIF to code scanning
     steps:
-      # For scripts/trivy_report.sh, and so the SARIF upload runs in the
-      # repository it reports against.
+      # Only to fetch the local trivy-scan action and the script it runs: this
+      # job scans a remote image and builds nothing.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
@@ -271,42 +241,16 @@ jobs:
             echo "::notice::No published :latest image yet -- nothing to scan."
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      # The same two passes as the image job. Its own SARIF category, so the
-      # Security tab tracks what is running separately from what main builds:
-      # a CVE disclosed after release is open under trivy-published until a
-      # new release ships the fix, whatever main looks like.
-      - name: Scan published image for CVEs (SARIF)
+      # Its own category: :latest can lag behind source, so a CVE disclosed
+      # after a release stays open under trivy-published until a new release
+      # ships the fix, whatever main looks like.
+      - name: Scan published image for CVEs
         if: steps.published.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        uses: $/.github/actions/trivy-scan
         with:
           image-ref: ghcr.io/${{ github.repository }}:latest
-          format: sarif
-          output: ${{ runner.temp }}/trivy.sarif
-          limit-severities-for-sarif: true
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
-      - name: Scan published image for CVEs (table)
-        if: steps.published.outputs.exists == 'true'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref: ghcr.io/${{ github.repository }}:latest
-          format: table
-          output: ${{ runner.temp }}/trivy.txt
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
-      - name: Report CVE findings
-        if: steps.published.outputs.exists == 'true'
-        env:
-          REPORT_DIR: ${{ runner.temp }}
-        run: scripts/trivy_report.sh "$REPORT_DIR/trivy.sarif" "$REPORT_DIR/trivy.txt" "Trivy (published :latest)"
-      - name: Upload findings to code scanning
-        if: steps.published.outputs.exists == 'true'
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
-        with:
-          sarif_file: ${{ runner.temp }}/trivy.sarif
           category: trivy-published
+          label: Trivy (published :latest)
 
   publish:
     name: Publish container
@@ -316,9 +260,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      # Everything before the last two steps only reads.
+      # Everything before the last two steps only reads, apart from the scan's
+      # SARIF upload.
       contents: write  # create the GitHub release, the job's last step
       packages: write  # push the image to ghcr.io
+      security-events: write  # upload the scan's SARIF to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -369,44 +315,22 @@ jobs:
           podman pull docker-daemon:localhost/nethub:release
           scripts/smoke_test.sh localhost/nethub:release
       # A report, not a gate (see the env block): findings appear in this
-      # job's summary and as a warning on the run, and the push goes ahead.
-      # Nothing is uploaded to code scanning from here. Code scanning tracks
-      # branches, not tags, and main's image job has already uploaded the
-      # findings for the code this tag points at; the weekly scan-published
-      # then tracks the released image itself.
+      # job's summary, as a warning on the run and in code scanning under the
+      # tag's ref, and the push goes ahead.
       #
       # Only the amd64 image is scanned: both platforms install the same
       # Debian and pip packages from the same Containerfile and lockfile, so
       # arm64 would report the same list. Pinning the action pins the Trivy
       # binary, but its vulnerability database is fetched at run time, so the
       # report reflects the day of the release. cache: false for the same
-      # reason as the build: nothing on this path reads a cache. The second
-      # pass reuses the database the first downloaded within this job.
-      - name: Scan image for CVEs (SARIF)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      # reason as the build: nothing on this path reads a cache.
+      - name: Scan image for CVEs
+        uses: $/.github/actions/trivy-scan
         with:
           image-ref: localhost/nethub:release
-          format: sarif
-          output: ${{ runner.temp }}/trivy.sarif
-          limit-severities-for-sarif: true
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
+          category: trivy-image
+          label: Trivy (release image)
           cache: 'false'
-      - name: Scan image for CVEs (table)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref: localhost/nethub:release
-          format: table
-          output: ${{ runner.temp }}/trivy.txt
-          ignore-unfixed: true
-          vuln-type: ${{ env.SCAN_VULN_TYPE }}
-          severity: ${{ env.SCAN_SEVERITY }}
-          cache: 'false'
-      - name: Report CVE findings
-        env:
-          REPORT_DIR: ${{ runner.temp }}
-        run: scripts/trivy_report.sh "$REPORT_DIR/trivy.sarif" "$REPORT_DIR/trivy.txt" "Trivy (release image)"
       # linux/arm64 covers e.g. a 64-bit Raspberry Pi host; QEMU emulates it,
       # since this runner is amd64. The amd64 half comes from the job-local
       # cache the tested build wrote, so only arm64 is new work here.
