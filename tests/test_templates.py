@@ -517,7 +517,7 @@ def test_every_destructive_form_carries_a_confirmation_box(
     pages = {
         '/artifacts': '/delete',
         '/hostkeys': '/delete',
-        '/users': '/disable',
+        '/users': ('/disable', '/role'),
         f'/upgrades/{run}': ('/approve', '/retry', '/cancel'),
     }
     for path, actions in pages.items():

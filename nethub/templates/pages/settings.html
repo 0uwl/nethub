@@ -12,6 +12,7 @@ happens, so turning one off releases anything waiting on it.</p>
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <fieldset>
     {% for key, text, on in rules %}
+    <input type="hidden" name="shown_{{ key }}" value="{{ 'on' if on else 'off' }}">
     <label>
       <input type="checkbox" role="switch" name="{{ key }}" value="on"{% if on %} checked{% endif %}>
       {{ text }}

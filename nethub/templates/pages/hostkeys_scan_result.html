@@ -21,10 +21,12 @@ usually finishes in well under 30 seconds.</p>
 <p><em>This scan has already been used to confirm a pin.</em></p>
 {% elif not can_confirm and scan.requested_by == current_user.id %}
 <p><em>The two-person rule for host keys is on: someone other than you has to confirm
-this scan. Send them this page.</em></p>
+this scan before <strong>{{ confirm_by.strftime('%Y-%m-%d %H:%M') }} UTC</strong>. It is
+listed for them under Host keys; after that time it has to be scanned again.</em></p>
 {% elif not can_confirm %}
 <p><em>Scanned by someone else; they need to confirm it.</em></p>
 {% else %}
+<p class="muted">Confirm before {{ confirm_by.strftime('%Y-%m-%d %H:%M') }} UTC, or scan again.</p>
 <form method="post" action="{{ url_for('hostkeys.confirm_hostkey') }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="scan_id" value="{{ scan.id }}">

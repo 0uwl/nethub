@@ -267,6 +267,10 @@ def change_role(user_id):
     if role not in ROLES:
         flash('Choose a role: admin or operator.')
         return redirect(url_for('auth.list_users'))
+    # Promoting exempts someone from every two-person rule, so it takes the
+    # same ticked box as any other consequential row action (web.confirmed).
+    if not confirmed(f'making {user.username} an {role}'):
+        return redirect(url_for('auth.list_users'))
     if user.id == current_user.id:
         flash('You cannot change your own role.')
         return redirect(url_for('auth.list_users'))

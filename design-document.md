@@ -1566,6 +1566,7 @@ constraints, partial indexes and the terminal-status trigger included.
   | `delete_requested` | `deleted`), `actor_id`, `actor_role`.
   Append-only by the same unconditional triggers as `settings_audit`.
   It copies the artifact's identity rather than holding a foreign key,
+  and `artifacts` is `AUTOINCREMENT` so an id it names is never reused,
   so the record of a delete outlives the row it removed — an admin
   deleting alone under the two-person rule has to stay visible after
   the thing deleted is gone.
@@ -1956,6 +1957,8 @@ described there are `upgrade_phase_jobs`-only now.
   rules of §4.3 (`two_person_artifacts`, `two_person_hostkeys`,
   `two_person_runs`, each `on`/`off`, off when absent), changed by an
   admin from the settings page and read on every request, never cached.
+  The form carries the values it showed and is refused if they have moved
+  since, so a stale page cannot quietly switch a rule back off.
   The rest below is still target design, and the deployment settings
   that exist today (the target CIDR, the concurrency cap) are still
   environment variables. §4.4 names five OIDC settings and
@@ -2613,7 +2616,7 @@ writes every edge, synchronously, in the request:
 | — | `published` | Flask, on upload, when no two-person rule binds the uploader |
 | — | `staged` | Flask, on upload, when the two-person rule for artifacts binds the uploader (§4.3) |
 | `staged` | `published` | Flask, on a publish by a user other than the uploader (or anyone once the rule is off); a conditional update, so two publishes make one |
-| `staged` | — (row and bytes removed) | Flask, on a withdraw, by anyone |
+| `staged` | — (row and bytes removed) | Flask, on a withdraw by the uploader or an admin; conditional on still being `staged` |
 | `published` | — (row and bytes removed) | Flask, on a delete, by the second person when the rule applies; refused while a live run references it |
 
 ### 7.4 Retention, and what staleness means here

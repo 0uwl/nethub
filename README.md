@@ -187,10 +187,12 @@ Once you're logged in:
    and the records say an admin did.
    - *Artifacts*: an upload waits, unusable, until someone other than the
      uploader publishes it, and deleting a published image is a request that
-     someone else confirms. The uploader can withdraw their own waiting
-     upload.
+     someone else confirms. The uploader, or an admin, can withdraw a
+     waiting upload.
    - *Host keys*: a scan is confirmed by someone other than whoever
-     requested it, and removing a pin is a request someone else confirms.
+     requested it, within 15 minutes of the scan (the page shows the
+     deadline, and **Host keys** lists every scan still waiting), and
+     removing a pin is a request someone else confirms.
      With this rule off, only whoever requested a scan can confirm it.
    - *Runs*: every gate approval and every retry, scheduled ones included,
      comes from someone other than the submitter. Cancelling and declining

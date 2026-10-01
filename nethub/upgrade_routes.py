@@ -67,6 +67,11 @@ def may_confirm(scan, user):
     return own
 
 
+def confirm_by(scan):
+    """The moment `scan` stops being confirmable (`SCAN_CONFIRM_WINDOW`)."""
+    return _aware(scan.finished_at) + SCAN_CONFIRM_WINDOW
+
+
 def _when(job):
     """What to add to an approval's flash: nothing, or the window it waits
     for. UTC, like the form and the page (`upgrades.start_time`)."""
@@ -81,7 +86,13 @@ def _when(job):
 @login_required
 def list_hostkeys():
     keys = DeviceHostKey.query.order_by(DeviceHostKey.ansible_host).all()
-    return render_template('pages/hostkeys_list.html', keys=keys,
+    # Scans someone could still confirm, so the person who has to confirm one
+    # finds it here rather than depending on a forwarded link (WS-16).
+    waiting = [(scan, confirm_by(scan)) for scan in HostKeyScan.query.filter(
+        HostKeyScan.status == 'succeeded', HostKeyScan.consumed_at.is_(None),
+        HostKeyScan.finished_at > upgrades._utcnow() - SCAN_CONFIRM_WINDOW,
+    ).order_by(HostKeyScan.finished_at)]
+    return render_template('pages/hostkeys_list.html', keys=keys, waiting=waiting,
                            two_person=settings.applies('two_person_hostkeys', current_user),
                            users={u.id: u.username for u in User.query.all()})
 
@@ -126,6 +137,7 @@ def scan_result(scan_id):
     return render_template(
         'pages/hostkeys_scan_result.html', scan=scan,
         can_confirm=may_confirm(scan, current_user),
+        confirm_by=confirm_by(scan) if scan.status == 'succeeded' else None,
         no_worker=scan.status == 'queued' and worker_status.no_worker(),
     )
 
@@ -197,36 +209,20 @@ def confirm_hostkey():
 @hostkeys_bp.route('/hostkeys/<int:key_id>/delete', methods=['POST'])
 @login_required
 def delete_hostkey(key_id):
-    """Remove a pin, or under the two-person rule for host keys, ask for its
-    removal (PLAN.md WS-16). A requested removal leaves the pin working
-    until someone else confirms it."""
     if not confirmed('removing the pin'):
         return redirect(url_for('hostkeys.list_hostkeys'))
     row = db.session.get(DeviceHostKey, key_id)
     if row is None:
         return redirect(url_for('hostkeys.list_hostkeys'))
-    # The pre-image goes in the audit row, captured before the change (WS-6.4):
-    # it is the evidence the "deliberate friction" before re-accepting a
-    # changed key used to leave none of.
-    audit = {'ansible_host': row.ansible_host, 'key_type': row.key_type,
-             'fingerprint_sha256': row.fingerprint_sha256, 'actor_id': current_user.id,
-             'actor_role': current_user.role}
-    if (settings.applies('two_person_hostkeys', current_user)
-            and row.delete_requested_by in (None, current_user.id)):
-        if row.delete_requested_by is None:
-            row.delete_requested_by = current_user.id
-            row.delete_requested_at = upgrades._utcnow()
-            db.session.add(DeviceHostKeyAudit(action='delete_requested',
-                                              requested_by=current_user.id, **audit))
-            db.session.commit()
-        flash(f'Removal of the pin for {row.ansible_host} requested. It stays in force '
-              f'until someone else confirms the removal.', 'info')
-        return redirect(url_for('hostkeys.list_hostkeys'))
-    db.session.add(DeviceHostKeyAudit(
-        action='deleted', requested_by=row.delete_requested_by or current_user.id, **audit))
-    db.session.delete(row)
-    db.session.commit()
-    flash(f'Removed the pin for {row.ansible_host}.', 'success')
+    address = row.ansible_host
+    try:
+        if upgrades.delete_pin(row, current_user):
+            flash(f'Removed the pin for {address}.', 'success')
+        else:
+            flash(f'Removal of the pin for {address} requested. It stays in force '
+                  f'until someone else confirms the removal.', 'info')
+    except upgrades.RequestError as exc:
+        flash(str(exc))
     return redirect(url_for('hostkeys.list_hostkeys'))
 
 
@@ -321,8 +317,7 @@ def show_run(run_id):
         no_worker=any(j.status == 'queued' for j in live) and worker_status.no_worker(),
         queued_ahead=queued_ahead, running_now=running_now,
         gate_hosts=gate_hosts, scheduled=scheduled,
-        needs_other_approver=(settings.applies('two_person_runs', current_user)
-                              and run.submitted_by == current_user.id),
+        needs_other_approver=upgrades.needs_second_person(run, current_user),
         max_schedule_hours=int(upgrades.MAX_SCHEDULE_AHEAD.total_seconds() // 3600),
     )
 

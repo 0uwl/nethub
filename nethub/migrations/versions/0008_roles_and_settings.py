@@ -10,7 +10,8 @@ Create Date: 2026-10-01
 - `settings` and the append-only `settings_audit` (design doc §5), holding the
   three two-person rules for now.
 - `artifacts.published_by`/`published_at` and `delete_requested_by`/`_at`, and
-  an append-only `artifact_audit` that outlives the row a delete removes.
+  an append-only `artifact_audit` that outlives the row a delete removes;
+  `artifacts` becomes AUTOINCREMENT so an id in that audit is never reused.
 - `device_host_keys.delete_requested_by`/`_at`; `device_host_key_audit` gains
   `requested_by`, `actor_role` and the `delete_requested` action.
 - `upgrade_phase_jobs.approved_by_role` and `device_username_used`, the
@@ -108,7 +109,10 @@ def upgrade():
     )
     _append_only('settings_audit')
 
-    with op.batch_alter_table('artifacts', recreate='always') as batch_op:
+    # AUTOINCREMENT, so a deleted artifact's id is never reused under the
+    # audit rows that still name it.
+    with op.batch_alter_table('artifacts', recreate='always',
+                              table_kwargs={'sqlite_autoincrement': True}) as batch_op:
         batch_op.add_column(sa.Column('published_by', sa.Integer(), nullable=True))
         batch_op.create_foreign_key('fk_artifacts_published_by', 'user',
                                     ['published_by'], ['id'])

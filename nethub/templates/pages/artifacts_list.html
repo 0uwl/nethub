@@ -31,6 +31,7 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
           <button type="submit">Publish</button>
         </form>
         {% endif %}
+        {% if a.uploaded_by == current_user.id or current_user.is_admin %}
         <details>
           <summary>Withdraw</summary>
           <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}">
@@ -40,6 +41,7 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
             <button type="submit" class="secondary">Withdraw</button>
           </form>
         </details>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

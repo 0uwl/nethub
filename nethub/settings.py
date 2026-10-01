@@ -39,6 +39,44 @@ def applies(key, user):
     return not user.is_admin and enabled(key)
 
 
+#: What `second_person_delete` found: go ahead and delete, the delete was
+#: recorded as a request just now, or it was already this user's request.
+GO, REQUESTED, WAITING = 'go', 'requested', 'waiting'
+
+
+def second_person_delete(key, row, user):
+    """The request-then-confirm step of a delete under two-person rule `key`
+    (PLAN.md WS-16), shared by artifacts and host-key pins. `row` has `id`,
+    `delete_requested_by` and `delete_requested_at`.
+
+    `GO` when the rule does not bind `user` or someone else requested the
+    delete: the caller deletes. Otherwise the delete is only a request:
+    `REQUESTED` the first time, written as a conditional update so two
+    people requesting at once make one request, and `WAITING` after. The
+    caller adds its audit row and commits. Raises `RequestRaced` when
+    someone else requested it between the read and the update: going ahead
+    would turn this user's request into a confirmation they never saw.
+    """
+    if not applies(key, user) or row.delete_requested_by not in (None, user.id):
+        return GO
+    if row.delete_requested_by == user.id:
+        return WAITING
+    model = type(row)
+    claimed = (db.session.query(model)
+               .filter(model.id == row.id, model.delete_requested_by.is_(None))
+               .update({'delete_requested_by': user.id, 'delete_requested_at': _utcnow()},
+                       synchronize_session='fetch'))
+    if claimed != 1:
+        db.session.rollback()
+        raise RequestRaced('Someone else requested this delete at the same moment, so '
+                           'nothing was changed. Reload the page to confirm their request.')
+    return REQUESTED
+
+
+class RequestRaced(Exception):
+    """Two people requested the same delete at once; the loser is told."""
+
+
 def change(key, on, actor):
     """Set a rule, recording the change. Returns False if it already had
     that value, which writes nothing."""
@@ -62,6 +100,14 @@ def change(key, on, actor):
 @admin_required
 def edit():
     if request.method == 'POST':
+        # An unticked checkbox is absent, so a form rendered before someone
+        # else turned a rule on would turn it off again. Each rule carries
+        # the value the page showed; if any moved since, change nothing.
+        if any(request.form.get(f'shown_{key}') != (ON if enabled(key) else OFF)
+               for key in TWO_PERSON_RULES):
+            flash('The settings changed since you loaded this page. Nothing was '
+                  'changed; check them again.')
+            return redirect(url_for('settings.edit'))
         changed = [key for key in TWO_PERSON_RULES
                    if change(key, request.form.get(key) == ON, current_user)]
         db.session.commit()

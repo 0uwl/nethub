@@ -409,19 +409,40 @@ What is load-bearing:
   rule is checked when the *second* action happens and turning one off
   releases whatever was waiting.
 - **What each rule does, and where it is enforced:**
-  - *Artifacts* (`artifacts.py`): `ingest` lands `staged`; `publish` refuses
-    the uploader; `delete` by an operator first records
-    `delete_requested_by`/`_at` and returns False, and a different user's
-    delete removes it. `withdraw` (a staged upload, anyone) needs no second
-    person: nothing can have used it.
-  - *Host keys* (`upgrade_routes.py`): `may_confirm`, above under "Upgrade
-    routes"; `delete_hostkey` the same request-then-confirm as artifacts.
+  - *Artifacts* (`artifacts.py`): `ingest` lands `staged`, deciding once the
+    bytes have verified (it reads the rule up front too, only to refuse a
+    taken bundle key before a long upload streams); `publish` refuses the
+    uploader; a delete by an operator is first a request. `withdraw` (a staged
+    upload) needs no second person, but only the uploader or an admin may do
+    it, or the second check could erase someone's upload alone.
+  - *Host keys*: `upgrade_routes.may_confirm`, above under "Upgrade routes";
+    `upgrades.delete_pin`, request-then-confirm like artifacts.
     `device_host_key_audit` gains `requested_by` (the other person) and
-    `actor_role`, and a `delete_requested` action.
-  - *Runs* (`upgrades._check_second_person`, called by `approve` and `retry`,
-    so a scheduled approval is covered too): the approver is not
-    `submitted_by`. `request_cancel` and `decline_cleanup` never call it:
-    stopping is the conservative action.
+    `actor_role`, and a `delete_requested` action. A succeeded scan is still
+    confirmable for only `SCAN_CONFIRM_WINDOW` (15 minutes), so the scan page
+    states the deadline and `/hostkeys` lists every scan still confirmable:
+    the second person need not be sent a link.
+  - *Runs* (`upgrades.needs_second_person`, which `approve` and `retry` refuse
+    on and the run page reads to hide the forms, so the two cannot disagree):
+    the approver is not `submitted_by`. `request_cancel` and
+    `decline_cleanup` never ask: stopping is the conservative action.
+- **Every state change behind a rule is a conditional statement**, the claim
+  pattern again. `publish` and `withdraw` act only `WHERE state = 'staged'`
+  (a withdraw racing a publish must not delete a published image past the
+  delete request and live-run check), and `publish` catches the
+  bundle-key `IntegrityError` around the `UPDATE`, since SQLite checks the
+  partial unique index there and not at `COMMIT`. A delete request is
+  `settings.second_person_delete`, shared by artifacts and pins: `WHERE
+  delete_requested_by IS NULL`, and a loser is refused rather than turned
+  into the confirmer of a request they never saw.
+- **The settings form carries what it showed** (`shown_<key>`), and a POST
+  whose values no longer match the database changes nothing: an unticked
+  box is absent, so a tab loaded before someone turned a rule on would
+  otherwise turn it off again.
+- **A role change takes the confirmation box** (`web.confirmed`), like
+  disabling: promoting someone exempts them from every rule.
+- **`artifacts` is `AUTOINCREMENT`** (migration 0008), so a deleted
+  artifact's id, which `artifact_audit` still names, is never reused.
 - **Admins are exempt and visible**: `upgrade_phase_jobs.approved_by_role`,
   and `actor_role` on `artifact_audit` and `device_host_key_audit`, record the
   role at the time, since a role can change later. `user_admin_audit` gets a

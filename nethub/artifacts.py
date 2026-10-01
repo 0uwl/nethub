@@ -103,8 +103,14 @@ def ingest(*, file_storage, bundle_key, version, sha512, user,
     `user` (PLAN.md WS-16): then it lands `staged`, with its bytes in the
     store and its row written, but nothing can name it until someone else
     publishes it (`publish`). The bundle-key check is left to that moment.
+
+    The rule is read twice. Once up front, only so a 1.2 GB upload under a
+    key already published is refused before it streams rather than after;
+    and again once the bytes have verified, which is what decides. An admin
+    turning the rule on during a minutes-long upload must not see the
+    upload land published by its uploader alone.
     """
-    staged = user is not None and settings.applies('two_person_artifacts', user)
+    staged = _staged_for(user)
     bundle_key = (bundle_key or '').strip()
     if not _BUNDLE_KEY_RE.match(bundle_key):
         raise ArtifactError('Bundle key must be 1-80 characters of letters, digits, . + - _')
@@ -155,6 +161,9 @@ def ingest(*, file_storage, bundle_key, version, sha512, user,
             )
         if size == 0:
             raise ArtifactError('Uploaded file is empty.')
+        staged = _staged_for(user)
+        if not staged and _published_under(bundle_key, platform):
+            raise ArtifactError(f'An artifact is already published under "{bundle_key}".')
         # `os.link`, not `os.replace`: link fails with FileExistsError if the
         # target is taken, and replace silently overwrites. The three checks
         # above all ran minutes ago -- before the upload streamed -- so under
@@ -212,6 +221,10 @@ def ingest(*, file_storage, bundle_key, version, sha512, user,
     return artifact
 
 
+def _staged_for(user):
+    return user is not None and settings.applies('two_person_artifacts', user)
+
+
 def publish(artifact: Artifact, user) -> None:
     """Make a staged upload nameable by a run (PLAN.md WS-16).
 
@@ -227,19 +240,22 @@ def publish(artifact: Artifact, user) -> None:
         raise ArtifactError('You uploaded this image; someone else has to publish it.')
     if _published_under(artifact.bundle_key, artifact.platform):
         raise ArtifactError(f'An artifact is already published under "{artifact.bundle_key}".')
-    changed = (db.session.query(Artifact)
-               .filter(Artifact.id == artifact.id, Artifact.state == 'staged')
-               .update({'state': 'published', 'published_by': user.id,
-                        'published_at': _utcnow()}, synchronize_session='fetch'))
-    if changed != 1:
-        db.session.rollback()
-        raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
-    record_artifact_action('published', artifact, user)
     try:
+        # SQLite checks the partial unique index on (platform, bundle_key)
+        # when the UPDATE runs, not at COMMIT, so a publish racing this one
+        # under the same key fails here rather than at the commit.
+        changed = (db.session.query(Artifact)
+                   .filter(Artifact.id == artifact.id, Artifact.state == 'staged')
+                   .update({'state': 'published', 'published_by': user.id,
+                            'published_at': _utcnow()}, synchronize_session='fetch'))
+        if changed != 1:
+            db.session.rollback()
+            raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
+        record_artifact_action('published', artifact, user)
         db.session.commit()
     except IntegrityError:
-        # The partial unique index on (platform, bundle_key): someone
-        # published another upload under this key since the check above.
+        # Someone published another upload under this key since the check
+        # above.
         db.session.rollback()
         raise ArtifactError(
             f'An artifact is already published under "{artifact.bundle_key}".'
@@ -248,14 +264,31 @@ def publish(artifact: Artifact, user) -> None:
 
 def withdraw(artifact: Artifact, user) -> None:
     """Discard a staged upload, row and bytes. Nothing can have used it, so
-    it needs no second person: the uploader withdrawing it and a reviewer
-    declining it are the same act."""
+    it needs no second person -- but only its uploader or an admin may
+    withdraw it (PLAN.md WS-16): otherwise the person meant to be the second
+    check could erase someone's upload, possibly an hour's transfer, alone.
+    A reviewer who will not publish an upload simply does not.
+
+    The delete is conditional on the row still being `staged`, the same
+    shape as `publish`: a publish committing between this function's read
+    and its delete must not let a withdraw remove a published artifact past
+    the delete request and live-run check `delete` enforces.
+    """
+    if artifact.uploaded_by != user.id and not user.is_admin:
+        raise ArtifactError('Only the uploader or an admin can withdraw this upload.')
     if artifact.state != 'staged':
         raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
     path = artifact.storage_path
     record_artifact_action('withdrawn', artifact, user)
-    db.session.delete(artifact)
+    deleted = (db.session.query(Artifact)
+               .filter(Artifact.id == artifact.id, Artifact.state == 'staged')
+               .delete(synchronize_session=False))
+    if deleted != 1:
+        db.session.rollback()
+        raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
     db.session.commit()
+    if artifact in db.session:
+        db.session.expunge(artifact)  # its row is gone; don't let it refresh
     if path and os.path.isfile(path):
         os.remove(path)
 
@@ -281,13 +314,16 @@ def delete(artifact: Artifact, user=None) -> bool:
     Still no supersede: don't add `superseded_by_id` handling without the
     flow that reads it.
     """
-    if (user is not None and settings.applies('two_person_artifacts', user)
-            and artifact.delete_requested_by in (None, user.id)):
-        if artifact.delete_requested_by is None:
-            artifact.delete_requested_by, artifact.delete_requested_at = user.id, _utcnow()
+    if user is not None:
+        try:
+            step = settings.second_person_delete('two_person_artifacts', artifact, user)
+        except settings.RequestRaced as exc:
+            raise ArtifactError(str(exc)) from None
+        if step == settings.REQUESTED:
             record_artifact_action('delete_requested', artifact, user)
             db.session.commit()
-        return False
+        if step != settings.GO:
+            return False
     artifact_id, path = artifact.id, artifact.storage_path
     in_use = exists().where(
         UpgradeRunHost.artifact_id == artifact_id,

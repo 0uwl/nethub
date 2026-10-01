@@ -50,6 +50,7 @@ from .models import (
     APPROVABLE,
     RETRYABLE_AT,
     DeviceHostKey,
+    DeviceHostKeyAudit,
     UpgradePhaseJob,
     UpgradeRun,
     UpgradeRunHost,
@@ -264,10 +265,39 @@ def confirmed_key(address: str) -> DeviceHostKey:
     row = DeviceHostKey.query.filter_by(ansible_host=address).first()
     if row is None or not row.is_confirmed:
         raise RequestError(
-            f'{address} has no confirmed host key. An admin must confirm its '
-            f'fingerprint before any run may target it.'
+            f'{address} has no confirmed host key. Someone must scan it and confirm '
+            f'its fingerprint before any run may target it.'
         )
     return row
+
+
+def delete_pin(row: DeviceHostKey, user) -> bool:
+    """Remove a host-key pin, or under the two-person rule for host keys ask
+    for its removal (PLAN.md WS-16). False for a request: the pin stays in
+    force until someone else deletes it too.
+
+    Every step writes a `device_host_key_audit` row with the pre-image,
+    captured before the change (WS-6.4): it is the evidence the "deliberate
+    friction" before re-accepting a changed key used to leave none of.
+    """
+    try:
+        step = settings.second_person_delete('two_person_hostkeys', row, user)
+    except settings.RequestRaced as exc:
+        raise RequestError(str(exc)) from None
+    audit = {'ansible_host': row.ansible_host, 'key_type': row.key_type,
+             'fingerprint_sha256': row.fingerprint_sha256, 'actor_id': user.id,
+             'actor_role': user.role}
+    if step == settings.REQUESTED:
+        db.session.add(DeviceHostKeyAudit(action='delete_requested', requested_by=user.id,
+                                          **audit))
+        db.session.commit()
+    if step != settings.GO:
+        return False
+    db.session.add(DeviceHostKeyAudit(
+        action='deleted', requested_by=row.delete_requested_by or user.id, **audit))
+    db.session.delete(row)
+    db.session.commit()
+    return True
 
 
 def resolve_bundle(bundle: str, platform: str = 'iosxe'):
@@ -530,13 +560,17 @@ def _concurrency_for(phase, raw, cap):
     return reload_count(raw, cap) if phase == 'activate' else None
 
 
-def _check_second_person(run, user):
+def needs_second_person(run, user) -> bool:
     """The two-person rule for runs (PLAN.md WS-16): with it on, an operator
     may not approve a gate of, or retry, a run they submitted. Read when the
     approval happens, so turning the rule off releases a waiting run. Cancel
-    and declining cleanup never pass through here: stopping is the
-    conservative action."""
-    if settings.applies('two_person_runs', user) and run.submitted_by == user.id:
+    and declining cleanup never ask: stopping is the conservative action.
+    The run page asks too, so it shows the forms this would accept."""
+    return settings.applies('two_person_runs', user) and run.submitted_by == user.id
+
+
+def _check_second_person(run, user):
+    if needs_second_person(run, user):
         raise RequestError('The two-person rule for runs is on: someone other than '
                            'the submitter has to approve or retry this run.')
 

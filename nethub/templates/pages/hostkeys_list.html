@@ -6,6 +6,25 @@
 <p>An address with no <strong>confirmed</strong> pin cannot be named by any run.
 Confirming one is a deliberate action, separate from submitting a run.</p>
 <p><a href="{{ url_for('hostkeys.scan_hostkey') }}" role="button">Scan an address</a></p>
+{% if waiting %}
+<h2>Scans waiting to be confirmed</h2>
+<div class="overflow-auto">
+<table class="striped">
+  <thead><tr><th>Address</th><th>Scanned by</th><th>Confirm before</th><th></th></tr></thead>
+  <tbody>
+  {% for scan, deadline in waiting %}
+    <tr>
+      <td><code>{{ scan.ansible_host }}</code></td>
+      <td>{{ users.get(scan.requested_by, '?') }}</td>
+      <td>{{ deadline.strftime('%Y-%m-%d %H:%M') }} UTC</td>
+      <td><a href="{{ url_for('hostkeys.scan_result', scan_id=scan.id) }}">Review</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<h2>Pinned</h2>
+{% endif %}
 {% if keys %}
 <div class="overflow-auto">
 <table class="striped">

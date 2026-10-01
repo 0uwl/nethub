@@ -7,6 +7,7 @@ since the routes are where a refusal has to hold.
 
 import hashlib
 import io
+import os
 import sqlite3
 
 import pytest
@@ -110,9 +111,9 @@ class TestRoles:
     def test_a_role_change_is_audited_and_applies_on_the_next_request(self, app, people):
         with app.app_context():
             alice = uid('alice')
-        people['root'].post(f'/users/{alice}/role', data={'role': 'admin'})
+        people['root'].post(f'/users/{alice}/role', data={'role': 'admin', **CONFIRM})
         assert people['alice'].get('/users').status_code == 200
-        people['root'].post(f'/users/{alice}/role', data={'role': 'operator'})
+        people['root'].post(f'/users/{alice}/role', data={'role': 'operator', **CONFIRM})
         assert people['alice'].get('/users').status_code == 403
         with app.app_context():
             assert [(e.action, e.detail) for e in UserAdminAudit.query.filter_by(
@@ -122,11 +123,23 @@ class TestRoles:
     def test_you_cannot_change_your_own_role(self, app, people):
         with app.app_context():
             root = uid('root')
-        response = people['root'].post(f'/users/{root}/role', data={'role': 'operator'},
+        response = people['root'].post(f'/users/{root}/role',
+                                       data={'role': 'operator', **CONFIRM},
                                        follow_redirects=True)
         assert 'cannot change your own role' in flashed(response)
         with app.app_context():
             assert db.session.get(User, root).role == 'admin'
+
+    def test_an_unticked_role_change_changes_nothing(self, app, people):
+        """Promoting exempts someone from every rule: it takes the box."""
+        with app.app_context():
+            alice = uid('alice')
+        response = people['root'].post(f'/users/{alice}/role', data={'role': 'admin'},
+                                       follow_redirects=True)
+        assert 'Tick the box' in flashed(response)
+        with app.app_context():
+            assert db.session.get(User, alice).role == 'operator'
+            assert UserAdminAudit.query.filter_by(action='role_changed').count() == 0
 
     def test_the_last_active_admin_cannot_be_demoted(self, app, people, make_user,
                                                      monkeypatch):
@@ -145,7 +158,8 @@ class TestRoles:
             return target
 
         monkeypatch.setattr(auth, '_target', concurrent)
-        response = people['root'].post(f'/users/{second}/role', data={'role': 'operator'},
+        response = people['root'].post(f'/users/{second}/role',
+                                       data={'role': 'operator', **CONFIRM},
                                        follow_redirects=True)
         assert 'last active admin' in flashed(response)
         with app.app_context():
@@ -187,11 +201,20 @@ class TestRoles:
 
 # -- settings -------------------------------------------------------------------
 
+def settings_form(shown='off', **ticked):
+    """The settings form as a page showing two_person_runs at `shown` (and
+    the other rules off) would post it, with `ticked` boxes."""
+    form = {f'shown_{key}': 'off' for key in settings.TWO_PERSON_RULES}
+    form['shown_two_person_runs'] = shown
+    return {**form, **ticked}
+
+
 class TestSettings:
     def test_each_change_writes_an_audit_row(self, app, people):
-        people['root'].post('/settings', data={'two_person_runs': 'on'})
-        people['root'].post('/settings', data={'two_person_runs': 'on'})  # no change
-        people['root'].post('/settings', data={})
+        people['root'].post('/settings', data=settings_form(two_person_runs='on'))
+        people['root'].post('/settings', data=settings_form(
+            shown='on', two_person_runs='on'))  # no change
+        people['root'].post('/settings', data=settings_form(shown='on'))
         with app.app_context():
             assert not settings.enabled('two_person_runs')
             assert [(e.key, e.old_value, e.new_value, e.changed_by)
@@ -199,6 +222,17 @@ class TestSettings:
                 ('two_person_runs', None, 'on', uid('root')),
                 ('two_person_runs', 'on', 'off', uid('root')),
             ]
+
+    def test_a_form_from_before_a_change_changes_nothing(self, app, people):
+        """An old tab, loaded while the rule was off, must not turn it back off
+        by posting its unticked box."""
+        rule(app, 'two_person_runs', True)
+        response = people['root'].post('/settings', data=settings_form(shown='off'),
+                                       follow_redirects=True)
+        assert 'changed since you loaded this page' in flashed(response)
+        with app.app_context():
+            assert settings.enabled('two_person_runs')
+            assert SettingsAudit.query.count() == 1
 
     @pytest.mark.parametrize('statement', ['UPDATE settings_audit SET new_value = \'off\'',
                                            'DELETE FROM settings_audit'])
@@ -284,8 +318,114 @@ class TestArtifactRule:
         with app.app_context():
             assert Artifact.query.count() == 0
             assert [a for a, _, _ in artifact_trail()] == ['uploaded', 'withdrawn']
-        import os
         assert not os.path.exists(path)
+
+    def test_only_the_uploader_or_an_admin_can_withdraw(self, app, people):
+        """PLAN.md WS-16: the second check cannot erase an upload alone."""
+        rule(app, 'two_person_artifacts', True)
+        upload(people['alice'])
+        with app.app_context():
+            artifact_id = the_artifact().id
+        page = flashed(people['bob'].get('/artifacts'))
+        assert 'Withdraw upload' not in page
+        response = people['bob'].post(f'/artifacts/{artifact_id}/delete', data=CONFIRM,
+                                      follow_redirects=True)
+        assert 'Only the uploader or an admin' in flashed(response)
+        with app.app_context():
+            assert the_artifact().state == 'staged'
+        people['root'].post(f'/artifacts/{artifact_id}/delete', data=CONFIRM)
+        with app.app_context():
+            assert Artifact.query.count() == 0
+            assert artifact_trail()[-1] == ('withdrawn', uid('root'), 'admin')
+
+    def test_a_withdraw_racing_a_publish_deletes_nothing(self, app, people):
+        """The publish commits after the withdraw read the row: the withdraw
+        must not remove what is now published."""
+        from sqlalchemy.orm.attributes import set_committed_value
+
+        from nethub import artifacts
+        rule(app, 'two_person_artifacts', True)
+        upload(people['alice'])
+        with app.app_context():
+            a = the_artifact()
+            db.session.execute(db.text("UPDATE artifacts SET state = 'published'"))
+            db.session.commit()
+            set_committed_value(a, 'state', 'staged')  # what the withdraw read
+            with pytest.raises(artifacts.ArtifactError, match='not waiting'):
+                artifacts.withdraw(a, User.query.filter_by(username='alice').one())
+            assert Artifact.query.one().state == 'published'
+            assert os.path.exists(a.storage_path)
+            assert [x for x, _, _ in artifact_trail()] == ['uploaded']
+
+    def test_a_publish_racing_another_under_the_same_key_is_a_message(self, app, people,
+                                                                     monkeypatch):
+        """The other publish committed after this one's pre-check: SQLite
+        refuses the UPDATE itself, and that must not be a 500."""
+        from nethub import artifacts
+        rule(app, 'two_person_artifacts', True)
+        upload(people['alice'])
+        with app.app_context():
+            staged = the_artifact()
+            db.session.execute(db.text(
+                "INSERT INTO artifacts (kind, platform, bundle_key, filename, sha512, "
+                "file_size, storage_path, version, state, bytes_state, uploaded_at) VALUES "
+                "('image', 'iosxe', 'iosxe-17-12-06', 'other.bin', 'x', 1, '/other', "
+                "'v', 'published', 'present', '2026-10-01')"))
+            db.session.commit()
+            # The other publish committed after this one's pre-check.
+            monkeypatch.setattr(artifacts, '_published_under', lambda *a: None)
+            with pytest.raises(artifacts.ArtifactError, match='already published'):
+                artifacts.publish(staged, User.query.filter_by(username='bob').one())
+            assert db.session.get(Artifact, staged.id).state == 'staged'
+
+    def test_the_rule_is_read_when_the_upload_is_recorded(self, app, people, monkeypatch):
+        """Turned on while the bytes streamed: the upload lands staged."""
+        from werkzeug.datastructures import FileStorage
+
+        from nethub import artifacts
+
+        class TurnsTheRuleOn(io.BytesIO):
+            def read(self, *args):
+                if self.tell() == 0:
+                    with app.app_context():
+                        rule(app, 'two_person_artifacts', True)
+                return super().read(*args)
+
+        with app.app_context():
+            a = artifacts.ingest(
+                file_storage=FileStorage(stream=TurnsTheRuleOn(CONTENT), filename='x.bin'),
+                bundle_key='k', version='v', sha512=DIGEST,
+                user=User.query.filter_by(username='alice').one(),
+                store=current_app.config['ARTIFACT_STORE'])
+            assert (a.state, a.published_by) == ('staged', None)
+
+    def test_a_deleted_artifacts_id_is_never_reused(self, app, people):
+        """`artifact_audit.artifact_id` outlives the row it names."""
+        upload(people['alice'])
+        with app.app_context():
+            first = the_artifact().id
+        people['alice'].post(f'/artifacts/{first}/delete', data=CONFIRM)
+        upload(people['alice'])
+        with app.app_context():
+            assert the_artifact().id != first
+
+    def test_two_people_requesting_one_delete_make_one_request(self, app, people):
+        """bob's request committed after alice's delete read the row: hers
+        must not become a confirmation of a request she never saw."""
+        from sqlalchemy.orm.attributes import set_committed_value
+
+        from nethub import artifacts
+        upload(people['alice'])
+        rule(app, 'two_person_artifacts', True)
+        with app.app_context():
+            a = the_artifact()
+            db.session.execute(db.text('UPDATE artifacts SET delete_requested_by = :id'),
+                               {'id': uid('bob')})
+            db.session.commit()
+            set_committed_value(a, 'delete_requested_by', None)  # what alice read
+            with pytest.raises(artifacts.ArtifactError, match='at the same moment'):
+                artifacts.delete(a, User.query.filter_by(username='alice').one())
+            assert the_artifact().delete_requested_by == uid('bob')
 
     def test_with_it_on_a_delete_is_a_request_someone_else_confirms(self, app, people):
         upload(people['alice'])
@@ -395,6 +535,29 @@ class TestHostKeyRule:
         assert 'someone other than you' in flashed(people['alice'].get(
             f'/hostkeys/scan/{scan}'))
         assert '/hostkeys/confirm' in flashed(people['bob'].get(f'/hostkeys/scan/{scan}'))
+
+    def test_the_confirmer_is_told_the_deadline_and_finds_the_scan_listed(self, app,
+                                                                         people):
+        from nethub.upgrade_routes import confirm_by
+        rule(app, 'two_person_hostkeys', True)
+        with app.app_context():
+            scan = scan_by('alice')
+            deadline = confirm_by(db.session.get(HostKeyScan, scan)).strftime('%H:%M')
+        assert deadline in flashed(people['alice'].get(f'/hostkeys/scan/{scan}'))
+        listing = flashed(people['bob'].get('/hostkeys'))
+        assert f'/hostkeys/scan/{scan}' in listing and deadline in listing
+
+    def test_a_stale_or_used_scan_is_not_listed(self, app, people):
+        from datetime import timedelta
+        with app.app_context():
+            old = db.session.get(HostKeyScan, scan_by('alice'))
+            old.finished_at = upgrades._utcnow() - timedelta(minutes=16)
+            used = db.session.get(HostKeyScan, scan_by('alice'))
+            used.consumed_at = upgrades._utcnow()
+            db.session.commit()
+            ids = (old.id, used.id)
+        listing = flashed(people['bob'].get('/hostkeys'))
+        assert all(f'/hostkeys/scan/{i}' not in listing for i in ids)
 
     def test_turning_the_rule_off_releases_a_waiting_scan(self, app, people):
         rule(app, 'two_person_hostkeys', True)

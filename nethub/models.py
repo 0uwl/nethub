@@ -148,6 +148,11 @@ class Artifact(db.Model):
         # database rather than by whatever writes the row remembering to check.
         db.Index('uq_artifact_bundle_key', 'platform', 'bundle_key', unique=True,
                  sqlite_where=db.text("kind = 'image' AND state = 'published'")),
+        # AUTOINCREMENT: SQLite otherwise reuses a deleted highest id, and
+        # `artifact_audit.artifact_id` outlives the row. Without it, deleting
+        # the newest artifact and uploading another would file two images'
+        # histories under one id (PLAN.md WS-16).
+        {'sqlite_autoincrement': True},
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -194,7 +199,7 @@ class ArtifactAudit(db.Model):
     held at the time (PLAN.md WS-16).
 
     Keyed on copies of the artifact's identity rather than a foreign key, so
-    it outlives the row a delete removes: an admin deleting alone has to stay
+    it outlives the row a delete removes (`artifacts` never reuses an id): an admin deleting alone has to stay
     visible after the thing deleted is gone. Append-only by trigger.
     """
 
