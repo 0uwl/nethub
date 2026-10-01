@@ -80,7 +80,8 @@ def spy(monkeypatch):
     def _spy(module, name):
         def record(*args, **kwargs):
             calls.append(name)
-            return SimpleNamespace(id=0)  # a job, for the routes that flash its id
+            # A job, for the routes that flash its id and its start time.
+            return SimpleNamespace(id=0, not_before=None)
         monkeypatch.setattr(module, name, record)
         return calls
     return _spy

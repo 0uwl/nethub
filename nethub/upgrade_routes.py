@@ -52,6 +52,14 @@ hostkeys_bp = Blueprint('hostkeys', __name__)
 SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
 
 
+def _when(job):
+    """What to add to an approval's flash: nothing, or the window it waits
+    for. UTC, like the form and the page (`upgrades.start_time`)."""
+    if job.not_before is None:
+        return ''
+    return f', scheduled for {job.not_before:%Y-%m-%d %H:%M} UTC'
+
+
 # -- host keys ---------------------------------------------------------------
 
 @hostkeys_bp.route('/hostkeys')
@@ -254,7 +262,13 @@ def show_run(run_id):
     # PLAN.md WS-11: reload while the sibling has work on this run, say so
     # when it has stopped beating or nobody is taking work, and tell an
     # approver what their approval would queue behind. All reads.
-    live = [j for j in jobs if j.status in ('queued', 'running')]
+    # A job approved for a maintenance window is queued but not waiting for a
+    # worker (WS-14), so it neither refreshes the page every five seconds all
+    # day nor trips the "no worker" notice; it gets its own line instead.
+    live = [j for j in jobs
+            if j.status == 'running' or worker_status.is_waiting(j)]
+    scheduled = [j for j in jobs
+                 if j.status == 'queued' and not worker_status.is_waiting(j)]
     queued_ahead, running_now = worker_status.queue_depth()
     gate_hosts = []
     if run.state == 'awaiting_approval' and run.awaiting_phase in STATE_BEFORE:
@@ -269,7 +283,8 @@ def show_run(run_id):
         stalled_ids={j.id for j in live if worker_status.is_stalled(j)},
         no_worker=any(j.status == 'queued' for j in live) and worker_status.no_worker(),
         queued_ahead=queued_ahead, running_now=running_now,
-        gate_hosts=gate_hosts,
+        gate_hosts=gate_hosts, scheduled=scheduled,
+        max_schedule_hours=int(upgrades.MAX_SCHEDULE_AHEAD.total_seconds() // 3600),
     )
 
 
@@ -290,8 +305,9 @@ def approve(run_id):
             public_key=current_app.extensions['credential_public_key'],
             concurrency=request.form.get('concurrency'),
             cap=current_app.config['PHASE_CONCURRENCY'],
+            start_at=request.form.get('start_at'),
         )
-        flash(f'Approved {phase}; queued as job #{job.id}.', 'success')
+        flash(f'Approved {phase}; queued as job #{job.id}{_when(job)}.', 'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))
@@ -316,9 +332,10 @@ def retry(run_id):
             public_key=current_app.extensions['credential_public_key'],
             concurrency=request.form.get('concurrency'),
             cap=current_app.config['PHASE_CONCURRENCY'],
+            start_at=request.form.get('start_at'),
         )
-        flash(f'Retrying {phase} on the hosts that failed it; queued as job #{job.id}.',
-              'success')
+        flash(f'Retrying {phase} on the hosts that failed it; '
+              f'queued as job #{job.id}{_when(job)}.', 'success')
     except upgrades.RequestError as exc:
         flash(str(exc))
     return redirect(url_for('upgrades.show_run', run_id=run_id))

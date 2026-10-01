@@ -2426,8 +2426,10 @@ Several rules fall out of this:
   cleanly by never starting.
 - **`queued` is bounded too.** §8's wall-clock timeout starts at *run*,
   so a job that never starts has no bound at all. `deadline_at` (§5) is
-  set at enqueue rather than at dispatch, and a job that passes it
-  without being claimed goes to `expired`. This is the same bound §9.1
+  set at enqueue rather than at dispatch — from `not_before` when the
+  approval named one, so a job approved for tonight does not arrive
+  already past it — and a job that passes it without being claimed goes
+  to `expired`. This is the same bound §9.1
   puts on a held credential, arriving from the queue's side. The
   sibling's dispatch loop checks for a queued `host_key_scans` row ahead
   of a queued `upgrade_phase_jobs` row on every iteration, rather than
@@ -2441,6 +2443,20 @@ Several rules fall out of this:
   `failure_stage: credential` before any sane `deadline_at` would — not
   a bug, just a reason not to spend effort tuning `deadline_at`
   precision for phase jobs specifically.
+- **"Queued" and "waiting" are not the same thing.** An approval may
+  carry a start time (§8.1), which is `upgrade_phase_jobs.not_before`, and
+  the sibling takes the oldest job by `coalesce(not_before, created_at)`
+  among those now due. A job scheduled for tonight is therefore skipped
+  rather than blocking work approved for now, and it is not evidence of a
+  worker that has stopped taking rows: the web pages infer "nothing is
+  picking this up" from the same expression, or every run approved for a
+  maintenance window would raise that warning all day. Everything after
+  the claim is unchanged — a due job still waits for whatever is running,
+  and its deadline covers that wait. One carve-out keeps the `queued` →
+  `cancelled` edge above reachable: a job whose run has been cancelled is
+  due immediately whatever its start time, since a scheduled approval
+  leaves the run `running` and the sibling is the only actor that may
+  finish the job.
 - **A failed ingest doesn't leave a partial artifact.** §7.2 already
   covers this at the mechanism level: the row commits only after the
   bytes are linked into place, so a failure at any point before that
@@ -2464,7 +2480,7 @@ same shape minus the three states it has no use for:
 | from | to | actor |
 | --- | --- | --- |
 | — | `queued` | Flask, on submit or on approval |
-| `queued` | `running` | sibling, conditional claim that also clears the sealed credential (§9.1) |
+| `queued` | `running` | sibling, conditional claim that also clears the sealed credential (§9.1); not before `not_before`, when the approval named a window (§8.1) |
 | `queued` | `cancelled` | sibling, seeing the cancel column |
 | `queued` | `expired` | sibling, past `deadline_at` |
 | `running` | `succeeded` / `partial` / `failed` | sibling, on phase completion (every host passed / some did / none did); `failed` also when the credential cannot be opened or its own code raises |
@@ -2837,6 +2853,36 @@ doing it this way rather than with a terminal. "Who authorized the
 reload of this device, and when" is a question the phase model answers
 by construction; a terminal transcript is not an audit record.
 
+**An approval may also name when the phase starts, which is what makes a
+maintenance window possible without anyone awake for it.** Upgrades run
+at 02:00; approving at 02:00 needs a person at 02:00. So a gated approval
+may carry a start time — `upgrade_phase_jobs.not_before`, UTC, optional
+and empty meaning now — and the sibling simply does not claim the job
+until then. Everything else about the approval is unchanged, which is the
+reason this is cheap: the approver is named, their credential is sealed
+into that same row as always (§9.1), and only Flask creates queued rows.
+A scheduled upgrade is an approval with a start time, *not* a run that
+holds one credential from scheduling until it finishes: the credential
+stays per phase, so it is stored sealed for hours rather than days, and a
+person still reviews each phase's result before approving the next. A
+fully non-interactive run is §10's question, not this one.
+
+Four bounds fall out, and each is a refusal rather than a warning:
+pre-check is not schedulable at all (it runs at submit, so a wrong
+password or an unreachable device surfaces when the run is created rather
+than in the window); a start time in the past is refused; one past the
+gate's own `gate_expires_at` is refused, since a closed gate cannot open
+into it; and one further ahead than a cap (72 hours) is refused, which is
+what bounds how long a sealed credential sits in the database (§9.1).
+`deadline_at` runs from `not_before`, so a job that could not start
+inside its window ends `expired` with `failure_stage: credential`, the
+same path §9.1 describes for any unstarted job. Changing a start time
+means cancelling the run: rescheduling in place would have Flask writing
+a queued job after dispatch, which §7.3's actor table does not allow.
+`approved_at`, `not_before` and `started_at` together are the audit
+record that a phase ran on a scheduled approval rather than with someone
+at the gate.
+
 What follows from the split:
 
 - **The plan phase dissolves into the UI.** There is no `plan` value in
@@ -3155,6 +3201,14 @@ control anywhere else.
   for a gated phase, the submitter for pre-check, which has no gate (§8.1).
   `expires_at` is the job's `deadline_at`, so a credential waits exactly as
   long as its job may, and there is no separate time-to-live to run out.
+  **How long that can be is bounded by two numbers and nothing else.** With
+  no start time the job is claimed within the sibling's poll interval, so
+  the wait is seconds; with one (§8.1) the job waits until its window, and
+  `deadline_at` runs from there. The longest a sealed credential can sit in
+  the database is therefore the scheduling cap (72 hours) plus that phase's
+  own budget — hours, not the days a run can spend parked at a gate, which
+  is exactly the distinction that keeps a scheduled approval from becoming
+  "one credential held for the life of the run".
 - The sibling's claim reads the ciphertext and clears the column in the
   conditional update that claims the job (`... WHERE status='queued' AND
   sealed_credential = <what was read>`, one changed row or nothing). It then
@@ -3181,8 +3235,11 @@ approval rather than once at submit: submitting collects for pre-check,
 approving the copy for stage, approving the reload for activate and the
 verify that follows it, and approving cleanup for cleanup — up to four
 password entries across a full run. What changed is that an approval now
-survives a web restart and a long queue: the credential waits in the row,
-sealed, until its job runs or its deadline passes.
+survives a web restart, a long queue, and — since a gated approval may name
+a start time (§8.1) — a maintenance window hours away: the credential waits
+in the row, sealed, until its job runs or its deadline passes. Scheduling
+does not add a password entry; it moves when the one already given is
+spent.
 
 The ergonomic cost is not the only cost: training operators to type an
 enable-capable AAA password into a web form four times a run makes the
@@ -3296,6 +3353,22 @@ the next attempt gets a credential.
   because it needs the device password on an interface with no secure
   credential-delivery path built for it yet (§4.3.1's contract for what
   that path would need).
+- **Possible future work: a fully non-interactive run.** §8.1's scheduled
+  approval moves *when* a phase runs; it still asks a person to approve
+  each gate, having read the previous phase's result. "Submit it on Friday
+  and let the whole thing run over the weekend" is a different feature, and
+  it needs four things this design does not have. A rule for what
+  "continue without review" means after a `partial` phase, since today a
+  human reads the per-host results and decides. The sibling creating queued
+  rows, which §7.3's actor table currently gives to Flask alone and which
+  is what keeps "an approval is a row naming a human" true. A run-level
+  rule for the ciphertext to replace "only while queued", since one
+  credential would have to outlive every phase of the run — the storage
+  bound §9.1 states would go from hours to the length of the whole run. And
+  an audit column recording that nobody was at the gate, because otherwise
+  `approved_by` claims a review that did not happen. Each of those is a
+  deliberate property being traded, not an implementation detail, which is
+  why scheduling was built first and separately.
 - **Possible future transport: device-side pull.** An earlier revision
   let a deployment choose between the SCP push and the device fetching
   its own image over SFTP (`copy sftp://…`). The pull adapter was written

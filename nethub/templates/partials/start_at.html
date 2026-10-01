@@ -1,0 +1,15 @@
+{#
+  PLAN.md WS-14. The optional maintenance window on an approval. UTC, stated
+  on the field: a `datetime-local` posts a wall-clock string with no offset,
+  and there is no JavaScript here to tell the server the browser's zone.
+#}
+{% macro start_at(field_id, hours) -%}
+<label for="{{ field_id }}">Start at (UTC) &mdash; optional</label>
+<input type="datetime-local" id="{{ field_id }}" name="start_at"
+       aria-describedby="{{ field_id }}_help">
+<small id="{{ field_id }}_help">Leave empty to start as soon as the sibling is
+free. A time here is <strong>UTC</strong>, at most {{ hours }} hours ahead, and
+before this gate expires. Your credential is sealed in the job row until then,
+and the phase runs with nobody at the gate. Changing the time means cancelling
+the run.</small>
+{%- endmacro %}

@@ -561,8 +561,15 @@ class UpgradePhaseJob(db.Model):
     error_summary = db.Column(db.String(500))
 
     #: The queue has nothing else to order by -- `started_at` is null until
-    #: dispatch (§5).
+    #: dispatch (§5) -- except a start time an approver chose (`not_before`);
+    #: `due_at()` is the coalesce of the two that the queue actually uses.
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    #: The earliest the sibling may claim this job, UTC, or null for "now"
+    #: (PLAN.md WS-14). An approval for a maintenance window is still an
+    #: ordinary approval: the credential is sealed into the row as usual and
+    #: `deadline_at` is measured from here, so the sealed `expires_at`
+    #: follows the window rather than needing a TTL of its own.
+    not_before = db.Column(db.DateTime)
     started_at = db.Column(db.DateTime)
     #: Flask *reads* this and renders "stalled" (`worker_status`). The sweep lives in the sibling
     #: so it cannot fire against a healthy run, which means a sibling that dies
@@ -581,6 +588,18 @@ class UpgradePhaseJob(db.Model):
     #: read it. Null for `verify`, which runs on `activate`'s credential, and
     #: for every job that is no longer queued.
     sealed_credential = db.Column(db.LargeBinary)
+
+
+def due_at():
+    """When a queued job becomes claimable: its `not_before`, or the moment it
+    was created (PLAN.md WS-14).
+
+    One expression rather than three, because the sibling's queue and the two
+    things the web pages infer from it -- "nothing is picking up work" and
+    "queued ahead of you" -- have to agree on what "waiting" means. A job
+    scheduled for tonight is not waiting on anything.
+    """
+    return db.func.coalesce(UpgradePhaseJob.not_before, UpgradePhaseJob.created_at)
 
 
 class UpgradeHostPhaseResult(db.Model):

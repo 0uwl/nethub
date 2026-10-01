@@ -369,9 +369,10 @@ def submit(client) -> int:
     }))
 
 
-def approve(client, run_id: int, phase: str) -> None:
+def approve(client, run_id: int, phase: str, start_at: str = "") -> None:
     client.post(f"/upgrades/{run_id}/approve",
-                data={"phase": phase, "device_password": DEVICE_PASS, "confirm": "yes"})
+                data={"phase": phase, "device_password": DEVICE_PASS, "confirm": "yes",
+                      "start_at": start_at})
 
 
 @pytest.fixture
@@ -796,3 +797,39 @@ class TestCanaryActivation:
         for address in (ADDRESS, ADDRESS2, ADDRESS3):
             assert switch[address].version == TARGET
             assert switch[address].unexpected == []
+
+
+class TestScheduledApproval:
+    def test_a_reload_approved_for_a_window_runs_at_that_time_unattended(
+        self, app, web, work, switch, submitted, credential_channel
+    ):
+        """PLAN.md WS-14's done-when: stage during the day, approve the reload
+        for that night, and it runs with nobody at the gate. The credential
+        waits sealed in the row; nothing is held in either process."""
+        assert work() == ["succeeded"]
+        approve(web, submitted, "stage")
+        assert work() == ["succeeded"]
+
+        window = datetime.now(timezone.utc) + timedelta(hours=6)
+        approve(web, submitted, "activate", start_at=window.strftime("%Y-%m-%dT%H:%M"))
+        seen = len(switch.commands)
+
+        assert work() == [], "the sibling takes nothing before the window"
+        assert switch.commands[seen:] == [], "and touches no device"
+        assert state(app, submitted)["jobs"][-1] == ("activate", "queued")
+        assert credential_channel.held() == 1, "the credential waits sealed in the row"
+
+        credential_channel.clock.offset = timedelta(hours=6, minutes=1)
+        # One pass again: verify still follows activate on the same credential.
+        assert work() == ["succeeded"]
+        assert state(app, submitted)["run"] == ("awaiting_approval", "cleanup")
+        assert switch.version == TARGET
+        assert credential_channel.held() == 0
+
+        with app.app_context():
+            job = UpgradePhaseJob.query.filter_by(
+                run_id=submitted, phase="activate").one()
+            # approved_at, not_before and started_at together are the record
+            # that this ran on a scheduled approval, not with someone at the gate.
+            assert job.not_before is not None
+            assert job.approved_at < job.not_before <= job.started_at
