@@ -13,10 +13,14 @@
 # scan of the published image instead.
 version: 2
 updates:
-  # The SHA pins in .github/workflows/cicd.yml. Dependabot rewrites the SHA and
-  # the version comment beside it together.
+  # The SHA pins in .github/workflows/cicd.yml and in the local composite
+  # action it calls. Dependabot rewrites the SHA and the version comment beside
+  # it together. `/` covers .github/workflows only; a composite action's own
+  # `uses:` lines are found only if its directory is listed as well.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday

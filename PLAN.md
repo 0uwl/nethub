@@ -613,7 +613,12 @@ Branch `ci/hardening`.
   prereleases, GitHub release created last), Trivy scanning of every image
   build and weekly of the published image. Trivy fails on fixable
   `CRITICAL,HIGH`; DynaForm's MEDIUM is specific to rendering user templates,
-  which NetHub does not do.
+  which NetHub does not do. *Changed by the maintainer on 2026-10-01:* the
+  scans report instead of failing (SARIF to code scanning, the table in the
+  job summary, a warning annotation), because nearly every finding is in the
+  Debian base, which NetHub cannot patch, and the gate was blocking every
+  merge and release until upstream rebuilt it. See CLAUDE.md, "CI and
+  releases".
 - Dependabot for the actions, the pip lockfiles and the base image.
 - zizmor in the lint job, so a regression in the workflow's own security
   fails CI instead of relying on review.
