@@ -34,5 +34,5 @@ gunicorn==26.2.0
 # as a paramiko dependency; pinned in its own right because NetHub now calls
 # it directly and a change in it changes what can open a stored credential.
 PyNaCl==1.6.2
-netmiko==4.7.0
+netmiko==4.8.0
 ntc-templates==9.3.0
