@@ -83,7 +83,11 @@ the workflow itself, and a check that the lockfiles match their `.in`
 files), the test suite, and an image build that is smoke-tested
 (`scripts/smoke_test.sh`: web and sibling containers started the way the
 Quadlet units start them) and scanned by Trivy for fixable CRITICAL and HIGH
-CVEs. It also scans the published image weekly. Dependabot proposes updates to
+CVEs. It also scans the published image weekly. The scans report and do not
+fail the build: findings are listed in the job summary, flagged as a warning
+on the run, and uploaded to the repository's Security tab (Code scanning).
+Most are in the Debian base image and are fixed by Dependabot's base-image
+update; one in a pinned Python package is fixed by bumping the pin. Dependabot proposes updates to
 the pinned actions, Python packages and base image. A merge to `main` publishes
 nothing; see [Releasing](#releasing).
 
@@ -98,8 +102,8 @@ To run the smoke test locally against an image you built:
 ### Releasing
 
 Push a version tag: `git tag v1.4.0 && git push origin v1.4.0`. CI lints and
-tests, builds the image, runs the smoke test and the Trivy scan, and only then
-pushes `ghcr.io/<owner>/nethub` as `:1.4.0`, `:1.4` and `:latest` (amd64 and
+tests, builds the image, runs the smoke test and the Trivy scan (which reports
+findings but does not stop the release), and only then pushes `ghcr.io/<owner>/nethub` as `:1.4.0`, `:1.4` and `:latest` (amd64 and
 arm64), then creates the GitHub release with generated notes. A tag with a
 hyphen (`v1.4.0-rc1`) is a prerelease: it publishes `:1.4.0-rc1` only, never
 `:latest`. A release drafted by hand in the web UI works too; its notes are

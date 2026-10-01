@@ -246,7 +246,7 @@ scans `ghcr.io/<repo>:latest` for CVEs disclosed since release. **Only a `v*`
 tag publishes**: `publish` needs `lint` and `test`, builds amd64, smoke-tests
 and scans it, then pushes amd64+arm64 as `:X.Y.Z`, `:X.Y` and `:latest`
 (a hyphenated prerelease tag gets only its own tag), and creates the GitHub
-release last so a release means a green, published image. A merge to `main`
+release last so a release means a built, smoke-tested, published image. A merge to `main`
 publishes nothing. What is load-bearing:
 
 - **Every `uses:` is pinned to a commit SHA, tag in a comment** (two spaces
@@ -255,17 +255,37 @@ publishes nothing. What is load-bearing:
   `image-tag` input by tag and digest, because the action just runs
   `ghcr.io/immanuwell/droast:<image-tag>`, which defaults to `latest`.
   trivy-action pins its own nested actions and Trivy (v0.70.0) itself, but
-  the vulnerability database is fetched per run, so a re-run can fail where
-  the first passed. That is the gate working.
-- **Trivy fails on fixable `CRITICAL,HIGH`** (`SCAN_SEVERITY`, one env block
-  for every scan). DynaForm adds MEDIUM because Jinja2 sandbox escapes rate
-  MEDIUM and it renders user templates; NetHub renders none, so the
-  maintainer chose CRITICAL,HIGH (2026-09-28). The `image` gate can fail a PR
-  that did not cause it (a CVE published overnight against the base); the fix
-  is the Dependabot digest bump, not loosening the gate.
+  the vulnerability database is fetched per run, so a re-run can report
+  findings the first did not.
+- **Trivy reports fixable `CRITICAL,HIGH` and never fails a job**
+  (`SCAN_SEVERITY`, one env block for every scan). DynaForm adds MEDIUM
+  because Jinja2 sandbox escapes rate MEDIUM and it renders user templates;
+  NetHub renders none, so the maintainer chose CRITICAL,HIGH (2026-09-28).
+  The scans were gates until 2026-10-01, when the maintainer made them
+  advisory: nearly every finding is in the Debian base image, which NetHub
+  cannot patch, and the gate was blocking every merge on someone else's
+  fix (the pinned base carried 7 fixable HIGHs that day). Each scan runs
+  Trivy twice, SARIF then a table, against one downloaded database;
+  `scripts/trivy_report.sh` writes the table to the job summary and raises a
+  warning annotation per finding count, and `image` (PR and `main`) and
+  `scan-published` upload the SARIF to GitHub code scanning under
+  categories `trivy-image` and `trivy-published`. `publish` uploads nothing:
+  code scanning tracks branches, and `main` already uploaded for that code.
+  Two settings are load-bearing: **`limit-severities-for-sarif: true`**,
+  without which the action drops `severity` for SARIF and uploads every LOW
+  and MEDIUM (46 results against 7, measured on the pinned base), and **no
+  `exit-code`**. A scan that produces no SARIF at all still fails the job:
+  a scanner that did not run must not read as zero findings. A finding in
+  NetHub's own pinned Python packages arrives the same way, and that one is
+  ours to fix by bumping the pin. Uploads from a fork's pull request are
+  skipped (read-only token), and a failed upload on any pull request does not
+  fail the job. GitHub's own "Code scanning results" check on a pull request
+  can still go red for a *new* alert; it blocks nothing unless branch
+  protection requires it.
 - **Permissions default to `contents: read`.** Only `publish` gets
   `packages: write` and `contents: write` (the release), `scan-published`
-  `packages: read`. Checkouts use `persist-credentials: false`. Untrusted
+  `packages: read`, and `image` and `scan-published` `security-events: write`
+  (the SARIF upload). Checkouts use `persist-credentials: false`. Untrusted
   values reach shell through `env:`, never `${{ }}` inside `run:`.
 - **Nothing on the release path reads a cache another run wrote.** zizmor's
   cache-poisoning audit flags any cache in a tag-triggered workflow. So
