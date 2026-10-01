@@ -85,8 +85,8 @@ class TestDisable:
         with app.app_context():
             assert db.session.get(User, alice).is_active
 
-    def test_the_last_active_user_is_never_disabled(self, app, logged_in_client, bob,
-                                                    monkeypatch):
+    def test_the_last_active_admin_is_never_disabled(self, app, logged_in_client, bob,
+                                                     monkeypatch):
         """Two users disabling each other at once: each request passed its
         checks before the other committed. Simulated by disabling alice in the
         database while her request to disable bob is in flight; the check in
@@ -103,7 +103,7 @@ class TestDisable:
         monkeypatch.setattr(auth, '_target', concurrent)
         response = logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM,
                                          follow_redirects=True)
-        assert b'last active user' in response.data
+        assert b'last active admin' in response.data
         with app.app_context():
             assert db.session.get(User, bob_id).is_active
             assert UserAdminAudit.query.filter_by(action='disabled').count() == 0

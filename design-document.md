@@ -8,11 +8,12 @@
 > `nethub/sibling.py` replaces `ansible-runner` dispatch with the same
 > out-of-process/never-in-Flask discipline this document argues for. The
 > alpha's actual deviations from what follows — local username/password
-> auth instead of OIDC, no `sessions` table, no `settings`/`settings_audit`,
-> no roles — are tracked in `CLAUDE.md`, which is the authoritative
+> auth instead of OIDC, no `sessions` table, roles set by an admin rather
+> than derived from an IdP group — are tracked in `CLAUDE.md`, which is the authoritative
 > account of what exists today. Provisioning (day-0) remains entirely
-> unimplemented. Sections below describing unbuilt pieces (day-0, OIDC,
-> server-side sessions, the `settings` table, role-based access, a
+> unimplemented. Sections below describing unbuilt pieces (day-0, OIDC and
+> the roles it derives, server-side sessions, the OIDC and allowlist rows
+> of the `settings` table, a
 > git-committed registry) are kept as forward-looking design, argued at
 > the same level of detail as the parts that now exist — verify against
 > `CLAUDE.md` before assuming any specific claim below is already true.
@@ -873,6 +874,24 @@ what a person's device credential actually authorizes on the device
 itself. Who gets to set that role, and whether NetHub or the IdP owns
 the decision, differs by auth backend — see §4.4.
 
+Roles are built for local accounts. On top of them an admin can turn on
+three **two-person rules**, one each for artifacts, host keys and run
+operations (`settings`, §5). They bind operators only: under the artifact
+rule an upload stays `staged` until someone other than its uploader
+publishes it, and deleting a published image is a request someone else
+confirms; under the host-key rule the confirmer of a scan is not the
+person who requested it, and removing a pin is likewise a request; under
+the run rule every gate approval and every retry comes from someone other
+than the run's submitter. Cancelling and declining cleanup are exempt:
+stopping is the conservative action. Admins are exempt too, and act
+visibly: the actor's role at the time is recorded on the job row for
+approvals and in `artifact_audit`/`device_host_key_audit`. Each rule is
+read when the second action happens, so switching one off releases what
+was waiting on it. The host-key rule is the separation of duty this
+section asks of first contact; with it off, only the person who requested
+a scan may confirm it, which proves the confirmation matches a key NetHub
+observed but not that a second person looked.
+
 The username is not collected. It is `users.device_username`, mapped
 from the OIDC identity server-side and set by an administrator rather
 than by its owner. A username the submitter can type is not evidence of
@@ -1491,8 +1510,13 @@ constraints, partial indexes and the terminal-status trigger included.
   `id`, `kind` (script/config/image), `platform`, `bundle_key`,
   `filename`, `sha512`, `file_size`, `storage_path`,
   `version`, `state`, `superseded_by_id`, `bytes_state`,
-  `bytes_pruned_at`, `uploaded_by`, `uploaded_at`. Every byte NetHub
-  serves, on either day, has exactly one row here.
+  `bytes_pruned_at`, `uploaded_by`, `uploaded_at`, `published_by`,
+  `published_at`, `delete_requested_by`, `delete_requested_at`. Every
+  byte NetHub serves, on either day, has exactly one row here.
+  `published_by` is the uploader unless the two-person rule for
+  artifacts (§4.3) held the upload `staged` for someone else;
+  `delete_requested_*` record a delete waiting for its second person,
+  during which the artifact stays usable.
   - `storage_path` is where the blob actually lives on disk, and is what
     §7.3's retention purge collects by. There is no `remote_dir`: that
     column existed because the distribution host could once have been a
@@ -1518,21 +1542,34 @@ constraints, partial indexes and the terminal-status trigger included.
     forever by one surviving job row. The row outlives the bytes and
     says so, so an audit query returns "published 2023-04, image pruned
     2026-04" rather than a path that silently no longer resolves. In
-    practice only `published` and `present` are ever written today —
-    there is no promotion step that reaches `staged` through and no
-    supersede flow yet, the same no-supersede stance an earlier iteration
-    of this store had — so `superseded_by_id` handling arrives with the
-    flow that reads it, not before.
+    practice only `present` is ever written today, and of the states
+    only `staged` and `published` — there is no supersede flow yet, the
+    same no-supersede stance an earlier iteration of this store had — so
+    `superseded_by_id` handling arrives with the flow that reads it, not
+    before.
   - `bundle_key` is what a day-2 request names to resolve an image
     (`hosts[].bundle`, §8.1): `UNIQUE(platform, bundle_key)` over rows
     where `kind = 'image'` and `state = 'published'` gives one published
     image per bundle key per platform, enforced by the database rather
     than by whatever writes the row remembering to check.
   - `state` runs `staged` → `published` → `superseded`, with
-    `superseded_by_id` pointing at the row that replaced it, though in
-    practice only `published` is ever written today (`bytes_state`
-    likewise only ever reaches `present`, above); delete is still a hard
-    removal of row and bytes rather than a supersede.
+    `superseded_by_id` pointing at the row that replaced it. An upload
+    lands `published` unless the two-person rule for artifacts binds its
+    uploader, when it lands `staged` and a different user publishes it
+    (§7.3); the bundle-key uniqueness check runs at that moment. Nothing
+    writes `superseded` yet (`bytes_state` likewise only ever reaches
+    `present`, above); delete is still a hard removal of row and bytes
+    rather than a supersede, and a staged upload can be withdrawn the
+    same way.
+- `artifact_audit` table: `id`, `at`, `artifact_id`, `bundle_key`,
+  `filename`, `sha512`, `action` (`uploaded` | `published` | `withdrawn`
+  | `delete_requested` | `deleted`), `actor_id`, `actor_role`.
+  Append-only by the same unconditional triggers as `settings_audit`.
+  It copies the artifact's identity rather than holding a foreign key,
+  and `artifacts` is `AUTOINCREMENT` so an id it names is never reused,
+  so the record of a delete outlives the row it removed — an admin
+  deleting alone under the two-person rule has to stay visible after
+  the thing deleted is gone.
   - Indexed on `(kind, platform)` for the browse views and on `sha512`
     for duplicate detection at ingest.
 
@@ -1701,7 +1738,9 @@ described there are `upgrade_phase_jobs`-only now.
     (§4.3.1, §10).
 - `device_host_keys` table: `ansible_host`, `key_type`,
   `fingerprint_sha256`, `first_seen_at`, `confirmed_by`,
-  `confirmed_at`, `UNIQUE(ansible_host)`. One row per address NetHub has
+  `confirmed_at`, `delete_requested_by`, `delete_requested_at` (a
+  removal waiting for its second person; the pin stays in force),
+  `UNIQUE(ansible_host)`. One row per address NetHub has
   connected to, supporting §4.3's fail-closed host-key check. It is
   keyed on the address rather than on a device identity on purpose:
   NetHub is not tracking devices (§2), it is remembering what answered
@@ -1743,14 +1782,18 @@ described there are `upgrade_phase_jobs`-only now.
   action reads the address, key type and fingerprint off this row rather
   than from request-body fields a submitter could otherwise supply, and
   refuses a scan already spent, from a different requester, or older than
-  a short freshness window past `finished_at`. It does not close §4.3's
-  separation-of-duty gap by itself — the same person can still scan and
-  then confirm, since there is no role model yet (§4.4) — it only proves a
-  confirmation corresponds to a key NetHub itself observed at some
-  specific prior moment rather than to whatever a form claims.
+  a short freshness window past `finished_at`. Who may confirm is the
+  two-person rule for host keys (§4.3): with it off, only the requester;
+  with it on, anyone but the requester, unless they are an admin. The
+  scan binding on its own only proves a confirmation corresponds to a key
+  NetHub itself observed at some specific prior moment rather than to
+  whatever a form claims; the rule is what puts a second person on it.
 - `device_host_key_audit` table: `id`, `ansible_host`, `action`
-  (`confirmed` | `deleted`), `key_type`, `fingerprint_sha256`, `actor_id`,
-  `at`. An append-only log of who confirmed or deleted a pin and what the
+  (`confirmed` | `delete_requested` | `deleted`), `key_type`,
+  `fingerprint_sha256`, `actor_id`, `at`, `requested_by` (the other
+  person: who requested the scan a confirmation used, or the removal a
+  delete carried out), `actor_role` (null on rows from before roles,
+  when everyone was an admin). An append-only log of who confirmed or deleted a pin and what the
   fingerprint was at that moment — captured as the **pre-image**: the
   fingerprint being removed, for a delete, or the one newly confirmed, for
   a confirm. It is keyed on the address string rather than on a foreign
@@ -1770,7 +1813,14 @@ described there are `upgrade_phase_jobs`-only now.
   `is_retry` (the job re-runs its phase on the hosts that failed it;
   §8.1), `concurrency` (on an activation only: how many devices the
   approver chose to reload at once after the canary, so the record shows
-  who chose to reload several together; §8.1). One row
+  who chose to reload several together; §8.1), `approved_by_role` (the
+  approver's role when they approved, so an admin acting alone under the
+  two-person rule stays visible after a role change), and
+  `device_username_used` (the device username sealed with this job's
+  credential — the supplier's, and `activate`'s for the `verify` chained
+  onto it — since with someone other than the submitter at a gate,
+  `upgrade_runs.device_username_used`, the submitter's, is not who the
+  device saw). One row
   per phase execution, reusing the same status vocabulary and startup
   sweep (§7.3) a publish job would need if one still existed as a
   dispatched job kind — it no longer does (above), so this table is the
@@ -1901,8 +1951,17 @@ described there are `upgrade_phase_jobs`-only now.
   shape, a retention-purge helper, and a viewer component per §3.4,
   distinguished by kind rather than merged into one timeline.
 - `settings` table: `key`, `value`, `updated_by`, `updated_at`, plus an
-  append-only, never-purged `settings_audit` recording every change with
-  its old and new value. §4.4 names five OIDC settings and
+  append-only, never-purged `settings_audit` (`id`, `key`, `old_value`,
+  `new_value`, `changed_by`, `changed_at`) recording every change with
+  its old and new value. Built with three keys so far, the two-person
+  rules of §4.3 (`two_person_artifacts`, `two_person_hostkeys`,
+  `two_person_runs`, each `on`/`off`, off when absent), changed by an
+  admin from the settings page and read on every request, never cached.
+  The form carries the values it showed and is refused if they have moved
+  since, so a stale page cannot quietly switch a rule back off.
+  The rest below is still target design, and the deployment settings
+  that exist today (the target CIDR, the concurrency cap) are still
+  environment variables. §4.4 names five OIDC settings and
   `local_accounts_enabled`; §8.1 adds the target CIDR and the
   stage-phase concurrency cap; §4.3 makes managing all of it an admin's
   job — and none of it had anywhere to live. There are no transport
@@ -2125,9 +2184,11 @@ credential, `POST /upgrades/<id>/decline-cleanup`,
 `POST /upgrades/<id>/cancel`). Administration (`GET /users`,
 `GET`/`POST /users/new`, plus `GET /profile` and
 `POST /profile/device-username` for a user's own device-username
-mapping). Role gates the administration group to `admin`; the rest
-accept `operator` once roles exist (§4.3) — today, with no role model
-built, every authenticated user can reach everything an operator could.
+mapping), plus `POST /users/<id>/role`, the other user actions and
+`GET`/`POST /settings`. Role gates the administration group and
+`/settings` to `admin` (a `403` for an operator); the rest accept
+`operator`, under the two-person rules (§4.3), which add
+`POST /artifacts/<id>/publish`.
 
 **Long operations return `202` and a job id, never a held connection**
 is the target contract; today's routes are server-rendered pages that
@@ -2272,9 +2333,11 @@ there is nothing left to sign a commit of, and nothing built has replaced
 it: `device_host_keys`, `host_key_scans`, and `device_host_key_audit`
 (§5) all guard against a *submitter* naming an unconfirmed or wrong
 address, none of them against a *Flask-side compromise* silently rewriting
-a confirmed pin, and there is no settings table yet to protect. An append-only hash chain over
+a confirmed pin or turning a two-person rule off in `settings` (the
+rule change leaves a `settings_audit` row, which a compromise able to
+write the database can also forge, though not erase). An append-only hash chain over
 `artifacts`, or a signed/countersigned projection of the security-relevant
-rows once `settings` exists, is tracked as open in §10 rather than
+rows of `settings`, is tracked as open in §10 rather than
 described here as built. The honest statement is unchanged from before,
 only weaker in degree: NetHub detects drift between the row and the bytes
 on disk (§7.2's own mechanism) and detects nothing at all about a
@@ -2543,6 +2606,18 @@ finished, rather than issuing a second `install add` to a switch that has
 just reloaded. A retry adds one edge, `failed` → the cursor before the
 retried phase, which the sibling writes for the hosts that failed that
 phase when it starts the retry job (`is_retry`, §5).
+
+*Artifact state* is not dispatched work, but it has one edge a person
+other than the writer of the row takes, so it is listed here too. Flask
+writes every edge, synchronously, in the request:
+
+| from | to | actor |
+| --- | --- | --- |
+| — | `published` | Flask, on upload, when no two-person rule binds the uploader |
+| — | `staged` | Flask, on upload, when the two-person rule for artifacts binds the uploader (§4.3) |
+| `staged` | `published` | Flask, on a publish by a user other than the uploader (or anyone once the rule is off); a conditional update, so two publishes make one |
+| `staged` | — (row and bytes removed) | Flask, on a withdraw by the uploader or an admin; conditional on still being `staged` |
+| `published` | — (row and bytes removed) | Flask, on a delete, by the second person when the rule applies; refused while a live run references it |
 
 ### 7.4 Retention, and what staleness means here
 
@@ -3511,7 +3586,7 @@ the next attempt gets a credential.
   awkward sharing of the volumes both need.
 - **Whether to rebuild any tamper-evidence mechanism at all for
   `artifacts.sha512`, `device_host_keys`, and the security-relevant
-  `settings` keys once they exist (§7.2).** The earlier git-commit-
+  `settings` keys (§7.2).** The earlier git-commit-
   signing mechanism this design once had is gone along with the
   rendered registry file it protected (§5, §7.1, §7.2), and nothing has
   replaced it — this is a real regression, not a stale open question
@@ -3520,11 +3595,8 @@ the next attempt gets a credential.
   digest or projection countersigned by the sibling (the one component
   that could plausibly hold a key Flask does not), or a lighter
   pre-dispatch re-check the sibling performs against whichever store
-  ends up being authoritative. Deciding this needs `settings` to exist
-  first, since two of the three rows this section is about
-  (`device_host_keys` exists today; the security-relevant settings rows
-  need `settings`) don't both exist yet — but the `artifacts` half is
-  buildable now and shouldn't wait on the other two.
+  ends up being authoritative. All three now exist: `settings` holds
+  the two-person rules (§4.3), so a decision here covers all of them.
 - **The two day-0 numbers in §3.2 are asserted, not measured.** A
   two-second p99 and a fifteen-minute device backoff are what the
   architecture is calibrated against, and neither has been checked

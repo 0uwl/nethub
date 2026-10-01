@@ -658,9 +658,11 @@ class Sibling:
         # hosts it activated, and UNIQUE(run_id, phase, attempt) holds.
         previous = (db.session.query(db.func.max(UpgradePhaseJob.attempt))
                     .filter_by(run_id=run.id, phase=following).scalar())
+        # Only `verify` gets here, and it runs on `activate`'s credential, so
+        # the device sees the same username (PLAN.md WS-16).
         queued = UpgradePhaseJob(
             run_id=run.id, phase=following, attempt=(previous or 0) + 1, status='queued',
-            created_at=self.now(),
+            created_at=self.now(), device_username_used=job.device_username_used,
         )
         db.session.add(queued)
         return queued

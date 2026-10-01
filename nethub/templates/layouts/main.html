@@ -30,7 +30,10 @@
       <li><a href="{{ url_for('artifacts.list_artifacts') }}">Artifacts</a></li>
       <li><a href="{{ url_for('upgrades.list_runs') }}">Upgrades</a></li>
       <li><a href="{{ url_for('hostkeys.list_hostkeys') }}">Host keys</a></li>
+      {% if current_user.is_admin %}
       <li><a href="{{ url_for('auth.list_users') }}">Users</a></li>
+      <li><a href="{{ url_for('settings.edit') }}">Settings</a></li>
+      {% endif %}
       <li><a href="{{ url_for('upgrades.profile') }}">Profile</a></li>
       <li>
         <form method="post" action="{{ url_for('auth.logout') }}">

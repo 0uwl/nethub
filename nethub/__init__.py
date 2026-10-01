@@ -31,12 +31,14 @@ def create_app():
     from .artifact_routes import register_cli as register_artifact_cli
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
+    from .settings import settings_bp
     from .upgrade_routes import hostkeys_bp, upgrade_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(artifacts_bp)
     app.register_blueprint(upgrade_bp)
     app.register_blueprint(hostkeys_bp)
+    app.register_blueprint(settings_bp)
     register_cli(app)
     register_artifact_cli(app)
 
@@ -70,6 +72,10 @@ def create_app():
     @app.errorhandler(500)
     def internal_error(error):
         return render_template('errors/500.html'), 500
+
+    @app.errorhandler(403)
+    def forbidden_error(error):
+        return render_template('errors/403.html'), 403
 
     @app.errorhandler(404)
     def not_found_error(error):

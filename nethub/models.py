@@ -6,6 +6,22 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .extensions import db, login_manager
 
 
+def _enum(values, name):
+    # native_enum=False keeps this a VARCHAR plus a CHECK constraint, which is
+    # what SQLite can actually enforce -- and `create_constraint=True` is not
+    # optional decoration: SQLAlchemy has defaulted it to False since 1.4, so
+    # without it these columns are plain strings and every vocabulary below is
+    # documentation rather than a constraint. Verified by reading the emitted
+    # DDL, not by assuming.
+    return db.Enum(*values, name=name, native_enum=False, create_constraint=True)
+
+
+#: `user.role` (PLAN.md WS-16). An operator does the day-to-day work: artifacts,
+#: host keys and runs. An admin does that and also manages users and NetHub's
+#: settings, and is exempt from the two-person rules.
+ROLES = ('admin', 'operator')
+
+
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -17,6 +33,13 @@ class User(db.Model, UserMixin):
     # what the whole credential path is built for.
     device_username = db.Column(db.String(80))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    #: Least privilege unless something says otherwise: `create-admin` and
+    #: first-boot bootstrap set `admin`, and the migration that added the
+    #: column made every user who existed then an admin, which they all were.
+    #: Read from the row on every request (`load_user`), so a change applies on
+    #: the next click.
+    role = db.Column(_enum(ROLES, 'user_role'), nullable=False, default='operator',
+                     server_default='operator')
 
     #: Deactivation rather than deletion (design doc §5): the audit trail
     #: references these rows. An inactive user cannot log in, and the user
@@ -40,6 +63,10 @@ class User(db.Model, UserMixin):
     # attacker cannot learn which usernames are worth spending a budget on.
     failed_logins = db.Column(db.Integer, nullable=False, default=0)
     locked_until = db.Column(db.DateTime)
+
+    @property
+    def is_admin(self):
+        return self.role == 'admin'
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -81,25 +108,15 @@ class User(db.Model, UserMixin):
         self.locked_until = None
 
 
-def _enum(values, name):
-    # native_enum=False keeps this a VARCHAR plus a CHECK constraint, which is
-    # what SQLite can actually enforce -- and `create_constraint=True` is not
-    # optional decoration: SQLAlchemy has defaulted it to False since 1.4, so
-    # without it these columns are plain strings and every vocabulary below is
-    # documentation rather than a constraint. Verified by reading the emitted
-    # DDL, not by assuming.
-    return db.Enum(*values, name=name, native_enum=False, create_constraint=True)
-
-
 def _utcnow():
     return datetime.now(timezone.utc)
 
 
-#: §5's artifact vocabulary. Only `published` is ever written today: there is
-#: no promotion step to reach `staged` through and no supersede flow, matching
-#: the no-supersede stance the YAML store had. The values exist because the
-#: partial unique indexes below are defined over them and §7.4's retention
-#: story references them.
+#: §5's artifact vocabulary. An upload lands `staged` when the two-person rule
+#: for artifacts applies to its uploader, and someone else publishes it
+#: (PLAN.md WS-16); otherwise it lands `published`. Nothing writes
+#: `superseded`: there is no supersede flow, matching the no-supersede stance
+#: the YAML store had. It exists because §7.4's retention story references it.
 ARTIFACT_STATES = ('staged', 'published', 'superseded')
 ARTIFACT_KINDS = ('script', 'config', 'image')
 #: §7.4 splits blob retention from row retention: the row outlives the bytes
@@ -131,6 +148,11 @@ class Artifact(db.Model):
         # database rather than by whatever writes the row remembering to check.
         db.Index('uq_artifact_bundle_key', 'platform', 'bundle_key', unique=True,
                  sqlite_where=db.text("kind = 'image' AND state = 'published'")),
+        # AUTOINCREMENT: SQLite otherwise reuses a deleted highest id, and
+        # `artifact_audit.artifact_id` outlives the row. Without it, deleting
+        # the newest artifact and uploading another would file two images'
+        # histories under one id (PLAN.md WS-16).
+        {'sqlite_autoincrement': True},
     )
 
     id = db.Column(db.Integer, primary_key=True)
@@ -158,6 +180,50 @@ class Artifact(db.Model):
 
     uploaded_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     uploaded_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    #: Who made it nameable by a run. The uploader, unless the two-person rule
+    #: held it `staged` for someone else (PLAN.md WS-16).
+    published_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    published_at = db.Column(db.DateTime)
+    #: A delete waiting for a second person. The artifact stays usable until
+    #: someone else confirms it.
+    delete_requested_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    delete_requested_at = db.Column(db.DateTime)
+
+
+#: `artifact_audit.action` (PLAN.md WS-16).
+ARTIFACT_AUDIT_ACTIONS = ('uploaded', 'published', 'withdrawn', 'delete_requested', 'deleted')
+
+
+class ArtifactAudit(db.Model):
+    """Who uploaded, published and deleted which image, with the role they
+    held at the time (PLAN.md WS-16).
+
+    Keyed on copies of the artifact's identity rather than a foreign key, so
+    it outlives the row a delete removes (`artifacts` never reuses an id): an admin deleting alone has to stay
+    visible after the thing deleted is gone. Append-only by trigger.
+    """
+
+    __tablename__ = 'artifact_audit'
+
+    id = db.Column(db.Integer, primary_key=True)
+    at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    artifact_id = db.Column(db.Integer, nullable=False)
+    bundle_key = db.Column(db.String(80), nullable=False)
+    filename = db.Column(db.String(255), nullable=False)
+    sha512 = db.Column(db.String(128), nullable=False)
+    action = db.Column(_enum(ARTIFACT_AUDIT_ACTIONS, 'artifact_audit_action'), nullable=False)
+    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    actor_role = db.Column(_enum(ROLES, 'artifact_audit_actor_role'))
+
+
+def record_artifact_action(action, artifact, actor):
+    """Add an `artifact_audit` row; the caller commits it with the change."""
+    db.session.add(ArtifactAudit(
+        action=action, artifact_id=artifact.id, bundle_key=artifact.bundle_key,
+        filename=artifact.filename, sha512=artifact.sha512,
+        actor_id=actor.id if actor is not None else None,
+        actor_role=actor.role if actor is not None else None,
+    ))
 
 
 @login_manager.user_loader
@@ -182,6 +248,7 @@ def load_user(user_id):
 #: `create-admin` and first-boot bootstrap alike.
 USER_AUDIT_ACTIONS = (
     'created', 'password_changed', 'password_reset', 'disabled', 'enabled', 'unlocked',
+    'role_changed',
 )
 
 
@@ -214,20 +281,65 @@ def record_user_action(action, target, actor=None, detail=None):
     ))
 
 
-for _event in ('UPDATE', 'DELETE'):
-    db.event.listen(
-        UserAdminAudit.__table__,
-        'after_create',
-        db.DDL(
-            f"""
-            CREATE TRIGGER user_admin_audit_no_{_event.lower()}
-            BEFORE {_event} ON user_admin_audit
-            BEGIN
-                SELECT RAISE(ABORT, 'user_admin_audit is append-only');
-            END;
-            """
-        ),
-    )
+def _append_only(table):
+    """`BEFORE UPDATE` and `BEFORE DELETE` triggers that always abort: an audit
+    table a Flask-side compromise could rewrite would not be an audit table
+    (design doc §5)."""
+    for event in ('UPDATE', 'DELETE'):
+        db.event.listen(
+            table,
+            'after_create',
+            db.DDL(
+                f"""
+                CREATE TRIGGER {table.name}_no_{event.lower()}
+                BEFORE {event} ON {table.name}
+                BEGIN
+                    SELECT RAISE(ABORT, '{table.name} is append-only');
+                END;
+                """
+            ),
+        )
+
+
+_append_only(UserAdminAudit.__table__)
+_append_only(ArtifactAudit.__table__)
+
+
+#: The settings an admin changes on the settings page (PLAN.md WS-16), each
+#: off unless a row says otherwise. A two-person rule applies to operators
+#: only: an admin acts alone, and the audit rows record that it was an admin.
+TWO_PERSON_RULES = ('two_person_artifacts', 'two_person_hostkeys', 'two_person_runs')
+
+
+class Setting(db.Model):
+    """A deployment setting (design doc §5). Read on every request and never
+    cached, so a change applies to the next action. Only the two-person rules
+    live here so far; the env-var settings (`DEVICE_TARGET_CIDRS` and the
+    rest) have not moved."""
+
+    __tablename__ = 'settings'
+
+    key = db.Column(db.String(64), primary_key=True)
+    value = db.Column(db.String(255), nullable=False)
+    updated_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    updated_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+
+
+class SettingsAudit(db.Model):
+    """Every settings change with its old and new value (design doc §5).
+    Append-only by trigger and never purged."""
+
+    __tablename__ = 'settings_audit'
+
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(64), nullable=False)
+    old_value = db.Column(db.String(255))
+    new_value = db.Column(db.String(255), nullable=False)
+    changed_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    changed_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+
+
+_append_only(SettingsAudit.__table__)
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +457,10 @@ class DeviceHostKey(db.Model):
     first_seen_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
     confirmed_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     confirmed_at = db.Column(db.DateTime)
+    #: A removal waiting for a second person (PLAN.md WS-16). The pin keeps
+    #: working until someone else confirms it.
+    delete_requested_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    delete_requested_at = db.Column(db.DateTime)
 
     @property
     def is_confirmed(self):
@@ -357,8 +473,8 @@ class DeviceHostKey(db.Model):
 #: don't apply the way they do to a phase job.
 HOSTKEY_SCAN_STATUSES = ('queued', 'running', 'succeeded', 'failed', 'abandoned')
 
-#: `DeviceHostKeyAudit.action` (WS-6.4).
-HOSTKEY_AUDIT_ACTIONS = ('confirmed', 'deleted')
+#: `DeviceHostKeyAudit.action` (WS-6.4, WS-16).
+HOSTKEY_AUDIT_ACTIONS = ('confirmed', 'delete_requested', 'deleted')
 
 
 class HostKeyScan(db.Model):
@@ -428,6 +544,13 @@ class DeviceHostKeyAudit(db.Model):
     fingerprint_sha256 = db.Column(db.String(64), nullable=False)
     actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    #: The other person (PLAN.md WS-16): who requested the scan a
+    #: confirmation used, or who requested the removal a delete carried out.
+    #: The same as `actor_id` when one person did both.
+    requested_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    #: The actor's role when they acted, since a role can change later.
+    #: Null on rows from before roles existed, when everyone was an admin.
+    actor_role = db.Column(_enum(ROLES, 'hostkey_audit_actor_role'))
 
 
 class UpgradeRun(db.Model):
@@ -546,6 +669,17 @@ class UpgradePhaseJob(db.Model):
     #: than a keystroke.
     approved_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     approved_at = db.Column(db.DateTime)
+    #: The approver's role when they approved (PLAN.md WS-16), so an admin
+    #: approving their own run under the two-person rule stays visible after
+    #: their role changes.
+    approved_by_role = db.Column(_enum(ROLES, 'job_approved_by_role'))
+    #: The device username the device saw for this phase: the supplier's, as
+    #: `_seal_into` sealed it (PLAN.md WS-16). `upgrade_runs.device_username_used`
+    #: is the submitter's; when someone else approves a gate, the two differ,
+    #: and this is the one the device's AAA log agrees with. `verify` carries
+    #: `activate`'s, since it runs on that credential. Null on jobs from
+    #: before it existed.
+    device_username_used = db.Column(db.String(80))
 
     status = db.Column(_enum(JOB_STATUSES, 'job_status'), nullable=False, default='queued')
     #: A retry of this phase on the hosts that failed it (PLAN.md WS-8). The

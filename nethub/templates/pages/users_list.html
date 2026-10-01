@@ -10,6 +10,7 @@
   <thead>
     <tr>
       <th>Username</th>
+      <th>Role</th>
       <th>Status</th>
       <th>Device username</th>
       <th>Created at</th>
@@ -20,6 +21,7 @@
     {% for user in users %}
     <tr>
       <td>{{ user.username }}{% if user.id == current_user.id %} (you){% endif %}</td>
+      <td>{{ user.role }}</td>
       <td>
         {% if not user.is_active %}disabled{% elif user.is_locked() %}locked until {{ user.locked_until }}{% else %}active{% endif %}
       </td>
@@ -29,6 +31,19 @@
         <a href="{{ url_for('auth.user_history', user_id=user.id) }}">History</a>
         {% if user.id != current_user.id %}
         <a href="{{ url_for('auth.reset_password', user_id=user.id) }}">Reset password</a>
+        {% set other_role = 'operator' if user.role == 'admin' else 'admin' %}
+        <details>
+          <summary>Make {{ other_role }}</summary>
+          <form method="post" action="{{ url_for('auth.change_role', user_id=user.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="role" value="{{ other_role }}">
+            {{ short_confirm('role_help_%d' % user.id, 'Change role',
+                ('They can manage users and settings, and no two-person rule binds them.'
+                 if other_role == 'admin' else
+                 'They lose users and settings, and the two-person rules bind them.')) }}
+            <button type="submit" class="secondary">Make {{ user.username }} {{ other_role }}</button>
+          </form>
+        </details>
         {% if user.is_active %}
         <details>
           <summary>Disable</summary>

@@ -26,7 +26,7 @@ from flask import (
 from flask_login import current_user, login_required
 
 from . import artifacts as artifact_store
-from . import upgrades, worker_status
+from . import settings, upgrades, worker_status
 from .devices.phases import _aware
 from .extensions import db
 from .models import (
@@ -52,6 +52,26 @@ hostkeys_bp = Blueprint('hostkeys', __name__)
 SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
 
 
+def may_confirm(scan, user):
+    """Whether `user` may confirm a pin from `scan`.
+
+    With the two-person rule for host keys off, only whoever requested the
+    scan confirms it (WS-6.3's binding). With it on, the confirmer must be
+    someone else (PLAN.md WS-16), except that an admin may confirm any scan,
+    their own included: admins are exempt, and the audit row records the
+    role they acted in.
+    """
+    own = scan.requested_by == user.id
+    if settings.enabled('two_person_hostkeys'):
+        return not own or user.is_admin
+    return own
+
+
+def confirm_by(scan):
+    """The moment `scan` stops being confirmable (`SCAN_CONFIRM_WINDOW`)."""
+    return _aware(scan.finished_at) + SCAN_CONFIRM_WINDOW
+
+
 def _when(job):
     """What to add to an approval's flash: nothing, or the window it waits
     for. UTC, like the form and the page (`upgrades.start_time`)."""
@@ -66,7 +86,14 @@ def _when(job):
 @login_required
 def list_hostkeys():
     keys = DeviceHostKey.query.order_by(DeviceHostKey.ansible_host).all()
-    return render_template('pages/hostkeys_list.html', keys=keys,
+    # Scans someone could still confirm, so the person who has to confirm one
+    # finds it here rather than depending on a forwarded link (WS-16).
+    waiting = [(scan, confirm_by(scan)) for scan in HostKeyScan.query.filter(
+        HostKeyScan.status == 'succeeded', HostKeyScan.consumed_at.is_(None),
+        HostKeyScan.finished_at > upgrades._utcnow() - SCAN_CONFIRM_WINDOW,
+    ).order_by(HostKeyScan.finished_at)]
+    return render_template('pages/hostkeys_list.html', keys=keys, waiting=waiting,
+                           two_person=settings.applies('two_person_hostkeys', current_user),
                            users={u.id: u.username for u in User.query.all()})
 
 
@@ -109,6 +136,8 @@ def scan_result(scan_id):
         return redirect(url_for('hostkeys.scan_hostkey'))
     return render_template(
         'pages/hostkeys_scan_result.html', scan=scan,
+        can_confirm=may_confirm(scan, current_user),
+        confirm_by=confirm_by(scan) if scan.status == 'succeeded' else None,
         no_worker=scan.status == 'queued' and worker_status.no_worker(),
     )
 
@@ -120,17 +149,21 @@ def confirm_hostkey():
 
     `key_type`/`fingerprint_sha256`/`address` all come from the referenced
     `HostKeyScan` row, never from the request body -- a POST here carries
-    only `scan_id`. Binding to `requested_by == current_user.id` is the
-    closest primitive alpha has to "the same session": there is no
-    server-side `sessions` row yet (§4.5, a known alpha deviation), so this
-    is "the same authenticated user" rather than literally the same session,
-    and it does not fully close the separation-of-duty gap -- the same
-    person can still scan and then confirm. The real fix is role-based
-    access control, out of scope for this alpha (see `CLAUDE.md`).
+    only `scan_id`. Who may confirm which scan is `may_confirm`: the scanner
+    alone with the two-person rule off, anyone else with it on (PLAN.md
+    WS-16), which is the separation of duty §4.3 asks for. The rule is read
+    now, so turning it off releases a scan waiting for a second person.
     """
     raw_scan_id = request.form.get('scan_id', '')
     scan = db.session.get(HostKeyScan, int(raw_scan_id)) if raw_scan_id.isdigit() else None
-    if scan is None or scan.status != 'succeeded' or scan.requested_by != current_user.id:
+    if scan is None or scan.status != 'succeeded':
+        flash('No matching scan to confirm. Scan the address again.')
+        return redirect(url_for('hostkeys.scan_hostkey'))
+    if not may_confirm(scan, current_user):
+        if scan.requested_by == current_user.id:
+            flash('The two-person rule for host keys is on: someone other than '
+                  'whoever requested the scan has to confirm it.')
+            return redirect(url_for('hostkeys.scan_result', scan_id=scan.id))
         flash('No matching scan to confirm. Scan the address again.')
         return redirect(url_for('hostkeys.scan_hostkey'))
     if scan.consumed_at is not None:
@@ -166,6 +199,7 @@ def confirm_hostkey():
     db.session.add(DeviceHostKeyAudit(
         ansible_host=address, action='confirmed', key_type=key_type,
         fingerprint_sha256=fingerprint, actor_id=current_user.id,
+        requested_by=scan.requested_by, actor_role=current_user.role,
     ))
     db.session.commit()
     flash(f'Confirmed {address} ({key_type}).', 'success')
@@ -178,18 +212,17 @@ def delete_hostkey(key_id):
     if not confirmed('removing the pin'):
         return redirect(url_for('hostkeys.list_hostkeys'))
     row = db.session.get(DeviceHostKey, key_id)
-    if row is not None:
-        # Captured before the delete, obviously, not after (WS-6.4) -- this
-        # is the pre-image the "deliberate friction" before re-accepting a
-        # changed key used to leave no evidence for.
-        db.session.add(DeviceHostKeyAudit(
-            ansible_host=row.ansible_host, action='deleted',
-            key_type=row.key_type, fingerprint_sha256=row.fingerprint_sha256,
-            actor_id=current_user.id,
-        ))
-        db.session.delete(row)
-        db.session.commit()
-        flash(f'Removed the pin for {row.ansible_host}.', 'success')
+    if row is None:
+        return redirect(url_for('hostkeys.list_hostkeys'))
+    address = row.ansible_host
+    try:
+        if upgrades.delete_pin(row, current_user):
+            flash(f'Removed the pin for {address}.', 'success')
+        else:
+            flash(f'Removal of the pin for {address} requested. It stays in force '
+                  f'until someone else confirms the removal.', 'info')
+    except upgrades.RequestError as exc:
+        flash(str(exc))
     return redirect(url_for('hostkeys.list_hostkeys'))
 
 
@@ -284,6 +317,7 @@ def show_run(run_id):
         no_worker=any(j.status == 'queued' for j in live) and worker_status.no_worker(),
         queued_ahead=queued_ahead, running_now=running_now,
         gate_hosts=gate_hosts, scheduled=scheduled,
+        needs_other_approver=upgrades.needs_second_person(run, current_user),
         max_schedule_hours=int(upgrades.MAX_SCHEDULE_AHEAD.total_seconds() // 3600),
     )
 

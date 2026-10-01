@@ -1,9 +1,13 @@
 {% extends 'layouts/main.html' %}
-{% block title %}Publish an image{% endblock %}
+{% block title %}Upload an image{% endblock %}
 {% block content %}
-<h1>Publish an image</h1>
+<h1>Upload an image</h1>
 <p>The checksum you type is verified against the actual uploaded file. A mismatch rejects
 the upload and nothing enters the store.</p>
+{% if two_person %}
+<p><strong>The two-person rule for artifacts is on.</strong> Your upload waits until
+someone else publishes it; until then no run can use it.</p>
+{% endif %}
 <form method="post" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <label for="bundle_key">Bundle key</label>
@@ -19,7 +23,7 @@ the upload and nothing enters the store.</p>
   <label for="image">Image file</label>
   <input type="file" id="image" name="image" required>
   <div role="group">
-    <button type="submit">Upload and publish</button>
+    <button type="submit">{% if two_person %}Upload{% else %}Upload and publish{% endif %}</button>
     <a href="{{ url_for('artifacts.list_artifacts') }}" role="button" class="secondary">Cancel</a>
   </div>
 </form>

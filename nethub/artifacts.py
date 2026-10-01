@@ -35,8 +35,9 @@ from sqlalchemy import exists
 from sqlalchemy.exc import IntegrityError
 from werkzeug.utils import secure_filename
 
+from . import settings
 from .extensions import db
-from .models import Artifact, UpgradeRun, UpgradeRunHost
+from .models import Artifact, UpgradeRun, UpgradeRunHost, record_artifact_action
 
 _SHA512_RE = re.compile(r'^[0-9a-f]{128}$')
 #: What a bundle key may contain. It reaches no shell and no CLI, but it is
@@ -64,9 +65,14 @@ def store_dir(app_config) -> str:
     return path
 
 
-def list_artifacts(kind: str = 'image'):
-    return (Artifact.query.filter_by(kind=kind, state='published')
+def list_artifacts(kind: str = 'image', state: str = 'published'):
+    return (Artifact.query.filter_by(kind=kind, state=state)
             .order_by(Artifact.bundle_key).all())
+
+
+def _published_under(bundle_key, platform):
+    return Artifact.query.filter_by(bundle_key=bundle_key, platform=platform,
+                                    kind='image', state='published').first()
 
 
 def get_published(bundle_key: str, platform: str = 'iosxe') -> Artifact:
@@ -89,9 +95,22 @@ def get_published(bundle_key: str, platform: str = 'iosxe') -> Artifact:
     return artifact
 
 
-def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
+def ingest(*, file_storage, bundle_key, version, sha512, user,
            store, kind='image', platform='iosxe') -> Artifact:
-    """Take an uploaded file into the store and record it."""
+    """Take an uploaded file into the store and record it.
+
+    It lands `published`, unless the two-person rule for artifacts binds
+    `user` (PLAN.md WS-16): then it lands `staged`, with its bytes in the
+    store and its row written, but nothing can name it until someone else
+    publishes it (`publish`). The bundle-key check is left to that moment.
+
+    The rule is read twice. Once up front, only so a 1.2 GB upload under a
+    key already published is refused before it streams rather than after;
+    and again once the bytes have verified, which is what decides. An admin
+    turning the rule on during a minutes-long upload must not see the
+    upload land published by its uploader alone.
+    """
+    staged = _staged_for(user)
     bundle_key = (bundle_key or '').strip()
     if not _BUNDLE_KEY_RE.match(bundle_key):
         raise ArtifactError('Bundle key must be 1-80 characters of letters, digits, . + - _')
@@ -109,8 +128,7 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
     if not filename:
         raise ArtifactError('Uploaded file has an unusable name.')
 
-    if Artifact.query.filter_by(bundle_key=bundle_key, platform=platform,
-                                kind='image', state='published').first():
+    if not staged and _published_under(bundle_key, platform):
         raise ArtifactError(f'An artifact is already published under "{bundle_key}".')
     if Artifact.query.filter(Artifact.filename == filename,
                              Artifact.state.in_(('staged', 'published'))).first():
@@ -143,6 +161,9 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
             )
         if size == 0:
             raise ArtifactError('Uploaded file is empty.')
+        staged = _staged_for(user)
+        if not staged and _published_under(bundle_key, platform):
+            raise ArtifactError(f'An artifact is already published under "{bundle_key}".')
         # `os.link`, not `os.replace`: link fails with FileExistsError if the
         # target is taken, and replace silently overwrites. The three checks
         # above all ran minutes ago -- before the upload streamed -- so under
@@ -172,11 +193,17 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
     artifact = Artifact(
         kind=kind, platform=platform, bundle_key=bundle_key, filename=filename,
         sha512=computed, file_size=size, storage_path=final_path, version=version,
-        state='published', bytes_state='present', uploaded_by=uploaded_by,
-        uploaded_at=_utcnow(),
+        state='staged' if staged else 'published', bytes_state='present',
+        uploaded_by=user.id if user is not None else None, uploaded_at=_utcnow(),
     )
+    if not staged:
+        artifact.published_by, artifact.published_at = artifact.uploaded_by, _utcnow()
     db.session.add(artifact)
     try:
+        db.session.flush()
+        record_artifact_action('uploaded', artifact, user)
+        if not staged:
+            record_artifact_action('published', artifact, user)
         db.session.commit()
     except IntegrityError:
         # The schema is the backstop behind the checks at the top of this
@@ -194,8 +221,85 @@ def ingest(*, file_storage, bundle_key, version, sha512, uploaded_by,
     return artifact
 
 
-def delete(artifact: Artifact) -> None:
+def _staged_for(user):
+    return user is not None and settings.applies('two_person_artifacts', user)
+
+
+def publish(artifact: Artifact, user) -> None:
+    """Make a staged upload nameable by a run (PLAN.md WS-16).
+
+    Under the two-person rule an operator cannot publish their own upload;
+    the rule is read now, so turning it off lets the uploader publish. The
+    bundle key is checked here, not at upload, and the move is a conditional
+    update so two people publishing the same upload get one publish.
+    """
+    if artifact.state != 'staged':
+        raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
+    if (settings.applies('two_person_artifacts', user)
+            and artifact.uploaded_by == user.id):
+        raise ArtifactError('You uploaded this image; someone else has to publish it.')
+    if _published_under(artifact.bundle_key, artifact.platform):
+        raise ArtifactError(f'An artifact is already published under "{artifact.bundle_key}".')
+    try:
+        # SQLite checks the partial unique index on (platform, bundle_key)
+        # when the UPDATE runs, not at COMMIT, so a publish racing this one
+        # under the same key fails here rather than at the commit.
+        changed = (db.session.query(Artifact)
+                   .filter(Artifact.id == artifact.id, Artifact.state == 'staged')
+                   .update({'state': 'published', 'published_by': user.id,
+                            'published_at': _utcnow()}, synchronize_session='fetch'))
+        if changed != 1:
+            db.session.rollback()
+            raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
+        record_artifact_action('published', artifact, user)
+        db.session.commit()
+    except IntegrityError:
+        # Someone published another upload under this key since the check
+        # above.
+        db.session.rollback()
+        raise ArtifactError(
+            f'An artifact is already published under "{artifact.bundle_key}".'
+        ) from None
+
+
+def withdraw(artifact: Artifact, user) -> None:
+    """Discard a staged upload, row and bytes. Nothing can have used it, so
+    it needs no second person -- but only its uploader or an admin may
+    withdraw it (PLAN.md WS-16): otherwise the person meant to be the second
+    check could erase someone's upload, possibly an hour's transfer, alone.
+    A reviewer who will not publish an upload simply does not.
+
+    The delete is conditional on the row still being `staged`, the same
+    shape as `publish`: a publish committing between this function's read
+    and its delete must not let a withdraw remove a published artifact past
+    the delete request and live-run check `delete` enforces.
+    """
+    if artifact.uploaded_by != user.id and not user.is_admin:
+        raise ArtifactError('Only the uploader or an admin can withdraw this upload.')
+    if artifact.state != 'staged':
+        raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
+    path = artifact.storage_path
+    record_artifact_action('withdrawn', artifact, user)
+    deleted = (db.session.query(Artifact)
+               .filter(Artifact.id == artifact.id, Artifact.state == 'staged')
+               .delete(synchronize_session=False))
+    if deleted != 1:
+        db.session.rollback()
+        raise ArtifactError(f'"{artifact.bundle_key}" is not waiting to be published.')
+    db.session.commit()
+    if artifact in db.session:
+        db.session.expunge(artifact)  # its row is gone; don't let it refresh
+    if path and os.path.isfile(path):
+        os.remove(path)
+
+
+def delete(artifact: Artifact, user=None) -> bool:
     """Hard removal of the row and its bytes, unless a live run needs them.
+
+    Under the two-person rule for artifacts (PLAN.md WS-16), an operator's
+    delete is a request, and returns False: the artifact stays usable until
+    a different user deletes it. That second delete, and any delete by an
+    admin or with the rule off, removes it and returns True.
 
     Refused while any run in `ACTIVE_RUN_STATES` references the artifact.
     The check and the delete are one statement, the same shape as the
@@ -207,10 +311,19 @@ def delete(artifact: Artifact) -> None:
     Runs that are finished keep their snapshot and lose only the link:
     `upgrade_run_hosts.artifact_id` is `ON DELETE SET NULL`.
 
-    Still no supersede and no audit row: there is no promotion flow to
-    reverse. Don't add `superseded_by_id` handling without the flow that
-    reads it.
+    Still no supersede: don't add `superseded_by_id` handling without the
+    flow that reads it.
     """
+    if user is not None:
+        try:
+            step = settings.second_person_delete('two_person_artifacts', artifact, user)
+        except settings.RequestRaced as exc:
+            raise ArtifactError(str(exc)) from None
+        if step == settings.REQUESTED:
+            record_artifact_action('delete_requested', artifact, user)
+            db.session.commit()
+        if step != settings.GO:
+            return False
     artifact_id, path = artifact.id, artifact.storage_path
     in_use = exists().where(
         UpgradeRunHost.artifact_id == artifact_id,
@@ -229,16 +342,18 @@ def delete(artifact: Artifact) -> None:
             )
         })
         if not runs:
-            return  # already gone
+            return True  # already gone
         raise ArtifactError(
             f'"{artifact.bundle_key}" is still needed by run(s) '
             f'{", ".join(f"#{r}" for r in runs)}. Finish or cancel them first.'
         )
+    record_artifact_action('deleted', artifact, user)
     db.session.commit()
     if artifact in db.session:
         db.session.expunge(artifact)  # its row is gone; don't let it refresh
     if path and os.path.isfile(path):
         os.remove(path)
+    return True
 
 
 def check_store(store: str) -> list[str]:

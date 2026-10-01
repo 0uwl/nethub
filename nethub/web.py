@@ -6,7 +6,10 @@ refuse every script outright. That is the point of it: the login and
 approval forms are where admins type AAA passwords, and an injected script
 there would read them.
 """
-from flask import flash, request
+from functools import wraps
+
+from flask import abort, flash, request
+from flask_login import current_user, login_required
 
 #: `script-src 'none'`: no page has a script, inline or external.
 #: `img-src 'self' data:` is the one widening of `default-src 'self'`: Pico
@@ -52,3 +55,18 @@ def confirmed(action):
         return True
     flash(f'Tick the box to confirm {action}; nothing was changed.')
     return False
+
+
+def admin_required(view):
+    """`login_required`, and the user's role must be `admin` (PLAN.md WS-16).
+
+    The role is read from the row the user loader fetched for this request, so
+    a demotion applies on the next click. Templates hide what an operator may
+    not use; this is the check.
+    """
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not current_user.is_admin:
+            abort(403)
+        return view(*args, **kwargs)
+    return login_required(wrapped)

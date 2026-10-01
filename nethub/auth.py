@@ -16,8 +16,8 @@ from sqlalchemy.orm import aliased
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
-from .models import User, UserAdminAudit, record_user_action
-from .web import confirmed
+from .models import ROLES, User, UserAdminAudit, record_user_action
+from .web import admin_required, confirmed
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -37,8 +37,8 @@ LOCKOUT_DURATION = timedelta(minutes=15)
 #: `check_password` ran, so /login answered in ~1.4 ms for an unknown username
 #: against ~104 ms for a known one -- a 74x gap that survives any amount of
 #: network jitter, and `GET /login` hands out the CSRF token unauthenticated.
-#: Every login user is an admin in this alpha, so enumerating usernames is the
-#: whole first half of an attack.
+#: Enumerating usernames is the whole first half of an attack on an account,
+#: and an admin's is the one worth attacking.
 #:
 #: Computed once at import (one scrypt pass at startup) and never compared for
 #: its result, only for its cost. It must keep the same KDF parameters as real
@@ -126,14 +126,14 @@ def logout():
 
 
 @auth_bp.route('/users')
-@login_required
+@admin_required
 def list_users():
     users = User.query.order_by(User.username).all()
     return render_template('pages/users_list.html', users=users)
 
 
 @auth_bp.route('/users/new', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def new_user():
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
@@ -148,13 +148,19 @@ def new_user():
             flash(f'Password must be at least {MIN_PASSWORD_LENGTH} characters.')
             return render_template('pages/users_new.html')
 
-        user = User(username=username)
+        # An operator unless the admin picked otherwise (PLAN.md WS-16).
+        role = request.form.get('role', 'operator')
+        if role not in ROLES:
+            flash('Choose a role: admin or operator.')
+            return render_template('pages/users_new.html')
+
+        user = User(username=username, role=role)
         user.set_password(password)
         db.session.add(user)
         db.session.flush()
-        record_user_action('created', user, actor=current_user)
+        record_user_action('created', user, actor=current_user, detail=f'as {role}')
         db.session.commit()
-        flash('User created.', 'success')
+        flash(f'User created as {role}.', 'success')
         return redirect(url_for('auth.list_users'))
 
     return render_template('pages/users_new.html')
@@ -167,8 +173,24 @@ def _target(user_id):
     return user
 
 
+def _another_active_admin(user_id):
+    """`count(other active admins) > 0`, for the WHERE of an UPDATE that would
+    take `user_id` out of the active admins.
+
+    In the statement rather than checked beforehand (the claim pattern): two
+    admins demoting or disabling each other at once both pass a check made
+    first, and SQLite's single writer makes the second statement find nobody
+    else and change nothing. On an alias, so it is not correlated to the row
+    being updated.
+    """
+    other = aliased(User)
+    return (db.session.query(db.func.count(other.id))
+            .filter(other.is_active.is_(True), other.role == 'admin', other.id != user_id)
+            .correlate(None).scalar_subquery()) > 0
+
+
 @auth_bp.route('/users/<int:user_id>/reset-password', methods=['GET', 'POST'])
-@login_required
+@admin_required
 def reset_password(user_id):
     """Set another user's password. It ends every session they hold, since a
     reset is what an admin does when an account may be in the wrong hands.
@@ -196,16 +218,13 @@ def reset_password(user_id):
 
 
 @auth_bp.route('/users/<int:user_id>/disable', methods=['POST'])
-@login_required
+@admin_required
 def disable_user(user_id):
     """Disable an account and end its sessions.
 
-    Never yourself, and never the last active user, or nobody could log in
-    to undo it. The last-user check is part of the UPDATE itself (the claim
-    pattern again): two people disabling each other at the same moment both
-    pass a check made beforehand, and the database serialises the two
-    statements, so the second one finds nobody else active and changes
-    nothing.
+    Never yourself, and never the last active admin, or nobody could manage
+    users to undo it (`_another_active_admin`). An operator can always be
+    disabled: the admin doing it is still active.
     """
     user = _target(user_id)
     if user is None:
@@ -215,19 +234,16 @@ def disable_user(user_id):
         return redirect(url_for('auth.list_users'))
     if not confirmed(f'disabling {user.username}'):
         return redirect(url_for('auth.list_users'))
-    other = aliased(User)
-    others = (db.session.query(db.func.count(other.id))
-              .filter(other.is_active.is_(True), other.id != user_id)
-              .correlate(None).scalar_subquery())
     changed = (
         db.session.query(User)
-        .filter(User.id == user_id, User.is_active.is_(True), others > 0)
+        .filter(User.id == user_id, User.is_active.is_(True),
+                db.or_(User.role != 'admin', _another_active_admin(user_id)))
         .update({'is_active': False, 'session_epoch': User.session_epoch + 1},
                 synchronize_session='fetch')
     )
     if changed != 1:
         db.session.rollback()
-        flash(f'{user.username} is already disabled, or is the last active user.')
+        flash(f'{user.username} is already disabled, or is the last active admin.')
         return redirect(url_for('auth.list_users'))
     record_user_action('disabled', user, actor=current_user)
     db.session.commit()
@@ -235,8 +251,48 @@ def disable_user(user_id):
     return redirect(url_for('auth.list_users'))
 
 
+@auth_bp.route('/users/<int:user_id>/role', methods=['POST'])
+@admin_required
+def change_role(user_id):
+    """Make a user an admin or an operator (PLAN.md WS-16).
+
+    Not your own role, and never the last active admin's: demoting them is
+    disabling the only account that could undo it. The user loader re-reads
+    the row on every request, so the change applies on their next click.
+    """
+    user = _target(user_id)
+    if user is None:
+        return redirect(url_for('auth.list_users'))
+    role = request.form.get('role', '')
+    if role not in ROLES:
+        flash('Choose a role: admin or operator.')
+        return redirect(url_for('auth.list_users'))
+    # Promoting exempts someone from every two-person rule, so it takes the
+    # same ticked box as any other consequential row action (web.confirmed).
+    if not confirmed(f'making {user.username} an {role}'):
+        return redirect(url_for('auth.list_users'))
+    if user.id == current_user.id:
+        flash('You cannot change your own role.')
+        return redirect(url_for('auth.list_users'))
+    if user.role == role:
+        flash(f'{user.username} is already an {role}.', 'info')
+        return redirect(url_for('auth.list_users'))
+    old = user.role
+    query = db.session.query(User).filter(User.id == user_id, User.role == old)
+    if old == 'admin':
+        query = query.filter(db.or_(User.is_active.is_(False), _another_active_admin(user_id)))
+    if query.update({'role': role}, synchronize_session='fetch') != 1:
+        db.session.rollback()
+        flash(f'{user.username} is the last active admin, or their role just changed.')
+        return redirect(url_for('auth.list_users'))
+    record_user_action('role_changed', user, actor=current_user, detail=f'{old} to {role}')
+    db.session.commit()
+    flash(f'{user.username} is now an {role}.', 'success')
+    return redirect(url_for('auth.list_users'))
+
+
 @auth_bp.route('/users/<int:user_id>/enable', methods=['POST'])
-@login_required
+@admin_required
 def enable_user(user_id):
     user = _target(user_id)
     if user is None:
@@ -252,7 +308,7 @@ def enable_user(user_id):
 
 
 @auth_bp.route('/users/<int:user_id>/unlock', methods=['POST'])
-@login_required
+@admin_required
 def unlock_user(user_id):
     """Clear a lockout before it expires. The lockout is 15 minutes, but with
     a well-known username anyone on the network can keep re-arming it, and
@@ -268,7 +324,7 @@ def unlock_user(user_id):
 
 
 @auth_bp.route('/users/<int:user_id>/history')
-@login_required
+@admin_required
 def user_history(user_id):
     user = _target(user_id)
     if user is None:
@@ -322,7 +378,8 @@ def register_cli(app):
     @app.cli.command('create-admin')
     @click.argument('username')
     def create_admin(username):
-        """Create the first (or another) login user. Everyone who can log in is an admin."""
+        """Create an admin: the first login user, or another one. Admins create
+        operators from the Users page."""
         password = click.prompt(
             'Password', hide_input=True, confirmation_prompt=True
         )
@@ -337,10 +394,10 @@ def register_cli(app):
                     f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'
                 )
                 return
-            user = User(username=username)
+            user = User(username=username, role='admin')
             user.set_password(password)
             db.session.add(user)
             db.session.flush()
             record_user_action('created', user, detail='create-admin command')
             db.session.commit()
-            click.echo(f'Created user "{username}".')
+            click.echo(f'Created admin "{username}".')

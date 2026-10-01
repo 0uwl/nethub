@@ -6,6 +6,25 @@
 <p>An address with no <strong>confirmed</strong> pin cannot be named by any run.
 Confirming one is a deliberate action, separate from submitting a run.</p>
 <p><a href="{{ url_for('hostkeys.scan_hostkey') }}" role="button">Scan an address</a></p>
+{% if waiting %}
+<h2>Scans waiting to be confirmed</h2>
+<div class="overflow-auto">
+<table class="striped">
+  <thead><tr><th>Address</th><th>Scanned by</th><th>Confirm before</th><th></th></tr></thead>
+  <tbody>
+  {% for scan, deadline in waiting %}
+    <tr>
+      <td><code>{{ scan.ansible_host }}</code></td>
+      <td>{{ users.get(scan.requested_by, '?') }}</td>
+      <td>{{ deadline.strftime('%Y-%m-%d %H:%M') }} UTC</td>
+      <td><a href="{{ url_for('hostkeys.scan_result', scan_id=scan.id) }}">Review</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<h2>Pinned</h2>
+{% endif %}
 {% if keys %}
 <div class="overflow-auto">
 <table class="striped">
@@ -21,8 +40,15 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
           {% else %}<em>not confirmed, unusable</em>{% endif %}</td>
       <td class="actions">
         <a href="{{ url_for('hostkeys.hostkey_history', address=k.ansible_host) }}">History</a>
+        {% if k.delete_requested_by %}
+        <p><em>Removal requested by {{ users.get(k.delete_requested_by, '?') }}
+        on {{ k.delete_requested_at }}.</em></p>
+        {% endif %}
+        {% if two_person and k.delete_requested_by == current_user.id %}
+        <em>Waiting for someone else to confirm the removal.</em>
+        {% else %}
         <details>
-          <summary>Remove</summary>
+          <summary>{% if k.delete_requested_by %}Confirm removal{% elif two_person %}Request removal{% else %}Remove{% endif %}</summary>
           <form method="post" action="{{ url_for('hostkeys.delete_hostkey', key_id=k.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {{ short_confirm('pin_help_%d' % k.id, 'Remove pin',
@@ -30,6 +56,7 @@ Confirming one is a deliberate action, separate from submitting a run.</p>
             <button type="submit" class="secondary">Remove pin</button>
           </form>
         </details>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

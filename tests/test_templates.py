@@ -79,7 +79,9 @@ def make_run(app, make_user):
 @pytest.fixture
 def operator(logged_in_client, app):
     """The logged-in client, with a device username set: without one, every
-    form that collects a device password shows a notice instead (WS-11)."""
+    form that collects a device password shows a notice instead (WS-11). Its
+    user is an admin (conftest's `make_user`), so every page renders for it;
+    the name predates roles (WS-16)."""
     with app.app_context():
         User.query.filter_by(username='alice').one().device_username = 'jsmith'
         db.session.commit()
@@ -126,6 +128,7 @@ PAGES = [
     '/hostkeys/scan',
     '/users',
     '/users/new',
+    '/settings',
     '/profile',
 ]
 
@@ -315,7 +318,9 @@ def test_every_post_form_carries_a_csrf_token(csrf_app):
     """
     client = csrf_app.test_client()
     with csrf_app.app_context():
-        user = User(username='alice', device_username='jsmith')
+        # An admin, or the admin-only pages answer 403 and their forms go
+        # unchecked (PLAN.md WS-16).
+        user = User(username='alice', device_username='jsmith', role='admin')
         user.set_password('alice-long-enough-pw')
         db.session.add(user)
         db.session.commit()
@@ -329,7 +334,9 @@ def test_every_post_form_carries_a_csrf_token(csrf_app):
 
     missing = []
     for path in PAGES:
-        body = client.get(path).get_data(as_text=True)
+        response = client.get(path)
+        assert response.status_code == 200, path
+        body = response.get_data(as_text=True)
         for form in re.finditer(r'<form\b(.*?)</form>', body, re.DOTALL):
             attrs = form.group(0)
             if 'method="post"' not in attrs.lower():
@@ -510,7 +517,7 @@ def test_every_destructive_form_carries_a_confirmation_box(
     pages = {
         '/artifacts': '/delete',
         '/hostkeys': '/delete',
-        '/users': '/disable',
+        '/users': ('/disable', '/role'),
         f'/upgrades/{run}': ('/approve', '/retry', '/cancel'),
     }
     for path, actions in pages.items():

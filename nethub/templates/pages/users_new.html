@@ -8,6 +8,13 @@
   <input type="text" id="username" name="username" required autofocus>
   <label for="password">Password</label>
   <input type="password" id="password" name="password" required autocomplete="new-password">
+  <label for="role">Role</label>
+  <select id="role" name="role" aria-describedby="role_help">
+    <option value="operator" selected>operator</option>
+    <option value="admin">admin</option>
+  </select>
+  <small id="role_help">An operator uploads artifacts, confirms host keys and runs upgrades.
+  An admin can also manage users and settings, and is exempt from the two-person rules.</small>
   <button type="submit">Create user</button>
 </form>
 <p><a href="{{ url_for('auth.list_users') }}">Back to users</a></p>

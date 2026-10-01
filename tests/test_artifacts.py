@@ -30,7 +30,7 @@ def ingest(store, **kw):
     kw.setdefault("bundle_key", "iosxe-17-12-06")
     kw.setdefault("version", "17.12.06")
     kw.setdefault("sha512", DIGEST)
-    kw.setdefault("uploaded_by", None)
+    kw.setdefault("user", None)
     return artifacts.ingest(store=store, **kw)
 
 

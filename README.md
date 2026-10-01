@@ -24,8 +24,8 @@ this project once its provisioning module reaches parity.
 ## Project status
 
 Provisioning (day-0) is entirely unimplemented. A first slice of
-Software Lifecycle exists: local username/password auth (everyone who
-logs in is an admin — no roles yet), an artifact store NetHub owns, a
+Software Lifecycle exists: local username/password auth with two roles
+(admin and operator) and optional two-person rules, an artifact store NetHub owns, a
 fail-closed SSH host-key pin, and the day-2 upgrade path.
 
 There is no Ansible anywhere in this repo any more. Device work is
@@ -111,13 +111,19 @@ left alone.
 
 ## Using it
 
-Once you're logged in as an admin:
+There are two roles. An **operator** uploads and deletes artifacts, scans
+and confirms host keys, and submits, approves, retries and cancels runs. An
+**admin** does all of that and also manages users and **Settings**. The user
+`create-admin` or first-boot bootstrap creates is an admin; a user an admin
+creates on the **Users** page is an operator unless the admin picks admin.
+
+Once you're logged in:
 
 1. **Profile** — set your *device* username: the name NetHub logs into
    switches with on your behalf. It is separate from your NetHub login,
    is read server-side so a request can never assert it, and an upgrade
    cannot be submitted without it.
-2. **Artifacts → New artifact** — publish an image: a bundle key (what
+2. **Artifacts → Upload an image** — publish an image: a bundle key (what
    an upgrade request names to select it), a version, the image's
    SHA-512, and the file. NetHub hashes the bytes as it receives them
    and rejects the upload if the digest doesn't match what you claimed;
@@ -127,7 +133,7 @@ Once you're logged in as an admin:
    key and compare the fingerprint against the device itself, out of
    band. Then **Confirm** it. This spends no credential, and an address
    with no confirmed key cannot be named by a run at all — first contact
-   is a deliberate admin action rather than trust-on-first-use.
+   is a deliberate action by a person rather than trust-on-first-use.
 4. **Upgrades → New run** — pick a published bundle, list
    `hostname, address` pairs (IP literals inside a configured CIDR), and
    enter your device password. Pre-check runs immediately: privilege 15,
@@ -168,12 +174,34 @@ Once you're logged in as an admin:
    matches. It is a command rather than a page, because it hashes
    everything.
 7. Deleting an artifact removes the row and its image file.
-8. **Users** — create accounts, reset someone's password, disable or
-   re-enable an account, and unlock one that too many failed logins locked.
+8. **Users** (admins only) — create accounts, choose each one's role, reset
+   someone's password, disable or re-enable an account, and unlock one that
+   too many failed logins locked. The last active admin cannot be disabled
+   or made an operator.
    Disabling someone or resetting their password ends their open sessions
    on their next click. Change your own password on your **Profile**; that
    ends your other sessions. Every one of these is recorded, and each
    user's **History** shows who did what.
+9. **Settings** (admins only) — three **two-person rules**, each off until
+   an admin turns it on. They bind operators only; an admin may act alone,
+   and the records say an admin did.
+   - *Artifacts*: an upload waits, unusable, until someone other than the
+     uploader publishes it, and deleting a published image is a request that
+     someone else confirms. The uploader, or an admin, can withdraw a
+     waiting upload.
+   - *Host keys*: a scan is confirmed by someone other than whoever
+     requested it, within 15 minutes of the scan (the page shows the
+     deadline, and **Host keys** lists every scan still waiting), and
+     removing a pin is a request someone else confirms.
+     With this rule off, only whoever requested a scan can confirm it.
+   - *Runs*: every gate approval and every retry, scheduled ones included,
+     comes from someone other than the submitter. Cancelling and declining
+     cleanup never need a second person.
+
+   A rule is checked when the second action happens, so turning one off
+   releases anything waiting on it. Every change is recorded on the page.
+   Each phase on a run page shows the device username it ran under: the
+   approver's, which with the run rule on is never the submitter's.
 
 Anything that deletes, reloads or disables something asks you to tick a box
 stating what will happen; the server refuses the request without it. A run

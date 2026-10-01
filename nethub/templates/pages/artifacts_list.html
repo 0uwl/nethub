@@ -4,13 +4,56 @@
 {% block content %}
 <h1>Artifacts</h1>
 <p>Images that NetHub can serve. Stored under <code>{{ store }}</code></p>
-<p><a href="{{ url_for('artifacts.new_artifact') }}" role="button">Publish an image</a></p>
+<p><a href="{{ url_for('artifacts.new_artifact') }}" role="button">Upload an image</a></p>
 <p class="muted">To check that every stored image still matches its recorded
 SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
-{% if artifacts %}
+{% if staged %}
+<h2>Waiting to be published</h2>
+<p>A run cannot name these until someone other than the uploader publishes them.</p>
 <div class="overflow-auto">
 <table class="striped">
   <thead><tr><th>Bundle key</th><th>Version</th><th>File</th><th>Size</th><th>SHA-512</th><th>Uploaded by</th><th></th></tr></thead>
+  <tbody>
+  {% for a in staged %}
+    <tr>
+      <td><code>{{ a.bundle_key }}</code></td>
+      <td>{{ a.version }}</td>
+      <td><code>{{ a.filename }}</code></td>
+      <td>{{ "{:,}".format(a.file_size) }}</td>
+      <td><code>{{ a.sha512 }}</code></td>
+      <td>{{ users.get(a.uploaded_by, '') }} {{ a.uploaded_at }}</td>
+      <td class="actions">
+        {% if two_person and a.uploaded_by == current_user.id %}
+        <em>Waiting for someone else to publish it.</em>
+        {% else %}
+        <form method="post" action="{{ url_for('artifacts.publish_artifact', artifact_id=a.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit">Publish</button>
+        </form>
+        {% endif %}
+        {% if a.uploaded_by == current_user.id or current_user.is_admin %}
+        <details>
+          <summary>Withdraw</summary>
+          <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            {{ short_confirm('withdraw_help_%d' % a.id, 'Withdraw upload',
+                'Removes the upload of ' ~ a.bundle_key ~ ' and its image file. Nothing has used it.') }}
+            <button type="submit" class="secondary">Withdraw</button>
+          </form>
+        </details>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<h2>Published</h2>
+{% endif %}
+{% if artifacts %}
+<div class="overflow-auto">
+<table class="striped">
+  <thead><tr><th>Bundle key</th><th>Version</th><th>File</th><th>Size</th><th>SHA-512</th><th>Uploaded by</th><th>Published by</th><th></th></tr></thead>
   <tbody>
   {% for a in artifacts %}
     <tr>
@@ -20,9 +63,17 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
       <td>{{ "{:,}".format(a.file_size) }}</td>
       <td><code title="{{ a.sha512 }}">{{ a.sha512[:16] }}&hellip;</code></td>
       <td>{{ users.get(a.uploaded_by, '') }} {{ a.uploaded_at }}</td>
+      <td>{{ users.get(a.published_by, '') }} {{ a.published_at or '' }}</td>
       <td class="actions">
+        {% if a.delete_requested_by %}
+        <p><em>Delete requested by {{ users.get(a.delete_requested_by, '?') }}
+        on {{ a.delete_requested_at }}.</em></p>
+        {% endif %}
+        {% if two_person and a.delete_requested_by == current_user.id %}
+        <em>Waiting for someone else to confirm the delete.</em>
+        {% else %}
         <details>
-          <summary>Delete</summary>
+          <summary>{% if a.delete_requested_by %}Confirm delete{% elif two_person %}Request delete{% else %}Delete{% endif %}</summary>
           <form method="post" action="{{ url_for('artifacts.delete_artifact', artifact_id=a.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             {{ short_confirm('delete_help_%d' % a.id, 'Delete artifact',
@@ -30,6 +81,7 @@ SHA-512, run <code>flask --app nethub check-store</code> on the NetHub host.</p>
             <button type="submit" class="secondary">Delete</button>
           </form>
         </details>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

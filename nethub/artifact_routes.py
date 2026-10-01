@@ -18,6 +18,7 @@ from flask import (
 from flask_login import current_user, login_required
 
 from . import artifacts as artifact_store
+from . import settings
 from .extensions import db
 from .models import Artifact, User
 from .web import confirmed
@@ -31,6 +32,8 @@ def list_artifacts():
     return render_template(
         'pages/artifacts_list.html',
         artifacts=artifact_store.list_artifacts(),
+        staged=artifact_store.list_artifacts(state='staged'),
+        two_person=settings.applies('two_person_artifacts', current_user),
         store=current_app.config['ARTIFACT_STORE'],
         users={u.id: u.username for u in User.query.all()},
     )
@@ -51,15 +54,33 @@ def new_artifact():
                 bundle_key=form['bundle_key'],
                 version=form['version'],
                 sha512=form['sha512'],
-                uploaded_by=current_user.id,
+                user=current_user,
                 store=artifact_store.store_dir(current_app.config),
             )
-            flash(f'Published "{artifact.bundle_key}" ({artifact.file_size:,} bytes).',
-                  'success')
+            if artifact.state == 'staged':
+                flash(f'Uploaded "{artifact.bundle_key}" ({artifact.file_size:,} bytes). '
+                      f'Someone else has to publish it before a run can use it.', 'success')
+            else:
+                flash(f'Published "{artifact.bundle_key}" ({artifact.file_size:,} bytes).',
+                      'success')
             return redirect(url_for('artifacts.list_artifacts'))
         except artifact_store.ArtifactError as exc:
             flash(str(exc))
-    return render_template('pages/artifacts_new.html', form=form)
+    return render_template('pages/artifacts_new.html', form=form,
+                           two_person=settings.applies('two_person_artifacts', current_user))
+
+
+@artifacts_bp.route('/artifacts/<int:artifact_id>/publish', methods=['POST'])
+@login_required
+def publish_artifact(artifact_id):
+    artifact = db.session.get(Artifact, artifact_id)
+    if artifact is not None:
+        try:
+            artifact_store.publish(artifact, current_user)
+            flash(f'Published "{artifact.bundle_key}".', 'success')
+        except artifact_store.ArtifactError as exc:
+            flash(str(exc))
+    return redirect(url_for('artifacts.list_artifacts'))
 
 
 @artifacts_bp.route('/artifacts/<int:artifact_id>/delete', methods=['POST'])
@@ -71,8 +92,14 @@ def delete_artifact(artifact_id):
     if artifact is not None:
         key = artifact.bundle_key
         try:
-            artifact_store.delete(artifact)
-            flash(f'Deleted "{key}" and its image file.', 'success')
+            if artifact.state == 'staged':
+                artifact_store.withdraw(artifact, current_user)
+                flash(f'Withdrew "{key}" and its image file.', 'success')
+            elif artifact_store.delete(artifact, current_user):
+                flash(f'Deleted "{key}" and its image file.', 'success')
+            else:
+                flash(f'Delete of "{key}" requested. It stays usable until someone '
+                      f'else confirms the delete.', 'info')
         except artifact_store.ArtifactError as exc:
             flash(str(exc))
     return redirect(url_for('artifacts.list_artifacts'))

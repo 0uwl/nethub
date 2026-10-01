@@ -74,9 +74,9 @@ function name.
 | 11 | `feat/frontend-cleanup` | Drop 2014 JS/CSS, security headers, auto-refresh, stalled and queue indicators | 9 | merged |
 | 12 | `ci/hardening` | SHA-pinned actions, hashed lockfile, container smoke test | 3 | merged |
 | 13 | `docs/slim-down` | Shrink `CLAUDE.md` and the design doc, strip history from comments, delete this file | all others | todo |
-| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | in review |
+| 14 | `feat/scheduled-approvals` | Approve a gate now, run it at a set time | 8, 9, 15 | merged |
 | 15 | `feat/canary-activation` | Canary host, then parallel reloads; stop only on NetHub's own faults | 9 | merged |
-| 16 | `feat/roles` | Admin and operator roles; optional two-person rules for artifacts, host keys and runs | 10 | todo |
+| 16 | `feat/roles` | Admin and operator roles; optional two-person rules for artifacts, host keys and runs | 10 | in review |
 
 Workstreams 1, 2, 3 and 5 are independent and can go in any order. Do 4
 before 7, 8 and 9: those three rewrite the dispatch path and need the
@@ -1057,3 +1057,8 @@ a one-line description and the workstream it was found in.
   ("The job row is committed only once its credential is held ... puts the
   credential in the store") and §8.1 ("§9.1 does open a second channel").
   Found and fixed in WS-8.
+- `nethub/models.py` `DeviceHostKeyAudit`: design doc §5 calls
+  `device_host_key_audit` an append-only log, but unlike `user_admin_audit`,
+  `settings_audit` and `artifact_audit` it has no `BEFORE UPDATE`/`BEFORE
+  DELETE` triggers, so nothing stops a row being rewritten. `models._append_only`
+  does it in one line plus a migration. Found in WS-16.
