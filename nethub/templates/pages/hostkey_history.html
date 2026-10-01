@@ -5,7 +5,7 @@
 {% if entries %}
 <div class="overflow-auto">
 <table class="striped">
-  <thead><tr><th>When</th><th>Action</th><th>Type</th><th>Fingerprint</th><th>By</th></tr></thead>
+  <thead><tr><th>When</th><th>Action</th><th>Type</th><th>Fingerprint</th><th>By</th><th>Requested by</th></tr></thead>
   <tbody>
   {% for e in entries %}
     <tr>
@@ -13,7 +13,8 @@
       <td>{{ e.action }}</td>
       <td>{{ e.key_type }}</td>
       <td><code>{{ e.fingerprint_sha256 }}</code></td>
-      <td>{{ users.get(e.actor_id, '?') }}</td>
+      <td>{{ users.get(e.actor_id, '?') }}{% if e.actor_role %} ({{ e.actor_role }}){% endif %}</td>
+      <td>{{ users.get(e.requested_by, '') if e.requested_by else '' }}</td>
     </tr>
   {% endfor %}
   </tbody>

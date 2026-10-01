@@ -1,0 +1,43 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+<h2>Two-person rules</h2>
+<p>A rule that is on makes an operator wait for a second person. Admins are exempt,
+and the records say when an admin acted alone. A rule is read when the second action
+happens, so turning one off releases anything waiting on it.</p>
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <fieldset>
+    {% for key, text, on in rules %}
+    <label>
+      <input type="checkbox" role="switch" name="{{ key }}" value="on"{% if on %} checked{% endif %}>
+      {{ text }}
+    </label>
+    {% endfor %}
+  </fieldset>
+  <button type="submit">Save settings</button>
+</form>
+
+<h2>Changes</h2>
+{% if history %}
+<div class="overflow-auto">
+<table class="striped">
+  <thead><tr><th>When</th><th>Setting</th><th>Was</th><th>Now</th><th>By</th></tr></thead>
+  <tbody>
+  {% for e in history %}
+    <tr>
+      <td>{{ e.changed_at }}</td>
+      <td><code>{{ e.key }}</code></td>
+      <td>{{ e.old_value or 'off (never set)' }}</td>
+      <td>{{ e.new_value }}</td>
+      <td>{{ users.get(e.changed_by, '?') }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p>No setting has been changed yet.</p>{% endif %}
+{% endblock %}

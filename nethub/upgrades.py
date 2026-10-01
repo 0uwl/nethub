@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.exc import IntegrityError
 
 from . import artifacts as artifact_store
+from . import settings
 from .extensions import db
 from .models import (
     APPROVABLE,
@@ -332,7 +333,12 @@ def _seal_into(job, *, user, password, public_key):
     sibling can claim a `queued` job whose credential is not there yet -- the
     race WS-1 closed by ordering, closed here by construction. It expires with
     the job's deadline: a credential waits exactly as long as its job may.
+
+    The device username sealed is recorded on the job beside it (PLAN.md
+    WS-16): the device sees the supplier's name, and the run row only the
+    submitter's.
     """
+    job.device_username_used = user.device_username
     job.sealed_credential = seal(
         public_key,
         job_id=job.id,
@@ -458,6 +464,7 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
     passing it.
     """
     _check_gate(run)
+    _check_second_person(run, user)
     if phase not in APPROVABLE:
         raise RequestError(f'"{phase}" is not a phase anyone approves.')
     if run.awaiting_phase != phase:
@@ -500,6 +507,7 @@ def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
     it back at the same gate.
     """
     _check_gate(run)
+    _check_second_person(run, user)
     allowed = dict(retryable_phases(run))
     if phase not in allowed:
         if phase in RETRYABLE_AT.get(run.awaiting_phase, ()):
@@ -520,6 +528,17 @@ def _concurrency_for(phase, raw, cap):
     """Only activate takes a reload count; every other phase runs at the
     deployment's concurrency and records none."""
     return reload_count(raw, cap) if phase == 'activate' else None
+
+
+def _check_second_person(run, user):
+    """The two-person rule for runs (PLAN.md WS-16): with it on, an operator
+    may not approve a gate of, or retry, a run they submitted. Read when the
+    approval happens, so turning the rule off releases a waiting run. Cancel
+    and declining cleanup never pass through here: stopping is the
+    conservative action."""
+    if settings.applies('two_person_runs', user) and run.submitted_by == user.id:
+        raise RequestError('The two-person rule for runs is on: someone other than '
+                           'the submitter has to approve or retry this run.')
 
 
 def _check_gate(run):
@@ -561,7 +580,8 @@ def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
     # mid-run supersede re-targeting it (§5).
     job = UpgradePhaseJob(
         run_id=run.id, phase=phase, attempt=(previous or 0) + 1, status='queued',
-        is_retry=is_retry, approved_by=user.id, approved_at=_utcnow(),
+        is_retry=is_retry, approved_by=user.id, approved_by_role=user.role,
+        approved_at=_utcnow(),
         concurrency=concurrency, created_at=_utcnow(), not_before=not_before,
         # The budget runs from the window, not from the approval: a job
         # scheduled for tonight must not arrive there already past its

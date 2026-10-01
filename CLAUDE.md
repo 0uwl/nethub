@@ -36,10 +36,12 @@ expression and only invokes it if written as a call; there is no
 don't assume it still exists without checking `gunicorn --help` against
 whatever version `requirements.txt` actually resolves). It implements a
 first slice of the Software Lifecycle module: local username/password auth
-(everyone who can log in is an admin — no roles, no OIDC), admin-driven user
+with two roles, admin and operator, and optional two-person rules (no OIDC;
+see "Roles and two-person rules" below), admin-driven user
 creation (`nethub/auth.py`), an artifact store, and the day-2 upgrade path.
 This file is now the sole record of that slice's deliberate deviations from
-`design-document.md` — no OIDC, no roles, and sessions are Flask-Login's
+`design-document.md` — no OIDC (so roles are set by an admin, never derived
+from an IdP group), and sessions are Flask-Login's
 signed cookie rather than a `sessions` row (§4.5), made revocable by a
 per-user epoch (see "User management" below) — superseding the earlier
 `alpha.md`/`HANDOFF.md`, both deleted once their content moved here and into
@@ -111,8 +113,9 @@ export SECRET_KEY=$(openssl rand -hex 32)   # required; config.py rejects an abs
                                    # key, a known placeholder, or anything under 32 chars
 flask --app nethub run            # runs the dev server (DEBUG defaults off; --debug to override)
 
-flask --app nethub create-admin <username>   # bootstrap the first login user --
-                                              # there is no self-registration route
+flask --app nethub create-admin <username>   # create an admin (the first login
+                                              # user, or a break-glass one) -- there is
+                                              # no self-registration route
 flask --app nethub check-store     # hash every stored image against its row; prints
                                     # what is missing or altered, exits 1 if anything is
 
@@ -223,7 +226,8 @@ the `app` fixture — see the template-test note above for why that matters —
 artifact ingest and its two uniqueness constraints, host-key confirm, submit and
 approve refusals), plus
 `nethub/devices/{facts,connection,transfer,install,phases}.py`, `nethub/sibling.py`,
-`nethub/sealed_credentials.py` and `nethub/schema.py` — most of which need neither those fixtures nor a
+`nethub/sealed_credentials.py`, `nethub/schema.py` and `nethub/settings.py` (roles and the
+two-person rules, in `tests/test_roles.py`) — most of which need neither those fixtures nor a
 device, parsing the real output under `tests/captures/` and exercising the
 host-key policy against the same device's public host key. `tests/conftest.py`
 carries `make_user`, `make_artifact` (real bytes on disk, mirroring
@@ -357,12 +361,14 @@ password, each recorded in `user_admin_audit`. What is load-bearing:
   password, so "disabled" is no more an oracle than "locked"), the user
   loader, and Flask-Login itself, whose `UserMixin.is_authenticated` is
   `is_active`.
-- **Nobody can disable themselves, and the last active user is never
-  disabled.** The second check is inside the `UPDATE` (a count of *other*
-  active users, on an alias so it is not correlated to the row being
-  updated): two people disabling each other at once both pass any check
+- **Nobody can disable themselves or change their own role, and the last
+  active admin is never disabled or demoted.** The second check is inside
+  the `UPDATE` (`auth._another_active_admin`: a count of *other* active
+  admins, on an alias so it is not correlated to the row being updated):
+  two admins disabling or demoting each other at once both pass any check
   made beforehand, and SQLite's single writer makes the second statement
-  find nobody else active.
+  find nobody else. An operator can always be disabled, since the admin
+  doing it is active.
 - **A wrong current password on the change form counts as a failed login**,
   and a locked account cannot change its password: an open session on
   someone else's screen must not be an unlimited guessing oracle for the
@@ -375,6 +381,56 @@ password, each recorded in `user_admin_audit`. What is load-bearing:
   `detail` says which. `detail` is fixed text of ours, never request input.
 - **Your own password is changed on the profile page**, which asks for the
   current one; the admin reset route refuses to reset your own.
+
+## Roles and two-person rules (`nethub/settings.py`, PLAN.md WS-16)
+
+`users.role` is `admin` or `operator` (CHECK). Operators upload, publish and
+delete artifacts, scan, confirm and remove host-key pins, and submit,
+approve, retry and cancel runs. Admins also manage users and `/settings`.
+What is load-bearing:
+
+- **`web.admin_required` is the check; the templates only hide links.** It
+  guards every `/users*` route and `/settings`, and answers an operator with a
+  `403` (`errors/403.html`). Your own password and device username stay on
+  `/profile`, open to everyone. `tests/test_roles.py` posts to every
+  admin-only route as an operator; add a new admin route to its `ADMIN_ONLY`.
+- **Defaults point at least privilege, except where they must not.** The
+  model default is `operator`, and so is the Users form. `create-admin` and
+  first-boot bootstrap create admins. Migration 0008 made every user that
+  existed an admin, since everyone was one. conftest's `make_user` creates an
+  admin unless told otherwise, so tests that are not about roles need not
+  care; a test that builds `User(...)` by hand gets an operator.
+- **The three rules are rows in `settings`** (`two_person_artifacts`,
+  `two_person_hostkeys`, `two_person_runs`; `on`/`off`, off when absent),
+  changed only on the admin settings page through `settings.change`, which
+  writes `settings_audit` (append-only by trigger) in the same transaction.
+  `settings.applies(key, user)` is the one test: the rule is on *and* the user
+  is not an admin. It reads the row on every call and nothing caches it, so a
+  rule is checked when the *second* action happens and turning one off
+  releases whatever was waiting.
+- **What each rule does, and where it is enforced:**
+  - *Artifacts* (`artifacts.py`): `ingest` lands `staged`; `publish` refuses
+    the uploader; `delete` by an operator first records
+    `delete_requested_by`/`_at` and returns False, and a different user's
+    delete removes it. `withdraw` (a staged upload, anyone) needs no second
+    person: nothing can have used it.
+  - *Host keys* (`upgrade_routes.py`): `may_confirm`, above under "Upgrade
+    routes"; `delete_hostkey` the same request-then-confirm as artifacts.
+    `device_host_key_audit` gains `requested_by` (the other person) and
+    `actor_role`, and a `delete_requested` action.
+  - *Runs* (`upgrades._check_second_person`, called by `approve` and `retry`,
+    so a scheduled approval is covered too): the approver is not
+    `submitted_by`. `request_cancel` and `decline_cleanup` never call it:
+    stopping is the conservative action.
+- **Admins are exempt and visible**: `upgrade_phase_jobs.approved_by_role`,
+  and `actor_role` on `artifact_audit` and `device_host_key_audit`, record the
+  role at the time, since a role can change later. `user_admin_audit` gets a
+  `role_changed` row (`detail` "operator to admin").
+- **A pending delete request cannot be withdrawn**, only confirmed by someone
+  else; the item stays usable meanwhile. Nothing expires a request either.
+- **Roles are local only.** §4.4's OIDC-derived roles, `auth_backend`,
+  enrollment tokens and the `nethub-admin` break-glass CLI are not built;
+  `create-admin` is what exists.
 
 ## Container
 
@@ -849,13 +905,14 @@ timeline, and never rolled up into a persistent per-device current-state
 view. That roll-up is the line between a job record and an inventory, and
 NetHub is explicitly not an inventory system (design doc §2 Non-goals, §7.4).
 
-**§5 specifies day-0 and settings tables that do not exist yet**:
+**§5 specifies day-0 tables that do not exist yet**:
 `allowlist_entries` (with the per-role artifact FKs that make §3.4's
 serial→artifact mapping representable at all, plus `mac` for the Kea
 gate), `provisioning_log` with an `outcome` enum and a
-`provisioning_log_artifacts` junction, `settings` + append-only
-`settings_audit`, and `sessions`. `user_admin_audit` exists since WS-10
-(see "User management"). Of the upgrade
+`provisioning_log_artifacts` junction, and `sessions`. `user_admin_audit`
+exists since WS-10 (see "User management"); `settings` and
+`settings_audit` since WS-16, holding only the two-person rules (see
+"Roles and two-person rules"). Of the upgrade
 tables it describes, all exist, including `upgrade_host_phase_results`.
 `upgrade_phase_jobs` carries four columns §7/§9 depend on: `created_at`,
 `not_before` (the approver's optional start time; the queue orders by
@@ -1875,14 +1932,17 @@ overwrite, and note the impact was bounded rather than catastrophic only
 because the device-side `verify /sha512` compares against the row's digest —
 a corrupted store failed upgrades, it did not install wrong bytes.
 
-**`state`, `superseded_by_id` and `bytes_state` exist but only `published`
-and `present` are ever written.** There is no promotion step to reach
-`staged` through and no supersede flow — the same no-supersede stance the
+**`staged` is written only by the two-person rule for artifacts; nothing
+writes `superseded` or `pruned`.** An upload lands `published` unless the rule
+binds its uploader, and then `staged`, publishable by someone else
+(`artifacts.publish`, where the bundle-key check runs) or withdrawn by anyone
+(`withdraw`). There is no supersede flow — the same no-supersede stance the
 YAML store had, and delete is still a hard removal of row and bytes (refused
-while a live run references the artifact; see "Dispatch" above). The
-columns are there because the partial indexes are defined over them and §7.4's
-retention story references them. Don't add `superseded_by_id` handling without
-the flow that reads it.
+while a live run references the artifact; see "Dispatch" above). Don't add
+`superseded_by_id` handling without the flow that reads it. Every upload,
+publish, withdraw, delete request and delete writes an `artifact_audit` row
+(append-only by trigger, keyed on copies of the artifact's identity so it
+outlives the delete), with the actor's role.
 
 **`check_store()` keeps the drift check's one rule**: re-derive what is cheap
 and always recoverable (a stale `file_size`), flag what is not (a missing file,
@@ -1904,8 +1964,9 @@ a digest — a submitted pair would name any bytes against any checksum and
 bypass the table that owns both.
 
 Two deployment settings §5 puts in a `settings` table are env vars in
-`shared_config.py`, because alpha has neither that table nor its audit:
-`ARTIFACT_STORE` and `DEVICE_TARGET_CIDRS`. **An empty
+`shared_config.py`: `ARTIFACT_STORE` and `DEVICE_TARGET_CIDRS`. The table
+exists since WS-16 but holds only the two-person rules; moving these into it
+(with an audited settings page) was left out of that workstream. **An empty
 `DEVICE_TARGET_CIDRS` refuses every submit** rather than allowing any address
 — an unset security setting is not "allow all".
 
@@ -1972,13 +2033,14 @@ nothing to fetch; with the ciphertext in the row that ordering cannot arise.
 `submit()` requires the submitter's, and refuses a gate past
 `gate_expires_at` even before the sibling has expired it.
 
-**Known gap, not yet decided:** `upgrade_runs.device_username_used` snapshots
-the *submitter's* device username, but each gate collects the credential of
-whoever is standing at it. If a different person approves a phase, the device
-sees the approver's username while the run row records the submitter's, which
-breaks the attribution §4.3 is built for. Closing it means either restricting
-approval to the submitter or recording the device username per phase; both
-are design decisions rather than fixes.
+**The device username is recorded per phase** (WS-16).
+`upgrade_runs.device_username_used` snapshots the *submitter's* device
+username, but each gate collects the credential of whoever is standing at it,
+which under the two-person rule for runs is never the submitter. So
+`upgrades._seal_into` also writes the supplier's name to
+`upgrade_phase_jobs.device_username_used`, the sibling copies `activate`'s onto
+the `verify` it chains, and the run page shows it per phase: that column, not
+the run's, is what the device's AAA log agrees with.
 
 **Host-key scanning is dispatched to the sibling, and confirming is bound to
 a scan NetHub itself performed (WS-6.2b/6.3).** `scan_hostkey` (POST) used
@@ -1998,11 +2060,11 @@ the request body, and the route refuses unless the scan `succeeded`, was
 requested by `current_user`, and has not already backed a confirmation
 (`consumed_at`, a one-shot flag mirroring §4.1's allowlist pattern) — plus a
 15-minute freshness window past the scan's `finished_at`
-(`SCAN_CONFIRM_WINDOW`). **This does not fully close §4.3's separation-of-duty
-gap** — the same person can still scan and then confirm, since alpha has no
-roles — it only proves a confirmation corresponds to a key NetHub itself
-observed at some specific prior moment rather than to whatever a form
-claims. The real fix is role-based access control.
+(`SCAN_CONFIRM_WINDOW`). **Who may confirm is `upgrade_routes.may_confirm`**:
+with the two-person rule for host keys off, only whoever requested the scan
+(WS-6.3's binding, which on its own proves only that a confirmation matches a
+key NetHub observed); with it on, anyone *but* the requester, unless they are
+an admin. That rule is §4.3's separation of duty; it is off by default.
 
 **`confirm_hostkey`/`delete_hostkey` write a `device_host_key_audit` row
 (WS-6.4).** Neither used to leave any record of who acted or what the pin

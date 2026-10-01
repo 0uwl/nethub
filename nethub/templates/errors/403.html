@@ -1,0 +1,7 @@
+{% extends 'layouts/main.html' %}
+{% block title %}Not allowed{% endblock %}
+{% block content %}
+<h1>Not allowed</h1>
+<p>Only an admin can do that.</p>
+<p><a href="{{ url_for('home') }}">Back</a></p>
+{% endblock %}

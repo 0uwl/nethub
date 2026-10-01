@@ -797,6 +797,19 @@ class TestVerifyRunsOnActivatesCredential:
         assert seen["password"] == PASSWORD
         assert seen["ctx"].device_password == "", "cleared once verify ended"
 
+    def test_verify_records_activates_device_username(self, app, run, monkeypatch):
+        """PLAN.md WS-16: the device saw activate's supplier during verify too."""
+        monkeypatch.setitem(phases.PHASE_RUNNERS, "verify",
+                            lambda conn, host, ctx: phases.HostOutcome(host.hostname,
+                                                                       "verified"))
+        with app.app_context():
+            queue(run, "activate", device_username_used="approver-dev",
+                  approved_by=db.session.get(UpgradeRun, run).submitted_by)
+            succeed(monkeypatch, "activate")
+            make_sibling().run_once()
+            verify = UpgradePhaseJob.query.filter_by(run_id=run, phase="verify").one()
+            assert verify.device_username_used == "approver-dev"
+
     def test_a_failed_activate_queues_no_verify(self, app, run, monkeypatch):
         with app.app_context():
             queue(run, "activate")

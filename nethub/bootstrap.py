@@ -43,8 +43,7 @@ def bootstrap_admin():
     There is no default name (PLAN.md WS-10): a well-known `admin` plus the
     login lockout let anyone on the network keep the first account locked
     out. With no users and no ADMIN_USERNAME, NetHub starts anyway and says
-    how to create one. Everyone who can log in is an admin in this alpha --
-    there are no roles to pick between (see CLAUDE.md).
+    how to create one. The user it creates is an admin (PLAN.md WS-16).
     """
     if User.query.count() > 0:
         return
@@ -59,7 +58,7 @@ def bootstrap_admin():
 
     password, source = _initial_admin_password()
 
-    user = User(username=username)
+    user = User(username=username, role='admin')
     user.set_password(password)
     db.session.add(user)
     db.session.flush()

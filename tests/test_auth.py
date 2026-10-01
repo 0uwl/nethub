@@ -71,11 +71,11 @@ def test_create_admin_cli_creates_user(app):
     result = runner.invoke(
         args=['create-admin', 'dave'], input='dave-long-enough-pw\ndave-long-enough-pw\n'
     )
-    assert 'Created user "dave"' in result.output
+    assert 'Created admin "dave"' in result.output
     with app.app_context():
         from nethub.models import User
 
-        assert User.query.filter_by(username='dave').first() is not None
+        assert User.query.filter_by(username='dave').one().role == 'admin'  # WS-16
 
 
 def test_create_admin_cli_rejects_existing_user(app, make_user):

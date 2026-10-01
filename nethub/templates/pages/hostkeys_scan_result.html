@@ -19,7 +19,10 @@ usually finishes in well under 30 seconds.</p>
 <pre>{{ scan.key_type }}  {{ scan.fingerprint_sha256 }}</pre>
 {% if scan.consumed_at %}
 <p><em>This scan has already been used to confirm a pin.</em></p>
-{% elif scan.requested_by != current_user.id %}
+{% elif not can_confirm and scan.requested_by == current_user.id %}
+<p><em>The two-person rule for host keys is on: someone other than you has to confirm
+this scan. Send them this page.</em></p>
+{% elif not can_confirm %}
 <p><em>Scanned by someone else; they need to confirm it.</em></p>
 {% else %}
 <form method="post" action="{{ url_for('hostkeys.confirm_hostkey') }}">
