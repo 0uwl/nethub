@@ -60,7 +60,7 @@ Pinned by: none
 
 ## 2. Evidence and the end-to-end test
 
-### 2.1 [captures-are-evidence]
+### 2.1 Captures (rule: device-layer.md [captures-are-evidence])
 **[SPEC]**
 `tests/captures/<device>-<release>/` is verbatim output from real
 hardware: `show version`, `dir`, `show privilege`, the device's SSH host
@@ -68,7 +68,7 @@ key and a README giving its `ssh-keygen -lf` fingerprint. Never edit one
 to make a test pass. Add a directory per release.
 Pinned by: `tests/test_facts.py::TestRealCapture::test_parse_version`, `tests/test_connection.py::test_fingerprint_matches_what_ssh_keygen_prints`
 
-### 2.2 [schema-fixtures-are-evidence]
+### 2.2 Schema fixtures (rule: schema.md [schema-fixtures-are-evidence])
 **[SPEC]**
 `tests/fixtures/schemas/{513aaec,a4fcc12,c76688d}.sql` are real
 `create_all()` output from historical commits, used to test adoption of
