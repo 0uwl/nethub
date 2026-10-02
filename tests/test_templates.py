@@ -63,7 +63,7 @@ def make_run(app, make_user):
             ))
             if failed_phase:
                 # A second host that failed `failed_phase`, so the run page
-                # has something to offer a retry for (PLAN.md WS-8).
+                # has something to offer a retry for.
                 db.session.add(UpgradeRunHost(
                     run_id=run.id, hostname='sw02', position=1, ansible_host='192.0.2.11',
                     filename='cat9k_lite_iosxe.17.12.06.SPA.bin',
@@ -79,9 +79,9 @@ def make_run(app, make_user):
 @pytest.fixture
 def operator(logged_in_client, app):
     """The logged-in client, with a device username set: without one, every
-    form that collects a device password shows a notice instead (WS-11). Its
+    form that collects a device password shows a notice instead. Its
     user is an admin (conftest's `make_user`), so every page renders for it;
-    the name predates roles (WS-16)."""
+    the name predates roles."""
     with app.app_context():
         User.query.filter_by(username='alice').one().device_username = 'jsmith'
         db.session.commit()
@@ -154,7 +154,7 @@ def test_no_page_leaks_an_undefined_variable(logged_in_client, path):
 
 
 def test_the_profile_page_is_reachable_from_the_nav(logged_in_client):
-    """WS-5.1: the route existed but nothing linked to it, so it may as well
+    """The route existed but nothing linked to it, so it may as well
     not have. `upgrades.submit` refuses every run without a device username.
     """
     body = logged_in_client.get('/artifacts').get_data(as_text=True)
@@ -187,7 +187,7 @@ def test_clearing_a_device_username_stores_null_not_empty(logged_in_client, app)
 
 def test_the_activate_approval_form_confirms(operator, make_run):
     """A required checkbox, not a JavaScript confirm(): the CSP blocks every
-    script, so an onsubmit prompt would silently vanish (WS-11)."""
+    script, so an onsubmit prompt would silently vanish."""
     run = make_run(state='awaiting_approval', awaiting_phase='activate')
     body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
     form = _form_containing(body, f'/upgrades/{run}/approve')
@@ -219,7 +219,7 @@ def _confirm_box(form):
     return box is not None and '<label class="confirm"' in form
 
 
-# --- Retrying the hosts that failed a phase (PLAN.md WS-8) --------------------
+# --- Retrying the hosts that failed a phase --------------------
 
 def test_a_host_that_failed_stage_offers_a_retry_at_the_activate_gate(
     operator, make_run
@@ -278,7 +278,7 @@ def _form_containing(body, needle):
 # --- Flash categories -------------------------------------------------------
 
 def test_a_success_flash_is_not_styled_as_an_error(logged_in_client):
-    """Every flash used to render alert-error whatever it said."""
+    """A success is not rendered as alert-error."""
     resp = logged_in_client.post('/profile/device-username',
                                  data={'device_username': 'jsmith'},
                                  follow_redirects=True)
@@ -319,7 +319,7 @@ def test_every_post_form_carries_a_csrf_token(csrf_app):
     client = csrf_app.test_client()
     with csrf_app.app_context():
         # An admin, or the admin-only pages answer 403 and their forms go
-        # unchecked (PLAN.md WS-16).
+        # unchecked.
         user = User(username='alice', device_username='jsmith', role='admin')
         user.set_password('alice-long-enough-pw')
         db.session.add(user)
@@ -391,7 +391,7 @@ def test_user_created_is_styled_as_a_success(logged_in_client):
     assert 'alert-success' in body
 
 
-# --- Host-key scan result and history pages (WS-6.2b/6.4) --------------------
+# --- Host-key scan result and history pages --------------------
 
 def test_a_succeeded_scan_shows_the_fingerprint_and_a_confirm_button(
     logged_in_client, make_scan
@@ -454,7 +454,7 @@ def test_the_history_page_lists_a_confirm_and_a_delete(logged_in_client, app):
     assert 'SHA256:x' in body
 
 
-# --- WS-11: Pico, no script, confirmation boxes ------------------------------
+# --- Pico, no script, confirmation boxes ------------------------------
 
 def test_the_vendored_pico_matches_its_pinned_digest(app):
     """The layout records Pico's version and SHA-256; the file must match, so
@@ -528,7 +528,7 @@ def test_every_destructive_form_carries_a_confirmation_box(
             assert _confirm_box(form), (path, action)
 
 
-# --- WS-11: the run page says what the sibling is doing ----------------------
+# --- the run page says what the sibling is doing ----------------------
 
 def _add_job(app, run_id, status, *, phase='stage', age=timedelta(0), beat_age=None,
              not_before=None):
@@ -627,7 +627,7 @@ def test_the_approve_form_says_when_nothing_is_ahead(operator, make_run):
     assert 'Nothing is queued ahead' in body
 
 
-# --- WS-11: no device username, told before typing a password ----------------
+# --- no device username, told before typing a password ----------------
 
 def test_with_no_device_username_the_new_run_page_says_so_instead_of_a_form(
     logged_in_client
@@ -697,7 +697,7 @@ def test_the_row_action_boxes_are_short_and_explain_themselves_on_hover(
         assert f'<small id="{described}" class="explainer">{explainer}</small>' in form, path
 
 
-# --- WS-15: the reload count and the canary, on the forms that reload --------
+# --- the reload count and the canary, on the forms that reload --------
 
 def test_the_activate_form_asks_for_a_reload_count_and_names_the_canary(
     operator, app, make_run
@@ -744,7 +744,7 @@ def test_a_retry_of_activate_asks_for_a_reload_count(operator, make_run):
     assert 'id="retry_activate_concurrency"' in form
 
 
-# --- WS-14: the start time on an approval ------------------------------------
+# --- the start time on an approval ------------------------------------
 
 def test_the_approve_form_offers_a_start_time_in_utc(operator, make_run):
     run = make_run(awaiting_phase='activate')
@@ -767,7 +767,7 @@ def test_a_scheduled_job_is_shown_with_its_window_and_does_not_refresh(
 ):
     """A run approved for tonight is not "working": refreshing every five
     seconds until then, or warning that no worker picked it up, would both be
-    wrong (PLAN.md WS-14)."""
+    wrong."""
     run = make_run(state='running', awaiting_phase=None)
     _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
              not_before=datetime.now(timezone.utc) + timedelta(hours=6))

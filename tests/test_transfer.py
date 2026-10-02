@@ -201,7 +201,7 @@ class TestPushBracket:
     def test_a_hostkey_mismatch_on_the_second_session_is_not_filed_as_a_transfer_error(
         self, image_on_disk, monkeypatch
     ):
-        """WS-4.3: the second SCP session is pinned too, so a HostKeyError
+        """The second SCP session is pinned too, so a HostKeyError
         there is the pin catching something -- it must reach
         phases.failure_stage_for as 'hostkey', not get buried as a routine
         TransferError among ordinary flaky-SCP failures."""
@@ -222,7 +222,7 @@ class TestPushBracket:
     def test_push_failure_summary_omits_the_wrapped_exceptions_text(
         self, image_on_disk, monkeypatch
     ):
-        """WS-4.2: `message` may still interpolate the wrapped exception for
+        """`message` may still interpolate the wrapped exception for
         `__cause__` context, but `summary` -- the year-retained column -- must
         not repeat it."""
         search_dir, size = image_on_disk
@@ -244,7 +244,7 @@ class TestPushBracket:
 
 class TestResolveSourceSummary:
     def test_an_os_error_summary_omits_its_own_text(self, monkeypatch):
-        """WS-4.2: resolve_source's OSError wrapper must not repeat whatever
+        """resolve_source's OSError wrapper must not repeat whatever
         text the OS or filesystem put in the underlying exception."""
 
         def boom(self):

@@ -1,4 +1,4 @@
-"""Add job status `partial` and `upgrade_phase_jobs.is_retry` (PLAN.md WS-8).
+"""Add job status `partial` and `upgrade_phase_jobs.is_retry`.
 
 Revision ID: 0004_partial_and_retry
 Revises: 0003_sealed_credential

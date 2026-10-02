@@ -129,7 +129,7 @@ def test_dir_command_rejects_injection():
 
 
 def test_parse_error_summary_omits_the_textfsm_exceptions_text(monkeypatch):
-    """WS-4.2: textfsm/clitable can raise with the raw device output embedded
+    """textfsm/clitable can raise with the raw device output embedded
     in their message, so `message` may still carry it for local debugging, but
     `summary` -- the year-retained column -- must not."""
 

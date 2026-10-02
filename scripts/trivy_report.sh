@@ -7,7 +7,7 @@
 # builds, but nearly every finding is in the Debian base image, which NetHub
 # cannot patch and which reaches it only through Dependabot's base-digest
 # bump. Failing the build on those blocked every merge and release on someone
-# else's fix, so the scans report instead (maintainer, 2026-10-01): the SARIF
+# else's fix, so the scans report instead: the SARIF
 # goes to GitHub code scanning, and this script writes the findings to the job
 # summary and raises a warning annotation on the run.
 #

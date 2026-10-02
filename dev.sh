@@ -33,9 +33,7 @@ echo "==> Building dev container image"
 podman build -f Containerfile.dev -t "$IMAGE" .
 
 # Bind-mount source must exist first; podman would otherwise create it
-# root-owned. This replaced a mount of ansible/inventory/rendered/, a path
-# that had already stopped existing before ansible/ was deleted -- and then
-# instance/registries, which went with REGISTRIES_ROOT at build step 7.
+# root-owned.
 mkdir -p ./instance/artifacts
 
 # The sibling's key pair (nethub/sealed_credentials.py). create_app() refuses

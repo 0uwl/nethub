@@ -1,4 +1,4 @@
-"""Deployment settings an admin changes from the web UI (PLAN.md WS-16).
+"""Deployment settings an admin changes from the web UI.
 
 Only the three two-person rules so far. Each is read from its row whenever
 an action asks, never cached, so turning a rule off releases whatever was
@@ -45,8 +45,8 @@ GO, REQUESTED, WAITING = 'go', 'requested', 'waiting'
 
 
 def second_person_delete(key, row, user):
-    """The request-then-confirm step of a delete under two-person rule `key`
-    (PLAN.md WS-16), shared by artifacts and host-key pins. `row` has `id`,
+    """The request-then-confirm step of a delete under two-person rule `key`,
+    shared by artifacts and host-key pins. `row` has `id`,
     `delete_requested_by` and `delete_requested_at`.
 
     `GO` when the rule does not bind `user` or someone else requested the

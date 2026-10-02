@@ -1,4 +1,4 @@
-"""Canary activation: host order, a chosen reload count, and `store` (PLAN.md WS-15).
+"""Canary activation: host order, a chosen reload count, and `store`.
 
 Revision ID: 0006_canary_activation
 Revises: 0005_user_management

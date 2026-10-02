@@ -21,8 +21,8 @@ from .web import admin_required, confirmed
 
 auth_bp = Blueprint('auth', __name__)
 
-#: Shortest password `new_user` and `create-admin` will accept. There was no
-#: policy at all before this -- a one-character password was fine.
+#: Shortest password `new_user`, `create-admin`, resets and password changes
+#: accept.
 MIN_PASSWORD_LENGTH = 12
 
 #: How many consecutive failures lock an account, and for how long. See the
@@ -81,7 +81,6 @@ def login():
             login_user(user)
             return redirect(url_for('artifacts.list_artifacts'))
 
-        # There was no record at all that an attempt happened before this.
         # Username is logged because the account is the thing being attacked
         # and an operator needs to know which one; the password never is.
         if user is not None and not correct:
@@ -148,7 +147,7 @@ def new_user():
             flash(f'Password must be at least {MIN_PASSWORD_LENGTH} characters.')
             return render_template('pages/users_new.html')
 
-        # An operator unless the admin picked otherwise (PLAN.md WS-16).
+        # An operator unless the admin picked otherwise.
         role = request.form.get('role', 'operator')
         if role not in ROLES:
             flash('Choose a role: admin or operator.')
@@ -254,7 +253,7 @@ def disable_user(user_id):
 @auth_bp.route('/users/<int:user_id>/role', methods=['POST'])
 @admin_required
 def change_role(user_id):
-    """Make a user an admin or an operator (PLAN.md WS-16).
+    """Make a user an admin or an operator.
 
     Not your own role, and never the last active admin's: demoting them is
     disabling the only account that could undo it. The user loader re-reads

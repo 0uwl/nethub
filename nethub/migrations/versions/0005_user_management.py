@@ -1,16 +1,15 @@
-"""Disable users, revoke sessions, audit user administration (PLAN.md WS-10).
+"""Disable users, revoke sessions, audit user administration.
 
 Revision ID: 0005_user_management
 Revises: 0004_partial_and_retry
 Create Date: 2026-09-26
 
-- `user.is_active`: deactivation rather than deletion (design doc §5). Every
+- `user.is_active`: deactivation rather than deletion. Every
   existing user stays active.
 - `user.session_epoch`: part of the id in the session cookie, bumped to
   revoke a user's sessions. Existing cookies carry a bare id, which the new
   user loader refuses, so everyone logs in again once after this upgrade.
-- `user_admin_audit`, append-only by trigger as design doc §5 specifies for
-  it.
+- `user_admin_audit`, append-only by trigger.
 
 Both columns are added with a server default, which SQLite's ADD COLUMN
 accepts without rebuilding the table.

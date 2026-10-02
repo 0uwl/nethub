@@ -42,7 +42,7 @@ def create_app():
     register_cli(app)
     register_artifact_cli(app)
 
-    # Content-Security-Policy and friends on every response (PLAN.md WS-11).
+    # Content-Security-Policy and friends on every response.
     from .web import set_security_headers
     app.after_request(set_security_headers)
 
@@ -88,7 +88,7 @@ def create_app():
         # rather than a legitimately oversized one -- but Werkzeug's bare
         # default error page doesn't say why the request failed or what the
         # limit is, which reads as a broken upload rather than an explained
-        # refusal (WS-5.6).
+        # refusal.
         return render_template(
             'errors/413.html', max_bytes=app.config['MAX_CONTENT_LENGTH']
         ), 413

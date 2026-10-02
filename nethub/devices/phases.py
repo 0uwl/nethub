@@ -1,13 +1,13 @@
 """Running one phase of an upgrade across a run's hosts, and recording it.
 
 This is the layer between the device modules and the database. It owns the
-per-host loop, the exception-to-`failure_stage` mapping (§7.3), and the rows:
+per-host loop, the exception-to-`failure_stage` mapping, and the rows:
 one `upgrade_host_phase_results` per host per execution, plus the
 `upgrade_run_hosts.state` cursor and the phase job's terminal status.
 
 It does **not** own dispatch. The sibling claims a `queued` job, sets it
 `running`, and calls `execute_phase`; the startup sweep and the queue are the
-sibling's too (§7.3, §9). Everything here therefore assumes it is already
+sibling's too. Everything here therefore assumes it is already
 running inside the sibling process -- never inside Flask, which holds the
 unauthenticated route.
 
@@ -15,7 +15,7 @@ The credential arrives as an argument and is never written anywhere: not to a
 row, not to `error_summary`, not to a log. `_summarise` is what enforces the
 last of those: it reads an exception's `summary` attribute rather than its
 `str()`, and every exception this codebase raises sets that attribute
-explicitly (WS-4.2). An exception with no `summary` -- anything foreign, and
+explicitly. An exception with no `summary` -- anything foreign, and
 anything of ours that forgot to set one -- reduces to its type name. That is
 the trust direction: opt in per exception, rather than an allowlist of
 trusted *types* that a wrapper interpolating a foreign exception's text could
@@ -47,7 +47,7 @@ from nethub.models import (
 )
 
 #: Per-host cursor value after a phase succeeds. Cleanup does not advance it:
-#: a cleaned host is still `verified` (§7.3 -- this column is a cursor, and
+#: a cleaned host is still `verified` (this column is a cursor, and
 #: the per-phase detail lives in the results table).
 _STATE_AFTER = {
     'precheck': 'precheck_ok',
@@ -57,7 +57,7 @@ _STATE_AFTER = {
     'cleanup': 'verified',
 }
 
-#: Faults that stop a wave (PLAN.md decision 13). Both are NetHub's side, not
+#: Faults that stop a wave. Both are NetHub's side, not
 #: the device's, so they would repeat on every host: the same refused password
 #: goes to each of them (and enough refusals lock the account out of
 #: TACACS+/RADIUS for the whole fleet), and the same bug in our code runs on
@@ -82,10 +82,10 @@ NOT_REPEATABLE = frozenset({'activate'})
 HEARTBEAT_INTERVAL = 30.0
 
 class UnconfirmedHost(Exception):
-    """No confirmed `device_host_keys` row for this address (§4.3).
+    """No confirmed `device_host_keys` row for this address.
 
-    `summary` is what reaches the year-retained `error_summary` column
-    (WS-4.2). This exception never interpolates foreign text, so the default
+    `summary` is what reaches the year-retained `error_summary` column. This
+    exception never interpolates foreign text, so the default
     of `summary == message` is already correct -- the attribute exists purely
     so `_summarise` can read it the same way it reads every other exception's.
     """
@@ -122,7 +122,7 @@ class PhaseResult:
     eligible host was attempted (`STOPPING_STAGES`, a failed canary's own
     stage, or `store`), and None when every host was attempted or cancel or
     the deadline ended it. The sibling returns a run whose gated phase was
-    stopped to that phase's gate (PLAN.md WS-15).
+    stopped to that phase's gate.
     """
 
     status: str
@@ -179,8 +179,8 @@ class LoginGate:
 
     Every host in a phase gets the same password, so a mistyped one would be
     refused on every host that is logging in at the same time, and enough
-    refusals lock the account out of TACACS+/RADIUS for the whole fleet
-    (PLAN.md WS-8). With hosts running in parallel, the first host to reach
+    refusals lock the account out of TACACS+/RADIUS for the whole fleet. With
+    hosts running in parallel, the first host to reach
     its login goes ahead and the others wait for the answer:
 
     - accepted: the gate opens and every host logs in as it arrives;
@@ -238,7 +238,7 @@ class PhaseContext:
     """What an execution needs that the run row does not carry.
 
     The credential lives here and nowhere else: held for the life of *this
-    phase execution* only (design doc §9.1 -- not the life of the run, which
+    phase execution* only (not the life of the run, which
     can park at a gate for days), and never copied to a row or a log.
 
     `search_dir` comes from deployment settings rather than from the run, but
@@ -280,7 +280,7 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 def failure_stage_for(exc: BaseException) -> str:
-    """Map an exception to §7.3's phase-job vocabulary.
+    """Map an exception to the phase-job `failure_stage` vocabulary.
 
     Ordered most specific first. The point of the mapping living here rather
     than in each device module is that the modules stay usable without the
@@ -305,7 +305,7 @@ def failure_stage_for(exc: BaseException) -> str:
     if isinstance(exc, install.InstallError):
         # `privilege` is worth keeping distinct: it means the submitter's
         # account cannot reach level 15, which is a deployment fault rather
-        # than a device fault (§7.3).
+        # than a device fault.
         return 'privilege' if exc.status == 'privilege' else 'install'
     if isinstance(exc, facts.FactsError):
         return 'precheck'
@@ -318,21 +318,19 @@ def failure_stage_for(exc: BaseException) -> str:
         # The session or the network: one device's problem. EOFError is what
         # paramiko raises when the transport closes under a read.
         return 'connect'
-    # Anything else is a bug in NetHub's own code. It used to fall through to
-    # `connect`, which recorded our bug as a network problem; as `internal` it
-    # also stops the wave (PLAN.md WS-15), since the same code runs on every
-    # host.
+    # Anything else is a bug in NetHub's own code. It must not read as a
+    # network problem, and as `internal` it stops the wave, since the same code
+    # runs on every host (docs/dispatch.md [unknown-exception-is-internal]).
     return 'internal'
 
 
 def _summarise(exc: BaseException) -> str:
     """Read the fault an exception opted to disclose, never its raw `str()`.
 
-    `error_summary` is retained for a year (§7.4). Reading `summary` rather
-    than checking a type allowlist is the WS-4.2 fix: a type-level check
-    trusted *any* message from an allowed type, including one of ours that
-    interpolated a foreign exception's text wholesale. An explicit `summary`
-    attribute can only ever say what its own `__init__` chose to put there.
+    `error_summary` is retained for a year. An explicit `summary` attribute
+    can only ever say what its own `__init__` chose to put there, whereas
+    trusting a whole exception type would trust any text one of ours had
+    interpolated from a foreign exception.
     """
     text = getattr(exc, "summary", None)
     if text is None:
@@ -343,9 +341,9 @@ def _summarise(exc: BaseException) -> str:
 def pinned_key(host: UpgradeRunHost) -> connection.HostKey:
     """The confirmed pin for this host's address, or refuse.
 
-    An address with no already-confirmed row cannot be named by a run at all
-    (§4.3), so an unconfirmed row is treated exactly like a missing one --
-    seeing a key is not accepting it.
+    An address with no already-confirmed row cannot be named by a run at all,
+    so an unconfirmed row is treated exactly like a missing one -- seeing a key
+    is not accepting it.
     """
     row = DeviceHostKey.query.filter_by(ansible_host=host.ansible_host).first()
     if row is None:
@@ -576,7 +574,7 @@ def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
     """Write the result row and advance the host cursor.
 
     The result row is the record of what happened; `UpgradeRunHost.state` is a
-    cursor for the dashboard's default view and is derived from it (§5).
+    cursor for the dashboard's default view and is derived from it.
     """
     _result_row(host, job, outcome, started_at)
     host.last_phase = job.phase
@@ -594,7 +592,7 @@ def record_kept(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome
                 started_at: datetime) -> None:
     """Write the result row and leave the cursor where it was.
 
-    For a phase that stopped and goes back to its own gate (PLAN.md WS-15):
+    For a phase that stopped and goes back to its own gate:
     a host it did not reach, or whose credential was refused, or that hit an
     error in NetHub's code, did nothing wrong, so it is still eligible when
     the gate is approved again -- unless it is an activate host that got past
@@ -612,7 +610,7 @@ def eligible_hosts(job: UpgradePhaseJob) -> list[UpgradeRunHost]:
     Not "every host that has not failed". A phase re-approved after it was
     abandoned would otherwise run again on hosts it had already finished --
     a second `install add` on a switch that has just reloaded -- and a retry
-    would sweep in hosts that are already past it (PLAN.md WS-8).
+    would sweep in hosts that are already past it.
     """
     before = STATE_BEFORE[job.phase]
     return [h for h in job.run.hosts if h.state == before]
@@ -623,7 +621,7 @@ def reset_for_retry(job: UpgradePhaseJob) -> None:
 
     A retry names a phase; this is what makes it run on the hosts that failed
     that phase and on nothing else. Done here, by the sibling, when the job
-    starts: §7.3 gives every per-host cursor edge to the sibling. The result
+    starts: every per-host cursor edge belongs to the sibling. The result
     rows of earlier attempts stay as they were, so the failure is still on
     record.
     """
@@ -640,7 +638,7 @@ def check_source(hosts: list[UpgradeRunHost], search_dir: str) -> str | None:
     digest the hosts snapshotted at submit, which takes seconds for a 1.2 GB
     image. Without it, a missing or altered file failed every host, each only
     after a transfer of up to 15 minutes, and as `transfer` or `checksum`,
-    which reads as the devices' fault (PLAN.md WS-15). The text is ours
+    which reads as the devices' fault. The text is ours
     alone: nothing from the OS error, since it is kept a year.
 
     Main thread only. A module-level function, so tests with a fake store can
@@ -705,8 +703,8 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     the terminal edge and the per-host rows, and nothing else touches the job.
 
     **How many at once.** Up to `concurrency` hosts (the sibling's
-    `PHASE_CONCURRENCY`) run at once, each in a worker thread (PLAN.md WS-9).
-    Activate is different (WS-15): with more than one eligible host, the first
+    `PHASE_CONCURRENCY`) run at once, each in a worker thread.
+    Activate is different: with more than one eligible host, the first
     in request order runs alone as a canary, reloaded and checked for the
     target version, and only then do the rest start, `job.concurrency` at a
     time (what the approver chose, default 1), capped at `concurrency`.
@@ -718,7 +716,7 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     host-key scans there). The pool is closed before this returns, so no
     worker outlives the phase or the credential the caller clears after it.
 
-    **What stops the wave** (decision 13): a refused credential, an error in
+    **What stops the wave**: a refused credential, an error in
     NetHub's own code (`internal`), a failed canary, and, before a stage
     touches anything, an image missing from or altered in the store (`store`).
     Any other failure is that device's alone and the others carry on. After a
@@ -735,9 +733,9 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     them up.
 
     `succeeded` means every host the phase ran on passed, `partial` that some
-    did, `failed` none (PLAN.md WS-8). Cancel and the deadline stop further
-    hosts from starting; hosts already running finish and are recorded
-    (§7.3). There is no safe place to stop inside an activation.
+    did, `failed` none. Cancel and the deadline stop further
+    hosts from starting; hosts already running finish and are recorded. There
+    is no safe place to stop inside an activation.
     """
     if job.is_retry:
         reset_for_retry(job)

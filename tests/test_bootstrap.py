@@ -33,7 +33,7 @@ def test_bootstrap_admin_skips_when_users_exist(app, make_user, monkeypatch):
 
 
 def test_there_is_no_default_admin_username(app, monkeypatch, capsys):
-    """PLAN.md WS-10: a well-known `admin` let anyone keep it locked out."""
+    """A well-known `admin` let anyone keep it locked out."""
     monkeypatch.delenv('ADMIN_USERNAME', raising=False)
     with app.app_context():
         assert User.query.count() == 0, 'create_app() created nobody'

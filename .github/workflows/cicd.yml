@@ -1,7 +1,7 @@
 name: CI/CD
 
-# Structure taken from DynaForm's cicd.yml, adapted for NetHub, plus the
-# hardening in PLAN.md WS-12. Every `uses:` is pinned to a commit SHA with its
+# Structure taken from DynaForm's cicd.yml, adapted for NetHub
+# (docs/deployment.md §4). Every `uses:` is pinned to a commit SHA with its
 # tag as a comment, because a tag can be moved to other code after the fact and
 # this workflow can publish images; Dependabot proposes the bumps
 # (.github/dependabot.yml) and zizmor, in the lint job, fails a new unpinned
@@ -41,7 +41,7 @@ concurrency:
 # drift, and a release scan that disagrees with the pull request scan is worse
 # than having only one of them.
 #
-# The scans report and never fail a job (maintainer, 2026-10-01). Nearly every
+# The scans report and never fail a job. Nearly every
 # finding is in the Debian base image: NetHub cannot patch it, the fix arrives
 # through Dependabot's base-digest bump, and failing every merge and release
 # until then stopped development on someone else's schedule. Each scan instead
@@ -55,9 +55,9 @@ concurrency:
 # CRITICAL and HIGH, fixable only (ignore-unfixed at each step). DynaForm, which
 # this file is modelled on, adds MEDIUM because every Jinja2 sandbox escape is
 # rated MEDIUM and DynaForm renders user-supplied templates. NetHub renders no
-# user-supplied template (CLAUDE.md, hard rules), so that argument does not
-# carry over, and MEDIUM on the Debian base would mostly be noise that teaches
-# people to reach for the bypass. Decided by the maintainer on 2026-09-28.
+# user-supplied template, so that argument does not carry over, and MEDIUM on
+# the Debian base would mostly be noise that teaches people to reach for the
+# bypass.
 env:
   SCAN_SEVERITY: 'CRITICAL,HIGH'
   SCAN_VULN_TYPE: 'os,library'

@@ -18,10 +18,9 @@ def _initial_admin_password():
        anywhere durable.
     2. ADMIN_PASSWORD, a plaintext env var -- has to persist at rest
        somewhere (a Quadlet unit, a .env file) to survive restarts.
-    3. A freshly generated random password, printed once. There's no
-       forced-password-reset mechanism in this alpha (see CLAUDE.md), unlike
-       Drawbridge's equivalent -- whatever password is set here is the one
-       that stays live until someone changes it.
+    3. A freshly generated random password, printed once. There is no
+       forced reset on first login: whatever password is set here stays
+       live until someone changes it.
     """
     credential = read_credential(ADMIN_CREDENTIAL_NAME)
     if credential:
@@ -40,10 +39,10 @@ def bootstrap_admin():
     """Create the first login user if the database has none yet, named by
     ADMIN_USERNAME.
 
-    There is no default name (PLAN.md WS-10): a well-known `admin` plus the
+    There is no default name: a well-known `admin` plus the
     login lockout let anyone on the network keep the first account locked
     out. With no users and no ADMIN_USERNAME, NetHub starts anyway and says
-    how to create one. The user it creates is an admin (PLAN.md WS-16).
+    how to create one. The user it creates is an admin.
     """
     if User.query.count() > 0:
         return

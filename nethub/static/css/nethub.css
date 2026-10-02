@@ -1,5 +1,5 @@
 /*
- * What Pico does not style (PLAN.md WS-11). Pico's own variables are used
+ * What Pico does not style. Pico's own variables are used
  * for colour, so both themes follow the browser's light/dark preference.
  * No inline styles anywhere: the Content-Security-Policy refuses them.
  */

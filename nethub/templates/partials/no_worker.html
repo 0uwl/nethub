@@ -1,7 +1,7 @@
 {#
-  PLAN.md WS-11 item 5. `no_worker` is true when something has sat queued for
+  `no_worker` is true when something has sat queued for
   over a minute and nothing is running with a fresh heartbeat
-  (nethub/worker_status.py). Flask writes a queued row and stops (§9), so
+  (nethub/worker_status.py). Flask writes a queued row and stops, so
   without the sibling unit nothing ever moves, and nothing else says so.
 #}
 {% if no_worker %}

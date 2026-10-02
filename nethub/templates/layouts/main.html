@@ -49,10 +49,6 @@
 <main class="container">
 
   {#
-    Every flash used to render as alert-error regardless of what it said,
-    because no flash() call passed a category -- so "Published ..." and
-    "Invalid username or password" looked identical.
-
     The DEFAULT category stays an error deliberately. Flask calls it
     'message' when none is given, and the uncategorised calls that remain
     are failures, so treating the default as an error keeps them correct

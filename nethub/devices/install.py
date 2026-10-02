@@ -2,21 +2,19 @@
 
 This is the most dangerous code in NetHub: every function here either reboots a
 production switch or decides whether one is healthy afterwards. It is written
-to be driven by the phase model (design doc §8.1) rather than as one procedure
+to be driven by the phase model rather than as one procedure
 -- `activate()` ends with the device rebooting and the session dead, and
 `wait_for_device()` therefore takes a *factory* rather than a connection.
 
 The guards in front of `activate()` are re-run rather than inherited from
-pre-check. §8.1 is explicit that device state is re-gathered per phase because
-"a pre-check from three days ago must not authorize today's reload", and the
+pre-check: device state is re-gathered per phase because a pre-check from
+three days ago must not authorize today's reload, and the
 image check specifically has to be a `verify /sha512` and not a `dir`: a file
 of the right name is not the file staging checked.
 
 Validated against hardware end to end, including two live reloads: a
 17.12.6 -> 17.12.08 -> 17.12.6 round trip through activate, the reconnect
-loop, the version check and `install remove inactive`. The command strings
-were ported from the hand-run playbooks this replaced (deleted at build step
-6); the failure handling around them is this module's own.
+loop, the version check and `install remove inactive` (docs/device-layer.md).
 """
 
 from __future__ import annotations
@@ -59,7 +57,7 @@ class InstallError(Exception):
     """An upgrade step failed. `status` is the operator-facing word.
 
     `summary` is what reaches the year-retained `error_summary` column
-    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+ -- see `connection.DeviceConnectionError`'s docstring for why it
     is a separate field from `message` rather than the same text.
     """
 
@@ -70,17 +68,16 @@ class InstallError(Exception):
 
 
 class ReloadTimeout(InstallError):
-    """The device did not come back within the deadline (§7.3 `reload`)."""
+    """The device did not come back within the deadline (`reload`)."""
 
 
 class PostCheckError(InstallError):
-    """The device came back on the wrong software (§7.3 `postcheck`)."""
+    """The device came back on the wrong software (`postcheck`)."""
 
 
 @dataclass(frozen=True)
 class ReloadWait:
-    """Reconnect policy after an activate. Defaults match the
-    `wait_for_connection` the playbook used."""
+    """Reconnect policy after an activate."""
 
     delay: float = 60.0
     interval: float = 30.0
@@ -137,11 +134,11 @@ def assert_ready_to_activate(
     if facts.get_filesystem(conn, file_system).size_of(image) is None:
         raise InstallError(f"{image} is not staged in {file_system}", status="image_missing")
 
-    # Not a presence check: §8.1 requires the later phase to re-hash. A host
+    # Not a presence check: the later phase must re-hash. A host
     # whose staged image failed verification is still sitting in flash under
     # the target filename, and would otherwise be installed anyway.
     #
-    # Normalised the same way stage_image normalises it (WS-4.4): without
+    # Normalised the same way stage_image normalises it: without
     # this, an uppercase or whitespace-padded sha512 stages successfully --
     # transfer.verify_sha512 lower-cases only the value it parses from the
     # device -- and is then refused here, with an error whose two halves
@@ -154,8 +151,8 @@ def assert_ready_to_activate(
 def capture_running_config(conn: BaseConnection) -> str:
     """The pre-upgrade configuration, for the caller to store.
 
-    Where it goes is not this layer's business -- the playbook wrote a file
-    next to itself, and under the phase model it belongs to the job row.
+    Where it goes is not this layer's business. Today nothing stores it
+    (docs/dispatch.md, Known gaps).
     """
     return conn.send_command("show running-config", read_timeout=300.0)
 
@@ -178,7 +175,7 @@ def activate(
     unsaved running-config would be lost. It is also the reason the stage
     phase's SCP-server restore has to be *confirmed* rather than assumed --
     this is the write that would otherwise carry an un-restored enable into
-    startup-config (design doc §4.3.1).
+    startup-config.
     """
     device = assert_ready_to_activate(
         conn, image=image, sha512=sha512, target_version=target_version,
@@ -251,10 +248,10 @@ def wait_for_device(
             # submitter isn't in, that is 28 real login attempts against a
             # fleet whose TACACS+/RADIUS deployment may lock an account out
             # fleet-wide after 3-5 failures. Raise immediately so this reports
-            # failure_stage='credential' rather than 'reload' (WS-4.1).
+            # failure_stage='credential' rather than 'reload'.
             raise
         # HostKeyError is deliberately NOT carved out here yet, unlike
-        # AuthenticationError above -- see design-document.md §10. Whether an
+        # AuthenticationError above -- see docs/future.md §4. Whether an
         # IOS-XE upgrade can legitimately regenerate a device's host key is an
         # open hardware question; until it is answered, re-raising here could
         # turn a successful upgrade into a hard failure instead of a
@@ -301,7 +298,7 @@ def cleanup(
     `install remove inactive` asks for confirmation and has no `prompt-level
     none`, so the prompt is answered rather than suppressed.
 
-    This is its own phase behind its own gate (§8.1): it frees flash but
+    This is its own phase behind its own gate: it frees flash but
     removes the packages a rollback would need.
     """
     output = conn.send_command(

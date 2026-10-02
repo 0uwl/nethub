@@ -60,8 +60,8 @@ then; cancel the run to stop it.</p>
   {% include 'partials/device_username_missing.html' %}
   {% else %}
   {#
-    The confirmation used to be a JavaScript confirm(), which the CSP now
-    blocks. The checkbox is required in the browser and checked again by the
+    The confirmation is a checkbox, not a JavaScript confirm(), which the
+    CSP blocks. The checkbox is required in the browser and checked again by the
     route (web.confirmed): `required` alone is a convenience, not a check.
     The copy names the phase and the host count so it says what will
     actually happen rather than "are you sure?".
@@ -185,7 +185,7 @@ then; cancel the run to stop it.</p>
       <td>{{ j.attempt }}</td>
       <td>{{ j.status }}{% if j.id in stalled_ids %} (stalled){% endif %}</td>
       <td>{{ users.get(j.approved_by, '') if j.approved_by else '' }}{% if j.approved_by_role %} ({{ j.approved_by_role }}){% endif %}</td>
-      {# Who the device saw: the supplier of this phase's credential (PLAN.md WS-16). #}
+      {# Who the device saw: the supplier of this phase's credential. #}
       <td>{{ j.device_username_used or '' }}</td>
       {# approved_at, not_before and started_at together are the record that a
          phase ran on a scheduled approval rather than with someone at the gate. #}

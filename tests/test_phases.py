@@ -38,7 +38,7 @@ PASSWORD = "sup3rs3cret"
 @pytest.fixture(autouse=True)
 def store_is_intact(monkeypatch):
     """These tests fake the artifact store (a made-up digest under /images), so
-    the stage's source check (PLAN.md WS-15) is taken as passing here and
+    the stage's source check is taken as passing here and
     tested on its own in TestSourceCheck."""
     monkeypatch.setattr(phases, "check_source", lambda hosts, search_dir: None)
 
@@ -76,7 +76,7 @@ def run(app):
 
 def at_phase(job):
     """Move fresh hosts to where a run reaching `job`'s phase has them: a phase
-    runs only on hosts whose cursor sits just before it (PLAN.md WS-8)."""
+    runs only on hosts whose cursor sits just before it."""
     for host in job.run.hosts:
         if host.state == "pending":
             host.state = STATE_BEFORE[job.phase]
@@ -160,7 +160,7 @@ class TestFailureStageMapping:
     @pytest.mark.parametrize("exc", [RuntimeError("x"), KeyError("x"), AttributeError("x"),
                                      TypeError("x"), ValueError("x")])
     def test_anything_else_is_an_error_in_our_own_code(self, exc):
-        """PLAN.md WS-15: this fell through to `connect`, which recorded a bug in
+        """This fell through to `connect`, which recorded a bug in
         NetHub as a network problem, and would not have stopped the wave."""
         assert phases.failure_stage_for(exc) == "internal"
 
@@ -207,7 +207,7 @@ class TestPinnedKey:
                 phases.pinned_key(host)
 
     def test_a_seen_but_unconfirmed_key_is_refused(self, app, run):
-        """Seeing a key is not accepting it (§4.3)."""
+        """Seeing a key is not accepting it."""
         with app.app_context():
             DeviceHostKey.query.filter_by(ansible_host="192.0.2.10").update(
                 {"confirmed_at": None, "confirmed_by": None})
@@ -323,7 +323,7 @@ class TestExecutePhase:
 
 
 # --------------------------------------------------------------------------
-# Hosts in parallel (PLAN.md WS-9)
+# Hosts in parallel
 # --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -406,7 +406,7 @@ class TestParallelHosts:
     def test_activate_reloads_one_at_a_time_unless_the_approver_chose_more(
         self, app, fleet, monkeypatch
     ):
-        """PLAN.md WS-15: the approver chooses the reload count (default 1),
+        """The approver chooses the reload count (default 1),
         not PHASE_CONCURRENCY, which only caps it."""
         tracker = Tracker(0.02)
         with app.app_context():
@@ -445,8 +445,8 @@ class TestParallelHosts:
     def test_the_heartbeat_advances_while_a_host_is_still_running(
         self, app, fleet, monkeypatch
     ):
-        """The heartbeat used to move only between hosts, so a healthy
-        15-minute stage looked dead for fifteen minutes."""
+        """The heartbeat moves while a host is still running, so a healthy
+        15-minute stage never looks dead."""
         release = threading.Event()
         clock = {"t": NOW}
         beats = []
@@ -562,14 +562,14 @@ class TestLoginGate:
             assert len(skipped) == 7
             assert all(logins[0] in r.error_summary for r in skipped)
             # Stage has a gate of its own, so nobody's cursor moves: the
-            # password was at fault, not the devices (PLAN.md WS-15).
+            # password was at fault, not the devices.
             assert UpgradeRunHost.query.filter_by(state="precheck_ok").count() == 8
             assert db.session.get(UpgradePhaseJob, job.id).error_summary.startswith(
                 "stopped: the credential was refused on")
 
     def test_a_refused_password_in_precheck_fails_the_hosts(self, app, fleet, monkeypatch):
         """Pre-check has no gate to go back to, so its hosts are failed and
-        retryable at the stage gate, as before WS-15."""
+        retryable at the stage gate."""
         def connect(host, username, password):
             raise connection.AuthenticationError("authentication failed")
 
@@ -620,7 +620,7 @@ class TestLoginGate:
 
 
 # --------------------------------------------------------------------------
-# Canary activation and what stops a wave (PLAN.md WS-15)
+# Canary activation and what stops a wave
 # --------------------------------------------------------------------------
 
 class Timeline:
@@ -872,7 +872,7 @@ class TestWhatStopsAWave:
 
 
 class TestSourceCheck:
-    """PLAN.md WS-15: a bad image in NetHub's own store is found in seconds,
+    """A bad image in NetHub's own store is found in seconds,
     before a stage touches any device, not after a transfer per host."""
 
     @staticmethod

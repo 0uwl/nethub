@@ -35,7 +35,7 @@ inputs:
 runs:
   using: composite
   steps:
-    # No exit-code: a finding must not fail the job (maintainer, 2026-10-01).
+    # No exit-code: a finding must not fail the job.
     # limit-severities-for-sarif is load-bearing. Without it the action drops
     # `severity` whenever the format is SARIF and reports every fixable LOW
     # and MEDIUM as well (46 results against 7 on the pinned base, measured).

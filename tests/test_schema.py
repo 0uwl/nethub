@@ -1,4 +1,4 @@
-"""Checks for nethub/schema.py and the migrations it runs (PLAN.md WS-6).
+"""Checks for nethub/schema.py and the migrations it runs.
 
 Upgrading NetHub is "back up, bump the image, restart", so these check what
 that restart does to a database: a fresh one is created, a current one is left
@@ -319,7 +319,8 @@ class TestUpgradeDatabase:
 
 
 class TestAdoptingAPreMigrationDatabase:
-    """create_all() ran at every start before WS-6: it added missing tables but
+    """create_all() ran at every start before migrations existed: it added
+    missing tables but
     never added or removed a column. These are real create_all() schemas from
     the commits named in tests/fixtures/schemas/."""
 
@@ -331,7 +332,7 @@ class TestAdoptingAPreMigrationDatabase:
     @staticmethod
     def seed(path, *, dangling_artifact):
         """Rows the way that commit's code wrote them."""
-        c = sqlite3.connect(path)  # foreign keys off, as before WS-2 enabled them
+        c = sqlite3.connect(path)  # foreign keys off, as those versions ran
         user_columns = [r[1] for r in c.execute("PRAGMA table_info(user)")]
         if "failed_logins" in user_columns:
             c.execute("INSERT INTO user (id, username, password_hash, failed_logins) "
@@ -353,8 +354,10 @@ class TestAdoptingAPreMigrationDatabase:
 
     @pytest.mark.parametrize("fixture, dangling", [
         ("513aaec", True),   # before the login budget columns and the scan tables
-        ("c76688d", True),   # before WS-2's artifact_id foreign key
-        ("a4fcc12", False),  # before WS-5; the key exists, so no dangling id can
+        ("c76688d", True),   # before the artifact_id foreign key
+        # before the pull transport was deleted; the key exists, so no
+        # dangling id can exist
+        ("a4fcc12", False),
     ])
     def test_it_is_repaired_to_exactly_the_current_schema(
             self, tmp_path, head_schema, fixture, dangling):
@@ -380,7 +383,7 @@ class TestAdoptingAPreMigrationDatabase:
 
     def test_the_ws5_columns_are_what_blocked_every_submit(self, tmp_path):
         """image_transport_used is NOT NULL with no default, and the models no
-        longer write it -- so on an unrepaired pre-WS-5 database every submit
+        longer write it -- so on an unrepaired older database every submit
         fails. Adoption is what fixes that."""
         path = tmp_path / "a4fcc12.db"
         self.load(path, "a4fcc12")

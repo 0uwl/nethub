@@ -1,7 +1,7 @@
 """Schema checks for the upgrade tables.
 
 These test constraints rather than columns. Every one of them is something
-design doc §5/§7.3 says the database must refuse, and every one is silently
+docs/schema.md says the database must refuse, and every one is silently
 absent if the declaration is wrong -- SQLite enforces no foreign key unless
 asked, and a trigger that was never created raises nothing.
 """
@@ -75,7 +75,7 @@ class TestForeignKeys:
 
 
 class TestConcurrencyPragmas:
-    """WS-2.1: design doc §5 required both of these and neither was set."""
+    """Both pragmas are set on every connection."""
 
     def test_the_database_is_in_wal_mode(self, app):
         """Two processes write one file; WAL lets readers run past a writer."""
@@ -136,7 +136,7 @@ class TestApprovalMutex:
                 make_job(run, phase="activate", attempt=1)
 
     def test_a_retry_is_a_new_attempt_and_is_allowed(self, app, user):
-        """§7.3 grants an abandoned phase a fresh, separately-approved retry."""
+        """An abandoned phase may be approved again, as a new attempt."""
         with app.app_context():
             run = make_run(user)
             make_job(run, phase="activate", attempt=1, status="abandoned")
@@ -188,7 +188,7 @@ class TestVocabularies:
             make_run(user, state="halfway")
 
     def test_precheck_may_have_no_approver_but_other_phases_record_one(self, app, user):
-        """Pre-check runs on submit with no gate (§8.1)."""
+        """Pre-check runs on submit with no gate."""
         with app.app_context():
             run = make_run(user)
             precheck = make_job(run, phase="precheck")
@@ -210,7 +210,7 @@ class TestDeviceHostKeys:
                 db.session.commit()
 
     def test_seeing_a_key_is_not_confirming_it(self, app, user):
-        """An unconfirmed row is not a usable pin -- §4.3 keeps them apart."""
+        """An unconfirmed row is not a usable pin."""
         with app.app_context():
             key = DeviceHostKey(
                 ansible_host="192.0.2.11", key_type="ssh-rsa", fingerprint_sha256="SHA256:z")
@@ -234,7 +234,7 @@ class TestRunShape:
             assert (run.state, run.awaiting_phase) == ("awaiting_approval", "activate")
 
     def test_deleting_a_run_takes_its_children(self, app, user):
-        """§7.4 purges a run as a unit with its host and phase rows."""
+        """Deleting a run takes its host and phase rows with it."""
         with app.app_context():
             run = make_run(user)
             make_host(run)

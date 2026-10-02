@@ -1,4 +1,4 @@
-# The dispatch sibling (design doc §7.3, §9; CLAUDE.md "Dispatch").
+# The dispatch sibling (docs/dispatch.md, docs/deployment.md).
 #
 # Install alongside quadlet/nethub.container:
 #   cp quadlet/nethub-sibling.container ~/.config/containers/systemd/
@@ -8,10 +8,9 @@
 # WITHOUT THIS UNIT NOTHING IS EVER DISPATCHED. Flask writes exactly one job
 # edge -- the `queued` row -- and every edge after that belongs to this
 # process. With no sibling running, a submitted upgrade and a host-key scan
-# both sit at `queued` forever, and neither has a staleness story: sweep()
-# only reclaims `running` rows, and the scan result page renders `queued` and
-# `running` identically as "Still working". The symptom is a screen that never
-# advances and a log that says nothing, so check this unit first.
+# both sit at `queued` forever: sweep() only reclaims `running` rows. After a
+# minute the pages ask whether nethub-sibling is running; check this unit
+# first.
 #
 # This is a SEPARATE UNIT running the SAME IMAGE, and both halves of that are
 # deliberate. Never merge it into nethub.container as a second process, and
@@ -47,7 +46,7 @@ UserNS=keep-id:uid=1000,gid=1000
 
 # The same SQLite file Flask writes, which is why both units must stay on one
 # host under one user: SQLite's locking is unreliable on network filesystems,
-# so distributing these two means §7 rebuilt around a different database.
+# so distributing these two means rebuilding around a different database.
 # Lowercase :z (shared label), not :Z (private). nethub.container mounts
 # these same two directories, and :Z gives each container its own private
 # MCS label: on an SELinux-enforcing host whichever container starts
@@ -62,7 +61,7 @@ Environment=ARTIFACT_STORE=/app/artifacts
 
 # Required by the sibling's main(), which exits naming it if unset.
 # NETHUB_SEARCH_DIR is the published subtree the SCP push reads the image
-# bytes from (§3.3 -- NetHub is the one source), so it is ARTIFACT_STORE, not
+# bytes from (NetHub is the one source), so it is ARTIFACT_STORE, not
 # a second copy of anything.
 Environment=NETHUB_SEARCH_DIR=/app/artifacts
 
@@ -102,7 +101,7 @@ Environment=PHASE_CONCURRENCY=4
 # DEVICE_TARGET_CIDRS is deliberately absent: it constrains what may be
 # *submitted*, which is Flask's side. Setting it here would imply the sibling
 # re-checks the address, and it does not -- the run's own rows are what it
-# acts on (§3.5).
+# acts on.
 
 # Writes nothing outside /app/data and /tmp. No /run tmpfs: /run/nethub-key is
 # a real mount and a tmpfs over its parent would shadow it.

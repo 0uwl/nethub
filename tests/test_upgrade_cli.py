@@ -21,7 +21,7 @@ class TestPinResolution:
         assert upgrade_cli.resolve_pin("192.0.2.10", "SHA256:abc").key_type == "ssh-rsa"
 
     def test_no_pin_and_no_fingerprint_refuses_rather_than_trusting(self, monkeypatch):
-        """The one thing this tool must never become is a way around §4.3."""
+        """The one thing this tool must never become is a way around the pin."""
         monkeypatch.setattr(upgrade_cli, "_pin_from_database", lambda host: None)
         with pytest.raises(SystemExit) as excinfo:
             upgrade_cli.resolve_pin("192.0.2.10", None)
@@ -129,7 +129,7 @@ class TestConfirmations:
 
 class TestItWritesNothing:
     def test_the_cli_imports_no_job_or_run_models(self):
-        """§7.3 gives every job-row edge to Flask or the sibling. A third
+        """Every job-row edge belongs to Flask or the sibling. A third
         writer would put rows in the database no approval accounts for."""
         source = __import__("pathlib").Path("nethub/upgrade_cli.py").read_text()
         for forbidden in ("UpgradeRun", "UpgradePhaseJob", "UpgradeHostPhaseResult",

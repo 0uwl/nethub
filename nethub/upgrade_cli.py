@@ -1,10 +1,7 @@
 """`python -m nethub.upgrade_cli` -- upgrade a device without the web app.
 
-Build step 8. The playbooks this replaced were deliberately standalone: an
-operator could run them by hand against a fleet with NetHub switched off
-entirely. Folding device work into `nethub/devices/` took that away -- an
-accepted loss, not an unnoticed one. This restores it, at the smallest scope
-that is honest.
+For when NetHub is down: an operator can run the device phases by hand
+against a fleet with NetHub switched off entirely (docs/device-layer.md §5).
 
 It needs **no Flask app, no sibling, no sealed credential and no job rows** --
 `nethub/devices/` never depended on any of them, which is why this is a few
@@ -12,14 +9,14 @@ hundred lines rather than a parallel implementation. It will read a pinned
 host key out of the database if one is reachable, and otherwise makes the
 operator supply the fingerprint explicitly.
 
-**A run made here is deliberately absent from the audit trail.** §7.3 assigns
-every job-row edge to Flask or the sibling, and a third writer would put rows
+**A run made here is deliberately absent from the audit trail.** Every
+job-row edge belongs to Flask or the sibling, and a third writer would put rows
 in the database that no approval and no `runner_instance_id` accounts for --
 which is worse than an honest gap, because it would look like a normal run.
 So this writes nothing and says so on every invocation. If you need the audit
 trail, fix NetHub and use it; this is for when you cannot.
 
-The interactive confirmations are the same idea as the approval gates (§8.1),
+The interactive confirmations are the same idea as the approval gates,
 collapsed onto a terminal because there is no second person to ask.
 """
 
@@ -59,7 +56,8 @@ def resolve_pin(host: str, fingerprint: str | None) -> connection.HostKey:
     A `--fingerprint` the operator typed *is* a confirmation: they compared it
     against the device out of band, which is exactly what the web flow asks of
     them. What must never happen here is a silent first-contact accept, which
-    would make this tool a way of walking around §4.3 rather than a way of
+    would make this tool a way of walking around the host-key pin rather than a
+    way of
     working without the web app.
     """
     if fingerprint:
@@ -168,8 +166,6 @@ def main(argv=None) -> int:
         # var sits in /proc/<pid>/environ for the whole run -- up to ~20
         # minutes for `--phases all`, since activate alone is 605-622s -- is
         # inherited by every child, and lands in shell history if set inline.
-        # CLAUDE.md's rule is that the device credential never reaches disk or
-        # a process argument, and this is the same class of exposure.
         _say('WARNING: reading the device password from NETHUB_DEVICE_PASSWORD.')
         _say('         It is readable in /proc/<pid>/environ for this whole run')
         _say('         and inherited by every child process. Prefer the prompt.')

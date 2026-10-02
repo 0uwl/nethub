@@ -1,5 +1,4 @@
-"""Response headers and the confirmation check every destructive form uses
-(PLAN.md WS-11).
+"""Response headers and the confirmation check every destructive form uses.
 
 The pages carry no JavaScript at all, so the Content-Security-Policy can
 refuse every script outright. That is the point of it: the login and
@@ -58,7 +57,7 @@ def confirmed(action):
 
 
 def admin_required(view):
-    """`login_required`, and the user's role must be `admin` (PLAN.md WS-16).
+    """`login_required`, and the user's role must be `admin`.
 
     The role is read from the row the user loader fetched for this request, so
     a demotion applies on the next click. Templates hide what an operator may

@@ -38,7 +38,7 @@ class FactsError(Exception):
     """Device output could not be parsed into the facts we need.
 
     `summary` is what reaches the year-retained `error_summary` column
-    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+ -- see `connection.DeviceConnectionError`'s docstring for why it
     is a separate field from `message` rather than the same text.
     """
 
@@ -84,8 +84,8 @@ class Filesystem:
 def version_tuple(version: str) -> tuple[tuple[int, str], ...]:
     """Comparable form of an IOS-XE version string.
 
-    The registry writes `17.12.06` and the device reports `17.12.6`; those are
-    the same release, and comparing the strings says they are not. Letter
+    An artifact's version may say `17.12.06` and the device report `17.12.6`;
+    those are the same release, and comparing the strings says they are not. Letter
     suffixes (`17.9.4a`) are kept as part of their component.
     """
     version = version.strip()
