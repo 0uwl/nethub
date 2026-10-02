@@ -548,6 +548,9 @@ wave has been measured.
   the capture is discarded: `record()` never stores
   `HostOutcome.config_backup`, so `upgrade_run_hosts.config_backup_path`
   is never set.
+- Hostnames in a request (`upgrades.parse_hosts`) are de-duplicated and
+  checked non-blank, but no character set is enforced. That would matter
+  if config backups were ever written to a path built from the hostname.
 - Weak pins. These rules' tests touch the rule without proving it:
   - 1.1: no test asserts Flask never writes a job status.
   - 1.3: only checks that the id parses as a UUID.
