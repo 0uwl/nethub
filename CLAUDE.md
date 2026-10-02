@@ -138,4 +138,6 @@ not the rule.
   the file's Known gaps).
 - When a feature is removed, delete its rules; never mark them obsolete.
 - No history in docs or code comments; git holds it.
-- `docs/index.md` §2 is the format spec.
+- `docs/index.md` §2 is the format spec. The `docs-sync` skill
+  (`.claude/skills/docs-sync`) is the checklist, and `tests/test_docs.py`
+  checks the citations.
