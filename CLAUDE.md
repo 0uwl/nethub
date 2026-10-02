@@ -10,9 +10,6 @@ which routes a task to its topic file. Each topic file follows HADS:
 - skip `[NOTE]` unless you need the reasoning;
 - every rule has a `[slug]` and names the tests that enforce it.
 
-**Active plan:** `PLAN.md` (WS-13, the docs slim-down, is in progress on
-`docs/slim-down`).
-
 ## Status
 
 - **Built:**
