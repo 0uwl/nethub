@@ -435,8 +435,9 @@ python -m nethub.upgrade_cli --host <host> --user <name> --fingerprint "<type> S
 **[SPEC]**
 - `stage_image` accepts `transfer_read_timeout` (`TRANSFER_READ_TIMEOUT`,
   7200 s) and passes it to `_push_scp`, but `_scp_put` never uses it. A
-  transfer is bounded only by `SCP_SOCKET_TIMEOUT` (60 s of silence) and
-  the job deadline.
+  transfer is bounded only by `SCP_SOCKET_TIMEOUT` (60 s of silence). The
+  job deadline is checked only before a host starts, so a transfer that
+  keeps trickling data has no bound at all.
 - Some exceptions put device output into `message` without setting
   `summary`, so up to 500 chars of that output reach `error_summary`:
   - `VerificationError` when no digest is found;

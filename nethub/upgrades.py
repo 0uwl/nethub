@@ -74,9 +74,8 @@ PHASE_BUDGET_SECONDS = {
 #: Multiplier on the sum above. Also covers a stack or a slower chassis, both
 #: of which docs/device-layer.md lists as untested.
 #:
-#: 2, not more: at 3 a 20-host stage budget came out at ~15 hours, which is
-#: longer than the 2-hour per-host read timeout it sits above and therefore
-#: not a bound anyone would notice. These are a first cut from single-device
+#: 2, not more: at 3 a 20-host stage budget came out at ~15 hours, too long
+#: to be a bound anyone would notice. These are a first cut from single-device
 #: measurements -- re-derive them from a real multi-host wave when there is
 #: one, rather than trusting the arithmetic here.
 DEADLINE_SAFETY = 2

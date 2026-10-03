@@ -208,7 +208,8 @@ A wave stops starting hosts on any of these:
 
 Every other `failure_stage` fails its own host only (`STOPPING_STAGES`,
 `_stop_for`). That includes `hostkey`, and an address with no confirmed pin
-(`UnconfirmedHost`), which fails on the main thread before any worker starts.
+(`UnconfirmedHost`), which fails on the main thread before any worker starts;
+on the canary either one is a failed canary and stops the wave.
 Pinned by: `tests/test_phases.py::TestWhatStopsAWave::test_an_unexpected_exception_is_internal_and_stops_the_wave`, `tests/test_phases.py::TestCanary::test_a_canary_that_fails_stops_the_wave`, `tests/test_phases.py::TestWhatStopsAWave::test_a_netmiko_timeout_fails_that_host_alone`, `tests/test_phases.py::TestSourceCheck::test_a_bad_store_stops_the_stage_before_any_device`
 
 **[NOTE]**
@@ -445,8 +446,9 @@ nothing to do. Each tick:
 - Hosts counted: every host in the run for an approval, only the failed
   hosts for a retry. Stage adds 1.3 s per MB of the largest image, per
   host.
-- The deadline bounds the whole wave. A single stuck transfer is bounded
-  by `TRANSFER_READ_TIMEOUT` instead (device-layer.md).
+- The deadline is checked only before a host starts, so it never bounds a
+  host already running. A transfer is bounded only by
+  `SCP_SOCKET_TIMEOUT` (60 s of silence) (device-layer.md).
 
 | phase | fixed s | per host s |
 |---|---|---|
@@ -548,9 +550,13 @@ wave has been measured.
   the capture is discarded: `record()` never stores
   `HostOutcome.config_backup`, so `upgrade_run_hosts.config_backup_path`
   is never set.
-- Hostnames in a request (`upgrades.parse_hosts`) are de-duplicated and
-  checked non-blank, but no character set is enforced. That would matter
-  if config backups were ever written to a path built from the hostname.
+- A request naming a hostname twice is refused (`upgrades.parse_hosts`),
+  but hostnames are only checked non-blank, with no character set
+  enforced. That would matter if config backups were ever written to a
+  path built from the hostname.
+- Nothing refuses two hostnames sharing one address, so one switch can
+  appear twice in a run under different names;
+  `PRIMARY KEY (run_id, hostname)` does not catch it.
 - Weak pins. These rules' tests touch the rule without proving it:
   - 1.1: no test asserts Flask never writes a job status.
   - 1.3: only checks that the id parses as a UUID.

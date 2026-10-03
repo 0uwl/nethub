@@ -25,10 +25,10 @@ In the same commit as the change, never as a follow-up. Triggers:
 
 ## How
 
-1. **Load the `documentation-standards:hads` skill** before editing any
-   `docs/` file. `docs/index.md` §2 is the binding format: HADS without a
-   version line or changelog, one H3 per rule headed by its slug,
-   `[SPEC]` at most two sentences of prose, and a `Pinned by:` line.
+1. **Read `docs/index.md` §2** before editing any `docs/` file. It is the
+   binding format: HADS without a version line or changelog, one H3 per
+   rule headed by its slug, `[SPEC]` at most two sentences of prose, and
+   a `Pinned by:` line.
 2. **Find the right file** with the table in `docs/index.md` §1. Edit the
    rule in place. Never append a correction beside a stale rule.
 3. **Check every claim against the code**, not against memory or the old
