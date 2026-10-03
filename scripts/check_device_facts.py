@@ -51,7 +51,7 @@ def capture(args) -> Path:
         # Kept because a scripted capture run needs it, but not silently --
         # same exposure upgrade_cli.py warns about: an env var sits in
         # /proc/<pid>/environ for the whole run, is inherited by every child,
-        # and lands in shell history if set inline (WS-2.3).
+        # and lands in shell history if set inline.
         print("WARNING: reading the device password from NETHUB_DEVICE_PASSWORD.",
               file=sys.stderr)
         print("         It is readable in /proc/<pid>/environ for this whole run",

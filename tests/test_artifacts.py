@@ -120,7 +120,7 @@ class TestConstraints:
                 ingest(store, bundle_key="iosxe-17-12-08")
 
     def test_the_database_refuses_a_duplicate_filename_too(self, app, store):
-        """Not only the service layer -- §5 puts this in the schema."""
+        """Not only the service layer -- the schema enforces this too."""
         with app.app_context():
             ingest(store)
             db.session.add(Artifact(
@@ -197,8 +197,8 @@ class TestDelete:
             assert Artifact.query.count() == 0
             assert not os.path.exists(path)
 
-    # WS-2.2: the snapshot keeps the filename and digest, not the bytes, so a
-    # delete under a live run failed it later at stage or activate.
+    # The snapshot keeps the filename and digest, not the bytes, so a delete
+    # under a live run would fail it later at stage or activate.
 
     def run_using(self, artifact, state):
         from nethub.models import UpgradeRun, UpgradeRunHost, User
@@ -268,7 +268,7 @@ class TestDelete:
             assert db.session.get(Artifact, artifact_id) is not None
 
 
-# --- The ingest race (WS-5.3) ------------------------------------------------
+# --- The ingest race ------------------------------------------------
 #
 # The three checks at the top of `ingest` all run before the upload streams,
 # so under concurrency they prove nothing by the time the bytes are moved into
@@ -358,7 +358,7 @@ def test_the_happy_path_still_removes_its_temp_file(store, app):
 
 
 class TestCheckStoreCommand:
-    """WS-2.3: hashing every image is minutes of work, so it is a command on
+    """Hashing every image is minutes of work, so it is a command on
     the host, not a button that holds a request open."""
 
     def test_a_clean_store_exits_zero(self, app, store):

@@ -1,4 +1,4 @@
-"""Roles and the two-person rules (PLAN.md WS-16).
+"""Roles and the two-person rules.
 
 Each user gets their own client, standing for their own browser. alice and
 bob are operators, root is an admin. Everything goes through the routes,
@@ -321,7 +321,7 @@ class TestArtifactRule:
         assert not os.path.exists(path)
 
     def test_only_the_uploader_or_an_admin_can_withdraw(self, app, people):
-        """PLAN.md WS-16: the second check cannot erase an upload alone."""
+        """The second check cannot erase an upload alone."""
         rule(app, 'two_person_artifacts', True)
         upload(people['alice'])
         with app.app_context():

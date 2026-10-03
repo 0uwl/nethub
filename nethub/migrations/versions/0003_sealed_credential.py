@@ -1,4 +1,4 @@
-"""Add upgrade_phase_jobs.sealed_credential (PLAN.md WS-7).
+"""Add upgrade_phase_jobs.sealed_credential.
 
 Revision ID: 0003_sealed_credential
 Revises: 0002_internal_failure_stage

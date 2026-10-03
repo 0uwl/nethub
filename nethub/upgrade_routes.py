@@ -1,16 +1,14 @@
 """Upgrade routes: host-key confirmation, submit, the approval gates.
 
-Thin over `nethub/upgrades.py`, the way `registry_routes.py` is over
-`registry.py`. Two things these handlers must not do, both structural:
+Thin over `nethub/upgrades.py`. Two things these handlers must not do:
 
 - **Never dispatch.** Creating a `queued` row is the only job edge Flask
-  writes (design doc §7.3); the sibling owns everything after it. A handler
-  that waited for a device would also hold the process behind the phone-home
-  route (§3.2).
+  writes; the sibling owns everything after it
+  (docs/architecture.md [no-device-io-in-flask]).
 - **Never keep the device credential readable.** It is sealed to the
   sibling's public key into the job row it was collected for
-  (`upgrades._seal_into`, PLAN.md WS-7): Flask can write it and never read it
-  back. Not into the session, not into a log.
+  (`upgrades._seal_into`): Flask can write it and never read it back. Not
+  into the session, not into a log.
 """
 from datetime import timedelta
 
@@ -44,7 +42,7 @@ from .web import confirmed
 upgrade_bp = Blueprint('upgrades', __name__)
 hostkeys_bp = Blueprint('hostkeys', __name__)
 
-#: How long a succeeded scan stays confirmable (WS-6.3). Not strictly
+#: How long a succeeded scan stays confirmable. Not strictly
 #: required by the design, but cheap: without it a HostKeyScan row would stay
 #: "confirmable" forever, and a scan from days ago backing a confirmation of a
 #: device that has since changed hands on that address is exactly the kind of
@@ -56,8 +54,8 @@ def may_confirm(scan, user):
     """Whether `user` may confirm a pin from `scan`.
 
     With the two-person rule for host keys off, only whoever requested the
-    scan confirms it (WS-6.3's binding). With it on, the confirmer must be
-    someone else (PLAN.md WS-16), except that an admin may confirm any scan,
+    scan confirms it. With it on, the confirmer must be
+    someone else, except that an admin may confirm any scan,
     their own included: admins are exempt, and the audit row records the
     role they acted in.
     """
@@ -87,7 +85,7 @@ def _when(job):
 def list_hostkeys():
     keys = DeviceHostKey.query.order_by(DeviceHostKey.ansible_host).all()
     # Scans someone could still confirm, so the person who has to confirm one
-    # finds it here rather than depending on a forwarded link (WS-16).
+    # finds it here rather than depending on a forwarded link.
     waiting = [(scan, confirm_by(scan)) for scan in HostKeyScan.query.filter(
         HostKeyScan.status == 'succeeded', HostKeyScan.consumed_at.is_(None),
         HostKeyScan.finished_at > upgrades._utcnow() - SCAN_CONFIRM_WINDOW,
@@ -103,10 +101,10 @@ def scan_hostkey():
     """Queue a scan for the sibling to run, and hand back a result page.
 
     Scanning is device I/O, so it is dispatched to the sibling like a phase
-    job rather than run inline in this request (WS-6.2b) -- the same reason
-    Flask never opens a device session anywhere else. `check_target` folds in
-    WS-5.4's fix (the CIDR check `scan_hostkey` never had): a rejected address
-    never becomes a row, and never reaches the sibling at all.
+    job rather than run inline in this request -- the same reason
+    Flask never opens a device session anywhere else. `check_target` applies
+    the same CIDR check as submit: a rejected address never becomes a row,
+    and never reaches the sibling at all.
     """
     address = request.form.get('address', '').strip()
     if request.method == 'POST':
@@ -129,7 +127,7 @@ def scan_hostkey():
 def scan_result(scan_id):
     """A queued scan's outcome. There is no JavaScript in this app, so the
     page reloads itself with a meta refresh while the scan is queued or
-    running (WS-11), and says so if nothing is picking up work."""
+    running, and says so if nothing is picking up work."""
     scan = db.session.get(HostKeyScan, scan_id)
     if scan is None:
         flash('No such scan.')
@@ -145,14 +143,13 @@ def scan_result(scan_id):
 @hostkeys_bp.route('/hostkeys/confirm', methods=['POST'])
 @login_required
 def confirm_hostkey():
-    """Confirm a pin from a scan NetHub itself performed (WS-6.3).
+    """Confirm a pin from a scan NetHub itself performed.
 
     `key_type`/`fingerprint_sha256`/`address` all come from the referenced
     `HostKeyScan` row, never from the request body -- a POST here carries
     only `scan_id`. Who may confirm which scan is `may_confirm`: the scanner
-    alone with the two-person rule off, anyone else with it on (PLAN.md
-    WS-16), which is the separation of duty §4.3 asks for. The rule is read
-    now, so turning it off releases a scan waiting for a second person.
+    alone with the two-person rule off, anyone else with it on. The rule is
+    read now, so turning it off releases a scan waiting for a second person.
     """
     raw_scan_id = request.form.get('scan_id', '')
     scan = db.session.get(HostKeyScan, int(raw_scan_id)) if raw_scan_id.isdigit() else None
@@ -167,10 +164,8 @@ def confirm_hostkey():
         flash('No matching scan to confirm. Scan the address again.')
         return redirect(url_for('hostkeys.scan_hostkey'))
     if scan.consumed_at is not None:
-        # A succeeded scan confirms at most once -- the same one-shot pattern
-        # §4.1 uses for the provisioning allowlist. Without this, one scan
-        # could back two different confirmations later, reopening the gap
-        # this whole route exists to close.
+        # A succeeded scan confirms at most once. Without this, one scan
+        # could back two different confirmations later.
         flash('That scan has already been used to confirm a pin. Scan the address again.')
         return redirect(url_for('hostkeys.scan_hostkey'))
     if upgrades._utcnow() - _aware(scan.finished_at) > SCAN_CONFIRM_WINDOW:
@@ -229,7 +224,7 @@ def delete_hostkey(key_id):
 @hostkeys_bp.route('/hostkeys/history/<address>')
 @login_required
 def hostkey_history(address):
-    """The confirm/delete trail for one address (WS-6.4).
+    """The confirm/delete trail for one address.
 
     Keyed on the address string, not on `DeviceHostKey.id` -- the row this
     history is about can be deleted and recreated, and the whole point of
@@ -292,11 +287,11 @@ def show_run(run_id):
             .order_by(UpgradePhaseJob.created_at, UpgradePhaseJob.id).all())
     results = (UpgradeHostPhaseResult.query.filter_by(run_id=run.id)
                .order_by(UpgradeHostPhaseResult.started_at).all())
-    # PLAN.md WS-11: reload while the sibling has work on this run, say so
+    # Reload while the sibling has work on this run, say so
     # when it has stopped beating or nobody is taking work, and tell an
     # approver what their approval would queue behind. All reads.
     # A job approved for a maintenance window is queued but not waiting for a
-    # worker (WS-14), so it neither refreshes the page every five seconds all
+    # worker, so it neither refreshes the page every five seconds all
     # day nor trips the "no worker" notice; it gets its own line instead.
     live = [j for j in jobs
             if j.status == 'running' or worker_status.is_waiting(j)]
@@ -350,7 +345,7 @@ def approve(run_id):
 @upgrade_bp.route('/upgrades/<int:run_id>/retry', methods=['POST'])
 @login_required
 def retry(run_id):
-    """Run a phase again on the hosts that failed it (PLAN.md WS-8). An
+    """Run a phase again on the hosts that failed it. An
     approval like any other: it collects the retrier's device credential."""
     run = db.session.get(UpgradeRun, run_id)
     phase = request.form.get('phase', '')
@@ -424,7 +419,6 @@ def set_device_username():
     db.session.commit()
     flash('Device username updated.' if name else 'Device username cleared.',
           'success')
-    # `request.referrer` was the previous target: attacker-influenced, and the
-    # only unvalidated redirect in the app. There is a real page to go back to
-    # now, so it is no longer needed for anything.
+    # Never `request.referrer`: it is attacker-influenced, and an unvalidated
+    # redirect.
     return redirect(url_for('upgrades.profile'))

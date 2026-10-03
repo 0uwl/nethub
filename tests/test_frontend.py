@@ -1,4 +1,4 @@
-"""PLAN.md WS-11: security headers, the server half of every confirmation box,
+"""Security headers, the server half of every confirmation box,
 and what `worker_status` infers about the sibling from the rows.
 
 Rendering is tested in test_templates.py; this file holds what a template

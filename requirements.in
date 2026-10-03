@@ -12,25 +12,23 @@
 # fails on any difference, so an edit here without a regenerated lock does not
 # merge. Everything installs with --require-hashes (Containerfile, CI).
 #
-# The direct pins stay exact rather than ranges, because CLAUDE.md makes
-# load-bearing claims about specific versions ("the pinned gunicorn version
-# (26.x) parses its app argument as a Python expression", and
-# control_socket_disable existing at all); gunicorn has already changed
-# relevant behaviour once at 25.1. A version bump is a deliberate diff here.
+# The direct pins stay exact rather than ranges, because docs/deployment.md
+# relies on specific versions (gunicorn 26.x parsing `nethub:create_app()` as
+# a call, and control_socket_disable existing at all); gunicorn has already
+# changed relevant behaviour once at 25.1. A version bump is a deliberate diff.
 #
-# PyYAML was dropped at build step 7 with the YAML registry it served. yamllint,
-# ruff and zizmor are CI tools installed by the workflow, not dependencies.
+# The linters are in requirements-dev.in, not here.
 Flask==3.1.3
 Flask-SQLAlchemy==3.1.1
 Flask-Login==0.6.3
 Flask-WTF==1.3.0
-# Schema migrations (PLAN.md WS-6; nethub/schema.py, nethub/migrations/).
+# Schema migrations (nethub/schema.py, nethub/migrations/).
 # alembic is pinned in its own right, not left to Flask-Migrate's range: it is
 # what actually rewrites the database at every upgrade.
 Flask-Migrate==4.1.0
 alembic==1.20.0
 gunicorn==26.2.0
-# Seals device credentials into the job row (PLAN.md WS-7). Already installed
+# Seals device credentials into the job row. Already installed
 # as a paramiko dependency; pinned in its own right because NetHub now calls
 # it directly and a change in it changes what can open a stored credential.
 PyNaCl==1.6.2

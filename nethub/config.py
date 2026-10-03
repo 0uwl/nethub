@@ -2,16 +2,15 @@
 
 Only `create_app()` loads this, after `shared_config.py`. The sibling never
 imports it, which is why `SECRET_KEY` is validated here at import and the
-sibling unit carries no key (PLAN.md WS-3).
+sibling unit carries no key.
 """
 import os
 from datetime import timedelta
 
 from .credentials import read_credential
 
-# Off by default now that a login form exists (credential path) -- a
-# debugger that renders frame locals would render a submitted password
-# right along with them. Set DEBUG=1 for local dev only.
+# Off by default: a debugger that renders frame locals would render a
+# submitted password right along with them. Set DEBUG=1 for local dev only.
 DEBUG = os.getenv('DEBUG', '') == '1'
 
 # Secret key for session management. A systemd credential named 'secret_key'
@@ -22,11 +21,10 @@ SECRET_KEY = read_credential('secret_key') or os.getenv('SECRET_KEY')
 if SECRET_KEY is None:
     raise ValueError("SECRET_KEY cannot be empty, please generate a random string and supply it through an env variable")
 
-# Refusing an *absent* key is not enough: the reference Quadlet unit used to
-# ship a working placeholder, so a deployment copied from it started normally
-# with a signing key published in a public repository. There is no server-side
-# `sessions` row in this alpha (§4.5, see CLAUDE.md), so the cookie signature is
-# the only thing authenticating anyone -- a known key is a forged admin session
+# Refusing an *absent* key is not enough: a placeholder copied from an example
+# would start normally with a signing key published in a public repository.
+# There is no server-side `sessions` row, so the cookie signature is the only
+# thing authenticating anyone -- a known key is a forged admin session
 # with no password and no login event. A placeholder is an unset setting wearing
 # a value, and it fails closed for the same reason DEVICE_TARGET_CIDRS does.
 SECRET_KEY_MIN_LENGTH = 32
@@ -49,25 +47,22 @@ if len(SECRET_KEY) < SECRET_KEY_MIN_LENGTH:
         f"{len(SECRET_KEY)}. Generate one with `openssl rand -hex 32`."
     )
 
-# Session cookie hardening. design-document.md §4.5 asks specifically for
-# SameSite=Strict on approvals -- a cross-site "approve: reload" is a fleet
-# outage -- and CSRF is already complete, so these are defence in depth rather
-# than the primary control. Secure defaults ON: the Quadlet unit publishes
+# Session cookie hardening. SameSite=Strict because a cross-site "approve:
+# reload" is a fleet outage; CSRF is the primary control and these are defence
+# in depth. Secure defaults ON: the Quadlet unit publishes
 # plain HTTP on 8080, so a deployment with no TLS terminator in front would
-# otherwise send the cookie in cleartext on the ops LAN, and there is no
-# server-side sessions row to revoke it against (§4.5, see CLAUDE.md) -- it
-# stays valid until SECRET_KEY rotates. Set SESSION_COOKIE_INSECURE=1 for
-# local HTTP development only.
+# otherwise send the cookie in cleartext on the ops LAN. Set
+# SESSION_COOKIE_INSECURE=1 for local HTTP development only.
 SESSION_COOKIE_SAMESITE = 'Strict'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_INSECURE', '') != '1'
 
-# An absolute bound on a signed cookie that otherwise carries no expiry of its
-# own. Flask applies this only to a session marked `permanent`, which
-# nethub/auth.py does at login -- the two halves are what make it effective, so
-# removing `session.permanent = True` there silently turns this back into dead
-# configuration with no error anywhere. Verified live: a real login emits
-# `Expires=` roughly 12 hours out.
+# An expiry on a signed cookie that otherwise carries none. Flask applies this
+# only to a session marked `permanent`, which nethub/auth.py does at login;
+# removing `session.permanent = True` there silently makes this dead
+# configuration. Flask re-issues the cookie on every request
+# (SESSION_REFRESH_EACH_REQUEST), so this is an idle timeout, not an absolute
+# one (docs/auth-and-roles.md [cookie-flags]).
 PERMANENT_SESSION_LIFETIME = timedelta(hours=12)
 
 # Cap request size so an upload can't exhaust disk/memory (1.5 GB, comfortably

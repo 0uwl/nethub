@@ -1,8 +1,9 @@
 """Checks for the dispatcher: the claim, the sweep, and the run state machine.
 
 No device -- the phase runners are injected, and the sealed credentials are
-real ones made with this module's own key pair. What is under test is §7.3's
-tables: who writes which edge, and what the queue does under contention.
+real ones made with this module's own key pair. What is under test is the
+state tables in docs/dispatch.md: who writes which edge, and what the queue
+does under contention.
 """
 
 import threading
@@ -75,7 +76,7 @@ def run(app):
 @pytest.fixture(autouse=True)
 def store_is_intact(monkeypatch):
     """The runs here use a made-up digest under /images, so the stage's source
-    check (PLAN.md WS-15) is taken as passing; test_phases tests it."""
+    check is taken as passing; test_phases tests it."""
     monkeypatch.setattr(phases, "check_source", lambda hosts, search_dir: None)
 
 
@@ -89,7 +90,7 @@ def make_sibling(**kw):
 
 def at_phase(job):
     """Move fresh hosts to where a run reaching `job`'s phase has them: a phase
-    runs only on hosts whose cursor sits just before it (PLAN.md WS-8)."""
+    runs only on hosts whose cursor sits just before it."""
     for host in job.run.hosts:
         if host.state == "pending":
             host.state = STATE_BEFORE[job.phase]
@@ -164,7 +165,7 @@ class TestClaim:
 
 
 class TestScheduledJobs:
-    """PLAN.md WS-14: an approval may name a maintenance window, and the queue
+    """An approval may name a maintenance window, and the queue
     has to treat "queued" and "waiting" as different things."""
 
     def test_a_job_is_not_claimed_before_its_time(self, app, run):
@@ -295,7 +296,7 @@ class TestRunStateMachine:
             assert (row.state, row.awaiting_phase) == ("awaiting_approval", "activate")
 
     def test_activate_runs_verify_straight_after_with_no_gate(self, app, run, monkeypatch):
-        """§8.1 gives verify no gate -- it is read-only and runs on completion,
+        """Verify has no gate -- it is read-only and runs on completion,
         in the same pass as activate rather than back through the queue."""
         with app.app_context():
             queue(run, "activate")
@@ -339,7 +340,7 @@ class TestRunStateMachine:
 
 
 class TestPerHostContinuation:
-    """PLAN.md WS-8: one host failing a phase does not fail the run, and the
+    """One host failing a phase does not fail the run, and the
     hosts that failed can be retried."""
 
     @staticmethod
@@ -507,8 +508,8 @@ class TestPerHostContinuation:
 
     def test_a_reapproved_abandoned_phase_skips_the_hosts_it_finished(
             self, app, run, monkeypatch):
-        """Before WS-8 every host that had not failed ran again: a second
-        `install add` on a switch that had already reloaded."""
+        """Only hosts at the phase's cursor run: never a second `install add`
+        on a switch that has already reloaded."""
         with app.app_context():
             self.second_host(run, state="staged")
             db.session.get(UpgradeRun, run).hosts[0].state = "activated"
@@ -542,9 +543,8 @@ class TestPerHostContinuation:
 
 class TestCredentialFailureStopsTheWave:
     """A refused password is refused on every host, and each attempt counts
-    toward the AAA server's lockout (PLAN.md "Found while working", WS-8).
-    Since WS-15 the stopped phase goes back to its gate instead of failing
-    the hosts it did not reach."""
+    toward the AAA server's lockout. The stopped phase goes back to its gate
+    instead of failing the hosts it did not reach."""
 
     def three_hosts(self, run_id):
         run = db.session.get(UpgradeRun, run_id)
@@ -583,8 +583,8 @@ class TestCredentialFailureStopsTheWave:
             row = db.session.get(UpgradeRun, run)
             assert "not attempted: the credential was refused on sw01" in (
                 row.hosts[2].error_summary)
-            # The mistyped-password item in PLAN.md's "Found while working":
-            # the run waits at the same gate rather than failing.
+            # A mistyped password: the run waits at the same gate rather than
+            # failing.
             assert (row.state, row.awaiting_phase) == ("awaiting_approval", "stage")
             assert row.gate_expires_at is not None
             assert {h.state for h in row.hosts} == {"precheck_ok"}
@@ -644,7 +644,7 @@ class TestQueueGuards:
 
 
 class TestSealedCredential:
-    """PLAN.md WS-7: the credential travels sealed in the job row, and the
+    """The credential travels sealed in the job row, and the
     claim is what takes it off the row."""
 
     @staticmethod
@@ -682,9 +682,8 @@ class TestSealedCredential:
             assert second._claim(job.id) == (False, None)
 
     def test_a_restart_of_the_web_process_costs_nothing(self, app, run, monkeypatch):
-        """The WS-7 done-when. Under the socket the credential lived in the web
-        process's memory, so a restart between approval and claim failed the
-        phase. Now it is in the row; a fresh app over the same database is
+        """The credential is in the row, not in the web process's memory; a
+        fresh app over the same database is
         all the "restart" there is, and the phase still gets its credential."""
         from nethub import create_app
         seen = self.capture(monkeypatch)
@@ -736,7 +735,7 @@ class TestSealedCredential:
             assert "different execution" in row.error_summary
 
     def test_a_job_that_expires_unclaimed_says_its_credential_was_discarded(self, app, run):
-        """Maintainer decision (PLAN.md WS-7): an expired job that carried a
+        """Maintainer decision: an expired job that carried a
         credential records failure_stage='credential', so the run page says
         why, and the ciphertext goes in the same update."""
         with app.app_context():
@@ -768,9 +767,9 @@ class TestSealedCredential:
 
 class TestVerifyRunsOnActivatesCredential:
     """No approval ever holds a credential for verify: the sibling queues it
-    itself when activate succeeds. Fetching one could only fail, which is
-    how every app-driven run used to end -- failed right after the switch
-    was upgraded. It runs on the credential activate's approval supplied."""
+    itself when activate succeeds, and runs it on the credential activate's
+    approval supplied. Fetching one could only fail, right after the switch
+    was upgraded."""
 
     def test_one_credential_covers_activate_and_verify(self, app, run, monkeypatch):
         seen, opened = {}, []
@@ -798,7 +797,7 @@ class TestVerifyRunsOnActivatesCredential:
         assert seen["ctx"].device_password == "", "cleared once verify ended"
 
     def test_verify_records_activates_device_username(self, app, run, monkeypatch):
-        """PLAN.md WS-16: the device saw activate's supplier during verify too."""
+        """The device saw activate's supplier during verify too."""
         monkeypatch.setitem(phases.PHASE_RUNNERS, "verify",
                             lambda conn, host, ctx: phases.HostOutcome(host.hostname,
                                                                        "verified"))
@@ -854,13 +853,9 @@ class TestVerifyRunsOnActivatesCredential:
 
 
 class TestAbandonedPhaseCanBeReApproved:
-    """WS-3.1: the §7.3 retry was unreachable.
-
-    `sweep()` used to call `_fail_run`, so the run went terminal and
-    `approve()`'s first guard refused forever -- while `models.py` said
-    `attempt` existed to permit the retry and `approve()` computed
-    `1 + count(abandoned)`, an expression that had never returned anything
-    but 1. The test above (`test_a_foreign_running_row_is_abandoned`) still
+    """An abandoned approvable phase parks at its gate, and approving it again
+    writes the next attempt. The test above
+    (`test_a_foreign_running_row_is_abandoned`) still
     asserts `failed`, and correctly: it queues a `precheck`, which nobody
     approves.
     """
@@ -935,7 +930,7 @@ class TestAbandonedPhaseCanBeReApproved:
     def test_an_abandoned_precheck_still_fails_the_run(self, app, run):
         """Parking a phase nobody can approve would be stuck, not failed.
 
-        `precheck` has no gate (§8.1) and `verify` follows `activate` without
+        `precheck` has no gate and `verify` follows `activate` without
         one, so `approve()` refuses both as "not a phase anyone approves".
         Parking either would leave the run at `awaiting_approval` forever --
         worse than terminal, because it looks recoverable.
@@ -965,7 +960,7 @@ class TestSweepPredicate:
 
 
 class TestHostKeyScanDispatch:
-    """WS-6.2b: a scan is dispatched like a phase job, but simpler -- no
+    """A scan is dispatched like a phase job, but simpler -- no
     credential, no PhaseContext, no gate, no state machine beyond
     queued/running/succeeded/failed/abandoned.
     """
@@ -1061,9 +1056,9 @@ class TestHostKeyScanDispatch:
 
 
 class TestScansDuringAPhase:
-    """PLAN.md WS-9: `tick()` checks for a scan first, but `run_once()` used to
-    hold the loop for a whole phase, so a scan queued during an hour-long
-    stage waited an hour."""
+    """`tick()` checks for a scan first, and a running phase takes one on
+    each heartbeat, so a scan queued during an hour-long stage does not wait
+    an hour."""
 
     def queue_scan(self, run_id):
         scan = HostKeyScan(ansible_host="192.0.2.99",
@@ -1156,7 +1151,7 @@ class TestPhaseConcurrencySetting:
 
 
 class TestUnexpectedErrorDoesNotStrandTheRow:
-    """WS-1.3: an exception that escaped `run_once()` after `claim()` left the
+    """An exception that escaped `run_once()` after `claim()` left the
     job `running` under this instance's own id, which `sweep()` never matches,
     so the run sat `running` until the sibling restarted."""
 
@@ -1200,7 +1195,7 @@ class TestUnexpectedErrorDoesNotStrandTheRow:
 
 
 class TestGateExpiry:
-    """WS-1.4: `gate_expires_at` was written in five places and read in none,
+    """`gate_expires_at` was written in five places and read in none,
     so a run parked at a gate stayed approvable forever."""
 
     def park(self, run_id, expires):
@@ -1273,7 +1268,7 @@ class TestGateExpiry:
 
 
 class TestNoSecretKey:
-    """WS-3.2: the sibling signs nothing and must start without SECRET_KEY.
+    """The sibling signs nothing and must start without SECRET_KEY.
 
     Run in a subprocess: `config.py` validates the key at import, and in this
     process it has long since been imported with one set, so an in-process
@@ -1317,7 +1312,7 @@ class TestNoSecretKey:
         return env
 
     def test_the_sibling_starts_without_a_key(self, tmp_path, credential_private_key):
-        """PLAN.md WS-3's done-when: `python -m nethub.sibling` starts. It
+        """`python -m nethub.sibling` starts. It
         gets as far as its sweep and start-up log line, then is stopped."""
         import os
         import subprocess
@@ -1370,7 +1365,7 @@ class TestNoSecretKey:
 
 
 class TestStoppedPhaseReturnsToItsGate:
-    """PLAN.md WS-15, decision 13: a phase with a gate of its own that stopped
+    """A phase with a gate of its own that stopped
     goes back to that gate, with the hosts it did not reach where they were."""
 
     add_hosts = TestCredentialFailureStopsTheWave.three_hosts
@@ -1506,8 +1501,8 @@ class TestStoppedPhaseReturnsToItsGate:
     def test_a_cancel_after_the_last_host_started_is_not_parked_either(
             self, app, run, monkeypatch):
         """The same gap without a stop: a stage whose every host passed, with
-        a cancel that landed after the last one started, used to park at the
-        reload gate anyway."""
+        a cancel that landed after the last one started, must not park at the
+        reload gate."""
         def stage(conn, host, ctx):
             cancel_as_flask(run)
             return phases.HostOutcome(host.hostname, "ok")

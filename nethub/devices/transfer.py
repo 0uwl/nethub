@@ -5,11 +5,11 @@ free-space gate, the skip-if-already-staged test, and the `verify /sha512` the
 push ends with. `_push_scp` moves bytes, bracketed by the device's SCP server
 state, and nothing else.
 
-Push over SCP is the only transport (design doc §4.3.1). IOS-XE has no SFTP
+Push over SCP is the only transport. IOS-XE has no SFTP
 server, so SCP is the only protocol available in that direction; a device-side
-pull is recorded in §10 as possible future work.
+pull is in docs/future.md.
 
-NetHub is the sole source of the bytes (§3.3): the push reads the published
+NetHub is the sole source of the bytes: the push reads the published
 subtree off a local mount by filename. There is no second store and no
 per-artifact directory to name.
 """
@@ -34,8 +34,7 @@ if TYPE_CHECKING:
 _DIGEST_RE = re.compile(r"=\s*([0-9a-fA-F]{128})\b")
 
 #: Names that reach a CLI command are checked as text. There is no module
-#: argument handling between us and the device, unlike the Ansible modules
-#: this replaced.
+#: argument handling between us and the device.
 _IMAGE_NAME_RE = re.compile(r"[\w.+-]+")
 _REMOTE_PATH_RE = re.compile(r"[\w:./-]+")
 
@@ -52,12 +51,12 @@ SCP_SOCKET_TIMEOUT = 60.0
 class TransferError(Exception):
     """Staging failed. `status` is the operator-facing word for the reason.
 
-    `scp_restore_confirmed` mirrors the `upgrade_host_phase_results` column
-    (design doc §5): False means a push left the device's SCP server in an
-    unknown state, None means no bracket ran: the failure came before it.
+    `scp_restore_confirmed` mirrors the `upgrade_host_phase_results` column:
+    False means a push left the device's SCP server in an unknown state, None
+    means no bracket ran: the failure came before it.
 
     `summary` is what reaches the year-retained `error_summary` column
-    (WS-4.2) -- see `connection.DeviceConnectionError`'s docstring for why it
+ -- see `connection.DeviceConnectionError`'s docstring for why it
     is a separate field from `message` rather than the same text.
     """
 
@@ -76,7 +75,7 @@ class TransferError(Exception):
 
 
 class VerificationError(TransferError):
-    """The bytes on the device are not the bytes we published (§7.3 `checksum`)."""
+    """The bytes on the device are not the bytes we published (`checksum`)."""
 
 
 class ScpRestoreError(TransferError):
@@ -107,8 +106,8 @@ def stage_image(
     Returns without transferring if the image is already there *and* the device
     re-derives the expected digest for it. That is deliberately a hash and not
     a `dir` presence check: a file of the right name is not the file staging
-    checked, and design doc §8.1 is explicit that "still verifies" for a later
-    phase has to mean re-running `verify /sha512`.
+    checked, and "still verifies" for a later phase has to mean re-running
+    `verify /sha512`.
     """
     _check_name(image, _IMAGE_NAME_RE, "image name")
     _check_name(file_system, _REMOTE_PATH_RE, "file system")
@@ -179,8 +178,7 @@ def verify_sha512(
 ) -> str:
     """Have the device hash what it now holds, and compare here.
 
-    This is the third consumption of the digest computed once at ingest
-    (design doc §3.4).
+    This is the third consumption of the digest computed once at ingest.
 
     The device is asked for the digest rather than handed the expected one to
     check: `verify /sha512 <file> <digest>` echoes the digest back, so a
@@ -220,7 +218,7 @@ def _push_scp(
     """SCP the image to the device, bracketed by its SCP server's prior state.
 
     This is the only device configuration NetHub changes outside the upgrade
-    itself (design doc §4.3.1). Capture, enable only if it was off, restore in
+    itself. Capture, enable only if it was off, restore in
     `finally`, and confirm the restore by re-reading the running-config rather
     than trusting the config module's exit status. An unconfirmed restore
     fails the host outright -- a warning would leave a device with its SCP
@@ -228,7 +226,7 @@ def _push_scp(
     would then ride that into startup-config.
 
     Not covered, and not claimed to be: a killed process or a crashed
-    container never reaches `finally` either (design doc §4.3.1, §10).
+    container never reaches `finally` either.
     """
     prior_enabled = _scp_server_enabled(conn.send_command(_SCP_SHOW))
     try:
@@ -241,7 +239,7 @@ def _push_scp(
         # A HostKeyError from the second SCP session is the pin catching
         # something -- filing it as a routine TransferError would bury the
         # one signal that means "the pin just fired" among ordinary flaky-SCP
-        # failures (WS-4.3). Re-raise before the generic handler so
+        # failures. Re-raise before the generic handler so
         # phases.failure_stage_for classifies it 'hostkey'/'credential'/
         # 'connect', not 'transfer'.
         raise
@@ -272,7 +270,7 @@ def _scp_put(conn: BaseConnection, *, source: Path, image: str, file_system: str
     `hash_supported=False` is not an optimisation. Netmiko's transfer class
     MD5s the source in its constructor whenever it is left on -- including
     under `file_transfer(disable_md5=True)`, which only skips the *comparison*
-    -- and SHA-512 is the only hash algorithm in this system (design doc §3.4).
+    -- and SHA-512 is the only hash algorithm in this system.
     A second one here would be a ~1.2 GB pass computing a digest nothing reads.
     """
     with CiscoIosFileTransfer(

@@ -1,10 +1,10 @@
 """Netmiko sessions to IOS-XE devices: host-key pinned, fail-closed.
 
 Every device connection in NetHub goes through `connect()`, and `connect()`
-cannot be called without a pinned host key. That is the point: `network_cli`
+cannot be called without a pinned host key. That is the point: SSH
 sends the password after key exchange, so an unverified address is one where
 a submitter who names a machine they control is handed someone else's AAA
-credential (design doc §4.3).
+credential.
 
 Pinning alone does not close that -- it fails closed only on a *changed* key,
 and naming your own machine is always a *first* contact. So there is no TOFU
@@ -20,7 +20,7 @@ so nothing in this host's `~/.ssh` or in a running agent is ever offered.
 
 This layer holds no database and no policy. It takes an address, a credential
 and a pinned key, and either yields a session or raises. Its three exceptions
-are the three §7.3 `failure_stage` values a connection can produce --
+are the three `failure_stage` values a connection can produce --
 `hostkey`, `credential`, `connect` -- so mapping them in phases.py is a lookup
 rather than a judgement.
 """
@@ -58,7 +58,7 @@ class DeviceConnectionError(Exception):
     turn a host-key mismatch into a misleading "increase conn_timeout".
 
     `summary` is what `phases._summarise` copies into the year-retained
-    `error_summary` column (WS-4.2) -- `message` may still interpolate a
+    `error_summary` column -- `message` may still interpolate a
     foreign exception's text for `__cause__`/traceback context, but `summary`
     must not, or that foreign text durably reaches the column it exists to
     keep clean. Defaulting `summary` to `message` is only safe for the many
@@ -82,7 +82,7 @@ class AuthenticationError(DeviceConnectionError):
 @dataclass(frozen=True)
 class HostKey:
     """What an address is pinned to -- the two `device_host_keys` columns that
-    matter at connect time (design doc §5).
+    matter at connect time.
 
     `fingerprint_sha256` is written the way OpenSSH writes it, so an admin can
     compare it against `ssh-keygen -lf` output on a terminal they trust
@@ -114,7 +114,7 @@ def scan_host_key(
 
     The key is exchanged before authentication, so this costs no device
     credential -- which is what lets confirming a new address be its own admin
-    action, decoupled from any run's submit or approval flow (design doc §4.3).
+    action, decoupled from any run's submit or approval flow.
 
     It deliberately writes nothing. A human comparing this fingerprint against
     the device out-of-band is the entire value; storing it here would rebuild
@@ -168,8 +168,8 @@ def connect(
     without having looked one up. Use the result as a context manager.
 
     No `secret` is passed and `.enable()` is never called: NetHub requires
-    privilege 15 at login precisely so there is no second secret to hold
-    (design doc §4.3). `facts.get_privilege` is how a phase checks it got one.
+    privilege 15 at login precisely so there is no second secret to hold.
+    `facts.get_privilege` is how a phase checks it got one.
     """
     try:
         return IosXeSSH(
@@ -188,7 +188,7 @@ def connect(
         raise
     except NetmikoAuthenticationException as exc:
         # Netmiko's message is its own boilerplate plus paramiko's, and neither
-        # carries the password -- but §7.3 keeps `error_summary` for a year, so
+        # carries the password -- but `error_summary` is kept for a year, so
         # state the fault here rather than forwarding a library string into it.
         raise AuthenticationError(f"{host}:{port} rejected the credential") from exc
     except Exception as exc:  # netmiko raises several unrelated types here
@@ -205,8 +205,7 @@ class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     the client below loads none at all -- every connection reaches this
     method, and the comparison is ours rather than paramiko's known_hosts
     matching. That also means no file on this host can quietly pre-approve an
-    address (design doc §10 asks which `known_hosts` is actually in force
-    under Ansible's connection plugins; owning the check removes the question).
+    address (docs/device-layer.md [no-host-keys-loaded]).
     """
 
     def __init__(self, pinned: HostKey) -> None:

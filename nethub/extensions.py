@@ -24,7 +24,7 @@ BUSY_TIMEOUT_MS = 5000
 
 @event.listens_for(Engine, "connect")
 def _configure_sqlite(dbapi_connection, connection_record):
-    """Per-connection SQLite settings design doc §5 requires. Set on the
+    """Per-connection SQLite settings (docs/schema.md). Set on the
     generic `Engine` event rather than per app, so the test fixtures get them
     too; a database that enforces less than production passes tests
     production would fail.
@@ -38,7 +38,7 @@ def _configure_sqlite(dbapi_connection, connection_record):
       the length of its transaction, so a long sibling write stalled page
       loads. WAL lets readers proceed while one writer writes. The mode is
       stored in the database file; setting it on every connect is cheap and
-      covers a file created before this line existed.
+      covers any file, however it was created.
     - `busy_timeout`: a second writer waits this long for the lock instead of
       failing at once with "database is locked".
     """

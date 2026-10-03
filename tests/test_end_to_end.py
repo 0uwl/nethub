@@ -4,17 +4,15 @@ Everything is real except the switch. The web requests go through Flask's test
 client. The sibling is the real `Sibling` on the app `main()` builds
 (`_database_app()`, shared settings only). The credential is really sealed
 into the job row by the web side and really opened by the sibling with the
-test key pair's private half (PLAN.md WS-7), and every command goes through
+test key pair's private half, and every command goes through
 the real device layer. The switch is `FakeSwitch`, which sits behind
 `Sibling.connect` and keeps its state across sessions, so a reload, the SCP
 bracket and the staged bytes carry from one phase to the next the way they do
 on hardware.
 
-This is the safety net for the workstreams that rewrite the dispatch path
-(PLAN.md WS-7, WS-8, WS-9). Only the `credential_channel` fixture knows how a
-credential gets from Flask to the sibling; WS-7 swapped it from the socket to
-the sealed column, and the scenarios stayed apart from the ones about the
-socket's own behaviour.
+Only the `credential_channel` fixture knows how a credential gets from Flask
+to the sibling, so a change to that mechanism changes the fixture, not the
+scenarios.
 """
 
 import hashlib
@@ -106,7 +104,7 @@ class FakeSwitch:
         self.flash: dict[str, bytes] = {}
         self.scp_server = False
         #: Whether `ip scp server enable` was in the running-config at each
-        #: `write memory` -- the thing §4.3.1's confirmed restore protects.
+        #: `write memory` -- the thing the confirmed SCP restore protects.
         self.saved_with_scp: list[bool] = []
         self.images = {IMAGE: TARGET}
         #: Connection attempts refused while the switch reloads.
@@ -164,7 +162,7 @@ class FakeSwitch:
                              command)
         if match and match.group(1) in self.flash:
             # The session survives the whole install and the switch reboots
-            # only afterwards (CLAUDE.md, "Device layer"). Two refused
+            # only afterwards (docs/device-layer.md). Two refused
             # connections exercise wait_for_device's retry loop.
             self.version = self.images[match.group(1)]
             self.down_for = 2
@@ -534,7 +532,7 @@ class TestExpiredCredential:
         """A sealed credential lives exactly as long as its job may wait, so
         there is no separate TTL to run out: the job reaches its deadline
         unclaimed and ends `expired`. It records failure_stage='credential'
-        (maintainer decision, PLAN.md WS-7), so the run page says the
+        so the run page says the
         approval's credential was never used."""
         assert work() == ["succeeded"]
         approve(web, submitted, "stage")
@@ -557,10 +555,8 @@ class TestWebRestart:
     def test_a_web_restart_between_approval_and_claim_costs_nothing(
         self, app, web, work, switch, submitted, credential_channel
     ):
-        """PLAN.md WS-7's done-when. Under the socket the approved credential
-        lived only in the web process's memory, so a restart before the
-        sibling claimed the job failed the phase with `credential`. Now it is
-        in the row: a fresh web app over the same database is all a restart
+        """The approved credential is in the row, not in the web process's
+        memory: a fresh web app over the same database is all a restart
         is, and the phase still runs."""
         from nethub import create_app
 
@@ -575,7 +571,7 @@ class TestWebRestart:
 
 
 # ---------------------------------------------------------------------------
-# Two switches: one host failing a phase (PLAN.md WS-8)
+# Two switches: one host failing a phase
 # ---------------------------------------------------------------------------
 
 ADDRESS2 = "192.0.2.11"
@@ -698,7 +694,7 @@ class TestOneHostFailing:
     def test_a_mistyped_password_at_the_reload_gate_leaves_the_run_at_the_gate(
         self, app, web, work, switch, run_id
     ):
-        """PLAN.md WS-15: the mistyped-password item in "Found while working".
+        """The mistyped-password item in "Found while working".
         Nothing is failed; the same gate is approved again, correctly."""
         approve(web, run_id, "stage")
         assert work() == ["succeeded"]
@@ -721,7 +717,7 @@ class TestOneHostFailing:
 
 
 # ---------------------------------------------------------------------------
-# Three switches: the canary, then the rest together (PLAN.md WS-15)
+# Three switches: the canary, then the rest together
 # ---------------------------------------------------------------------------
 
 ADDRESS3 = "192.0.2.12"
@@ -803,7 +799,7 @@ class TestScheduledApproval:
     def test_a_reload_approved_for_a_window_runs_at_that_time_unattended(
         self, app, web, work, switch, submitted, credential_channel
     ):
-        """PLAN.md WS-14's done-when: stage during the day, approve the reload
+        """Stage during the day, approve the reload
         for that night, and it runs with nobody at the gate. The credential
         waits sealed in the row; nothing is held in either process."""
         assert work() == ["succeeded"]

@@ -1,4 +1,4 @@
-"""User management (PLAN.md WS-10): disabling, session revocation, password
+"""User management: disabling, session revocation, password
 changes and resets, unlocking, and the append-only audit of all of them.
 
 Two clients stand for two browsers, so "their session ends" is checked the
@@ -14,7 +14,7 @@ from nethub import auth
 from nethub.extensions import db
 from nethub.models import User, UserAdminAudit
 
-#: The disable form's confirmation box, ticked (PLAN.md WS-11).
+#: The disable form's confirmation box, ticked.
 CONFIRM = {'confirm': 'yes'}
 
 
@@ -51,7 +51,7 @@ def bob(app, make_user):
 class TestDisable:
     def test_a_disabled_users_existing_session_ends_on_its_next_request(
             self, app, logged_in_client, bob):
-        """WS-10's "done when"."""
+        """Disabling a user ends their existing session on its next request."""
         bob_id = user_id(app, 'bob')
         assert logged_in_client.post(f'/users/{bob_id}/disable', data=CONFIRM).status_code == 302
         response = bob.get('/users')
@@ -124,7 +124,7 @@ class TestDisable:
 
 class TestSessions:
     def test_a_cookie_without_an_epoch_is_refused(self, app, client, make_user):
-        """Cookies issued before WS-10 carry a bare id; everyone logs in once."""
+        """A cookie with a bare id (no epoch) is refused."""
         make_user()
         with client.session_transaction() as sess:
             sess['_user_id'] = str(user_id(app, 'alice'))

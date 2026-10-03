@@ -75,7 +75,7 @@ def test_create_admin_cli_creates_user(app):
     with app.app_context():
         from nethub.models import User
 
-        assert User.query.filter_by(username='dave').one().role == 'admin'  # WS-16
+        assert User.query.filter_by(username='dave').one().role == 'admin'
 
 
 def test_create_admin_cli_rejects_existing_user(app, make_user):
@@ -85,7 +85,7 @@ def test_create_admin_cli_rejects_existing_user(app, make_user):
     assert 'already exists' in result.output
 
 
-# --- Login hardening (WS-5.5) ------------------------------------------------
+# --- Login hardening ------------------------------------------------
 
 def test_an_absent_username_still_pays_for_a_password_hash(client, monkeypatch):
     """The timing oracle was the control flow, so assert the flow, not a clock.
@@ -172,7 +172,7 @@ def test_a_successful_login_clears_the_counter(client, app, make_user):
 
 
 def test_an_absent_username_does_not_create_a_counter_row(client, app):
-    """§4.2: a counter keyed on attacker-chosen input is unbounded growth."""
+    """A counter keyed on attacker-chosen input is unbounded growth."""
     from nethub.models import User
 
     before = None

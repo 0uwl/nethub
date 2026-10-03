@@ -1,37 +1,15 @@
 """Compiling an upgrade request into a run, and moving it through its gates.
 
-The routes are thin over this, the way `registry_routes.py` is thin over
-`registry.py`. Everything that decides whether a run may exist lives here.
+`upgrade_routes.py` is thin over this. Everything that decides whether a run
+may exist lives here (docs/dispatch.md, docs/host-keys.md).
 
-A submitter sends a *request document* -- hosts, one bundle key each, and
-nothing else -- which NetHub validates and compiles into rows (design doc
-§8.1). There is no inventory to upload and no template to render: the only
-connection var a request may carry is the target address, and it is validated
-rather than trusted. Everything that says *who someone is* is read
-server-side.
-
-**What a request may set.** This table used to live in
-`ansible/inventory/README.md`, which build step 6 deleted along with the rest
-of that layer; it is the contract itself rather than documentation of the
-playbooks, so it moved here with the code that enforces it.
-
-| Field | Notes |
-|---|---|
-| `platform` | Must be supported. `iosxe` only today, and currently implicit. |
-| `hosts[].name` | The inventory hostname, unique within a run. |
-| `hosts[].ansible_host` | Address. An IP literal inside a configured CIDR. |
-| `hosts[].bundle` | A bare registry key. Resolved server-side. |
-| `hosts[].flash_dir` | Optional. `flash:` / `bootflash:`. |
-
-Anything else is rejected. Connection vars, credentials and registry entries
-are NetHub's to write. Beyond this set the answer is a pull request against
-the code, not a runtime upload.
-
-**Two deliberate narrowings against that table, both worth knowing:** this
-implementation takes *one* bundle for the whole run rather than one per host,
-and `flash_dir` is not submittable at all (it defaults on the column). Both
-are simplifications of the contract, not disagreements with it -- widening
-them is additive and needs no rule revisited.
+A request is closed (docs/architecture.md [request-is-a-closed-document]):
+one bundle key for the run, and `hostname, address` per line. The address
+must be an IP literal inside `DEVICE_TARGET_CIDRS` with a confirmed pin. A
+request never supplies a filename, digest, username, credential or other
+connection setting; NetHub resolves the bundle key to an artifact row and
+reads the device username server-side. `platform` and `flash_dir` default
+(`iosxe`, `flash:`) and the route does not take them.
 """
 
 from __future__ import annotations
@@ -59,21 +37,12 @@ from .sealed_credentials import CredentialError, check_credential, seal
 
 #: Wall-clock budget per phase, as (fixed seconds, seconds per host).
 #:
-#: `deadline_at` was declared on the model and read in two places
-#: (`sibling.run_once`, `phases.execute_phase`) and **written by nothing** --
-#: so §7.3's `timed_out` and `expired` were unreachable states and a phase
-#: execution had no wall-clock bound at all.
+#: What this bounds is the **wave**, not one device: the deadline is checked
+#: before each host starts, never mid-host (there is no safe place to stop
+#: inside an activation), so a single wedged transfer is bounded only by the
+#: SCP socket timeout (docs/device-layer.md, Known gaps).
 #:
-#: Be precise about what this does and does not bound. The deadline is checked
-#: before each host starts, never mid-host (§7.3 -- there is no safe place to
-#: stop inside an activation), so it does *not* rescue a single wedged device: one
-#: host that answers SSH and never finishes its SCP put still burns
-#: `TRANSFER_READ_TIMEOUT`, which is 7200s, and that timeout is the only thing
-#: bounding it. What the deadline bounds is the **wave** -- a 40-host stage
-#: that would otherwise keep the sibling's single FIFO queue busy with no
-#: limit of any kind.
-#:
-#: Derived from the timings CLAUDE.md records against real hardware, then
+#: Derived from the timings in docs/device-layer.md §6.2, then
 #: multiplied by SAFETY. A deadline that fires on a healthy run is worse than
 #: no deadline, so these are deliberately loose: the point is to bound a
 #: wedged phase, not to police a slow one.
@@ -87,8 +56,8 @@ from .sealed_credentials import CredentialError, check_credential, seal
 #:   verify    one read after the reload
 #:
 #: The per-host term assumes hosts run one at a time, and stays that way now
-#: that phases run `PHASE_CONCURRENCY` hosts at once (PLAN.md WS-9) and an
-#: activation runs its canary and then the approver's count (WS-15). For an
+#: that phases run `PHASE_CONCURRENCY` hosts at once and an
+#: activation runs its canary and then the approver's count. For an
 #: activation approved at the default of one at a time the sum is exact; for
 #: everything else it is an upper bound, loose by up to the concurrency, which
 #: is the direction this budget is meant to err in. Dividing by the concurrency
@@ -103,11 +72,10 @@ PHASE_BUDGET_SECONDS = {
 }
 
 #: Multiplier on the sum above. Also covers a stack or a slower chassis, both
-#: of which CLAUDE.md lists as untested.
+#: of which docs/device-layer.md lists as untested.
 #:
-#: 2, not more: at 3 a 20-host stage budget came out at ~15 hours, which is
-#: longer than the 2-hour per-host read timeout it sits above and therefore
-#: not a bound anyone would notice. These are a first cut from single-device
+#: 2, not more: at 3 a 20-host stage budget came out at ~15 hours, too long
+#: to be a bound anyone would notice. These are a first cut from single-device
 #: measurements -- re-derive them from a real multi-host wave when there is
 #: one, rather than trusting the arithmetic here.
 DEADLINE_SAFETY = 2
@@ -117,7 +85,7 @@ DEADLINE_SAFETY = 2
 STAGE_SECONDS_PER_MB = 1.3
 
 
-#: How far ahead an approval may schedule its phase (PLAN.md WS-14). This is
+#: How far ahead an approval may schedule its phase. This is
 #: the bound on how long a sealed device password sits in a row: the
 #: credential expires with `deadline_at`, which is measured from `not_before`,
 #: so nothing is stored for longer than this plus one phase's budget. It is
@@ -131,7 +99,7 @@ def start_time(raw, *, gate_expires_at, now=None):
 
     UTC throughout rather than a deployment time zone: the form field is a
     `datetime-local`, which posts a wall-clock string with no offset, and
-    there is no JavaScript to tell us the browser's zone (WS-11's
+    there is no JavaScript to tell us the browser's zone (the CSP is
     `script-src 'none'`). So the field says UTC, the page shows UTC, and the
     column stores UTC, like every other timestamp in the app.
     """
@@ -165,8 +133,8 @@ def start_time(raw, *, gate_expires_at, now=None):
 def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
     """When a phase execution stops being allowed to run.
 
-    Scales with host count as if hosts ran one at a time (see
-    `PHASE_BUDGET_SECONDS` for why, now that most phases do not), and -- for
+    Scales with host count as if hosts ran one at a time, though most phases
+    run hosts in parallel (see `PHASE_BUDGET_SECONDS` for why), and -- for
     `stage` only -- with image size, which is the term that actually
     dominates. Returns an aware datetime; `phases._aware()` and
     `sibling._aware()` exist because SQLite hands these back naive.
@@ -180,7 +148,7 @@ def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
 
 
 #: Which phases a human approves -- `precheck` runs on submit with no gate and
-#: `verify` follows `activate` automatically, both read-only (§8.1). Imported
+#: `verify` follows `activate` automatically, both read-only. Imported
 #: rather than defined here so `upgrades.APPROVABLE` keeps working for
 #: `upgrade_routes`, while the sibling can reach it without importing this
 #: module (and the artifact store behind it).
@@ -232,8 +200,7 @@ def check_target(address: str, cidrs) -> str:
 
     A hostname is refused rather than resolved: the CIDR check and the eventual
     connection would resolve it at different times, and `device_host_keys`
-    would end up keyed on a string whose meaning can change afterwards
-    (design doc §4.3).
+    would end up keyed on a string whose meaning can change afterwards.
     """
     if not cidrs:
         raise RequestError(
@@ -260,7 +227,7 @@ def confirmed_key(address: str) -> DeviceHostKey:
 
     Not a TOFU prompt deferred to dispatch: pinning fails closed only on a
     *changed* key, and "an operator names a machine they control" is always a
-    first contact. Confirming one is a separate admin action (§4.3).
+    first contact. Confirming one is a separate admin action.
     """
     row = DeviceHostKey.query.filter_by(ansible_host=address).first()
     if row is None or not row.is_confirmed:
@@ -273,12 +240,11 @@ def confirmed_key(address: str) -> DeviceHostKey:
 
 def delete_pin(row: DeviceHostKey, user) -> bool:
     """Remove a host-key pin, or under the two-person rule for host keys ask
-    for its removal (PLAN.md WS-16). False for a request: the pin stays in
+    for its removal. False for a request: the pin stays in
     force until someone else deletes it too.
 
-    Every step writes a `device_host_key_audit` row with the pre-image,
-    captured before the change (WS-6.4): it is the evidence the "deliberate
-    friction" before re-accepting a changed key used to leave none of.
+    Every step writes a `device_host_key_audit` row recording the key being
+    removed, captured before the change.
     """
     try:
         step = settings.second_person_delete('two_person_hostkeys', row, user)
@@ -315,9 +281,8 @@ def resolve_bundle(bundle: str, platform: str = 'iosxe'):
 def build_document(bundle: str, hosts) -> str:
     """The request as NetHub understood it, stored beside its digest.
 
-    §3.4 hashes what it ingests, and a document deciding which images land on
-    which devices is not the exception -- but a digest whose preimage is stored
-    nowhere is unverifiable, so both go in the row.
+    A digest whose preimage is stored nowhere is unverifiable, so both go in
+    the row.
     """
     return json.dumps(
         {
@@ -357,16 +322,15 @@ def _check_credential(user, password):
 
 
 def _seal_into(job, *, user, password, public_key):
-    """Seal the supplier's credential into the flushed job row (PLAN.md WS-7).
+    """Seal the supplier's credential into the flushed job row.
 
     Same transaction as the row's creation, so there is no moment at which the
-    sibling can claim a `queued` job whose credential is not there yet -- the
-    race WS-1 closed by ordering, closed here by construction. It expires with
+    sibling can claim a `queued` job whose credential is not there yet. It
+    expires with
     the job's deadline: a credential waits exactly as long as its job may.
 
-    The device username sealed is recorded on the job beside it (PLAN.md
-    WS-16): the device sees the supplier's name, and the run row only the
-    submitter's.
+    The device username sealed is recorded on the job beside it: the device
+    sees the supplier's name, and the run row only the submitter's.
     """
     job.device_username_used = user.device_username
     job.sealed_credential = seal(
@@ -384,9 +348,9 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
     """Compile a request into a run, its host rows, and a queued pre-check.
 
     Flask writes exactly one job edge in the whole system and this is it: the
-    row that arrives `queued` (§7.3). Everything after dispatch is the
+    row that arrives `queued`. Everything after dispatch is the
     sibling's. Pre-check has no gate but still opens a device session, so the
-    submitter's credential is sealed into it here (§8.1: "runs on submit").
+    submitter's credential is sealed into it here.
     """
     _require_device_username(user)
     _check_credential(user, password)
@@ -452,8 +416,8 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
 
 
 def reload_count(raw, cap):
-    """The approver's "reload N devices at a time after the first" (PLAN.md
-    WS-15), or refuse it. Blank means the default, 1. `cap` is the deployment's
+    """The approver's "reload N devices at a time after the first", or refuse
+    it. Blank means the default, 1. `cap` is the deployment's
     `PHASE_CONCURRENCY`; the sibling caps it again, since the setting can be
     lowered before the job runs."""
     text = '' if raw is None else str(raw).strip()
@@ -473,7 +437,8 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
     """Write the phase job a gate is waiting for.
 
     Two admins both clicking "approve: reload" is the case this has to refuse:
-    §8.1's serialization is scoped to *execution*, so it would otherwise queue
+    the sibling's serialization is scoped to *execution*, so it would otherwise
+    queue
     two reloads that then run one after the other. The check below turns the
     sequential case into a message; `_queue_from_gate` catches the concurrent
     one, and `UNIQUE(run_id, phase, attempt)` holds either way.
@@ -483,14 +448,14 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
     chooses how many devices reload at once after the canary (`concurrency`,
     at most `cap`); it is recorded on the job.
 
-    `start_at` is the maintenance window an approver chose (PLAN.md WS-14),
+    `start_at` is the maintenance window an approver chose,
     still raw as the form sent it: the job is written exactly as it is today
     and simply not claimed until then. Nothing is held in memory in the
     meantime -- the credential is sealed in the row as always -- so an
     approval and its execution can be hours apart without a person in
     between. It is bounded here rather than in the route, like `concurrency`:
     `MAX_SCHEDULE_AHEAD` is what bounds how long a sealed password sits in a
-    row (§9.1), so nothing should be able to reach `deadline_at` without
+    row, so nothing should be able to reach `deadline_at` without
     passing it.
     """
     _check_gate(run)
@@ -512,7 +477,7 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
 def retryable_phases(run):
     """What a retry may name at the run's current gate, with the hosts it would
     run on: `[(phase, [hostname, ...]), ...]`, phases with no failed host left
-    out (PLAN.md WS-8)."""
+    out."""
     if run.state != 'awaiting_approval':
         return []
     out = []
@@ -526,13 +491,13 @@ def retryable_phases(run):
 
 def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
           start_at=None):
-    """Run a phase again on the hosts that failed it (PLAN.md WS-8).
+    """Run a phase again on the hosts that failed it.
 
     Allowed while the run waits at a gate, for a phase that ran since the gate
     before it (`models.RETRYABLE_AT`). It is an approval like any other: it
     collects the retrier's credential and records who approved it. The job is
     marked `is_retry`, and the sibling puts the failed hosts' cursors back when
-    it starts it -- Flask writes no per-host state (§7.3). When the retry ends,
+    it starts it -- Flask writes no per-host state. When the retry ends,
     the run carries on from that phase as it did the first time, which lands
     it back at the same gate.
     """
@@ -561,7 +526,7 @@ def _concurrency_for(phase, raw, cap):
 
 
 def needs_second_person(run, user) -> bool:
-    """The two-person rule for runs (PLAN.md WS-16): with it on, an operator
+    """The two-person rule for runs: with it on, an operator
     may not approve a gate of, or retry, a run they submitted. Read when the
     approval happens, so turning the rule off releases a waiting run. Cancel
     and declining cleanup never ask: stopping is the conservative action.
@@ -582,7 +547,7 @@ def _check_gate(run):
     if expires is not None and _utcnow() >= expires:
         # The sibling moves the run to `expired` on its next loop. Refusing
         # here too means the TTL holds even while the sibling is down, without
-        # Flask writing the expiry edge itself (§7.3 gives that to the sibling).
+        # Flask writing the expiry edge itself, which belongs to the sibling.
         raise RequestError('This gate has expired. Submit a new run.')
 
 
@@ -591,7 +556,7 @@ def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
     """Queue `phase` from the gate the run is waiting at, and take it off the gate.
 
     The attempt is one past the highest so far for this phase, so an abandoned
-    attempt and a retry follow the same rule (PLAN.md WS-8).
+    attempt and a retry follow the same rule.
 
     Leaving the gate is a conditional update, the claim pattern: two requests
     at one gate -- an approval and a retry, or two approvals under
@@ -611,7 +576,7 @@ def _queue_from_gate(*, run, phase, user, password, public_key, is_retry, hosts,
 
     # The run's own rows carry the image size -- read from there rather than
     # from `artifacts`, which is what keeps a run self-contained and stops a
-    # mid-run supersede re-targeting it (§5).
+    # mid-run supersede re-targeting it.
     job = UpgradePhaseJob(
         run_id=run.id, phase=phase, attempt=(previous or 0) + 1, status='queued',
         is_retry=is_retry, approved_by=user.id, approved_by_role=user.role,
@@ -653,7 +618,7 @@ def decline_cleanup(*, run):
     """Declining is an edge, not an absence.
 
     Without it, "awaiting cleanup approval" and "finished, cleanup declined"
-    are the same row (§7.3).
+    are the same row.
     """
     if run.state != 'awaiting_approval' or run.awaiting_phase != 'cleanup':
         raise RequestError('This run is not waiting at the cleanup gate.')
@@ -669,7 +634,7 @@ def request_cancel(*, run, user):
     """Ask for a stop. The sibling polls this column between hosts.
 
     A cancel is a column and not a signal or a kill, because the job row is the
-    only control channel (§9). What cancel *means* is per phase: cancelling a
+    only control channel. What cancel *means* is per phase: cancelling a
     stage is safe, cancelling an activation mid-wave is not.
     """
     if run.state in ('completed', 'failed', 'cancelled', 'expired'):

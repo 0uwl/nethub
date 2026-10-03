@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Container smoke test (PLAN.md WS-12). Runs the image the way the two Quadlet
+# Container smoke test. Runs the image the way the two Quadlet
 # units do and checks that a deployment comes up:
 #
 #   - the image's own keygen makes the sibling's key pair;
@@ -16,7 +16,8 @@
 #
 # What it does NOT cover: SELinux. The :z relabel only matters on an enforcing
 # host, and neither CI's Ubuntu runners (AppArmor) nor a nested podman can
-# provide one, so the WS-3 :Z-versus-:z bug would pass here. Nor does it run
+# provide one, so a :Z-versus-:z relabel conflict would pass here. Nor does it
+# run
 # the units under systemd: it is the same flags by hand, not Quadlet itself.
 #
 # Usage: scripts/smoke_test.sh [image]        (default localhost/nethub:latest)

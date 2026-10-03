@@ -133,7 +133,7 @@ def test_scan_host_key_reports_an_unreachable_address():
 
 
 def test_scan_host_key_summary_omits_the_os_errors_text(monkeypatch):
-    """WS-4.2: `message` may still interpolate the OSError for local
+    """`message` may still interpolate the OSError for local
     debugging, but `summary` -- the year-retained column -- must not."""
 
     def boom(*a, **kw):
@@ -148,7 +148,7 @@ def test_scan_host_key_summary_omits_the_os_errors_text(monkeypatch):
 
 
 def test_connect_generic_failure_summary_omits_the_wrapped_exceptions_text(monkeypatch, pinned):
-    """WS-4.2: the generic `except Exception` in connect() must not let a
+    """The generic `except Exception` in connect() must not let a
     foreign exception's text reach `summary`."""
 
     def boom(**kwargs):

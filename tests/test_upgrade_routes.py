@@ -153,7 +153,7 @@ class TestSubmit:
             submit(user, bundle="nope")
 
     def test_a_pruned_artifact_cannot_be_installed(self, app, user, confirmed):
-        """The row outlives the bytes and says so (§7.4)."""
+        """The row outlives the bytes and says so."""
         with app.app_context():
             Artifact.query.one().bytes_state = "pruned"
             db.session.commit()
@@ -170,7 +170,7 @@ class TestSubmit:
             assert host.state == "pending"
 
     def test_submit_queues_precheck_with_no_approval(self, app, user, confirmed):
-        """Pre-check runs on submit and needs no gate (§8.1)."""
+        """Pre-check runs on submit and needs no gate."""
         with app.app_context():
             run, job = submit(user)
             assert (job.phase, job.status, job.approved_by) == ("precheck", "queued", None)
@@ -285,7 +285,7 @@ class TestThroughTheClient:
 
 
 class TestSealedAtSubmitAndApprove:
-    """PLAN.md WS-7: the credential is sealed into the job row it was
+    """The credential is sealed into the job row it was
     collected for, to the sibling's public key. These open it with the
     private half, as the sibling would."""
 
@@ -332,10 +332,8 @@ class TestSealedAtSubmitAndApprove:
 
 
 class TestPhaseDeadlines:
-    """WS-3.3: `deadline_at` was declared, read in two places, and written by
-    nothing -- so §7.3's `timed_out` and `expired` were unreachable and a
-    phase execution had no wall-clock bound. Both existing deadline tests set
-    the column by hand, so the suite was green over inert machinery.
+    """Every queued job gets a `deadline_at`, so `timed_out` and `expired`
+    are reachable and a phase execution has a wall-clock bound.
     """
 
     def test_submit_writes_a_deadline(self, app, user, confirmed):
@@ -388,8 +386,8 @@ class TestPhaseDeadlines:
             assert phase in upgrades.PHASE_BUDGET_SECONDS, phase
 
     def test_the_stage_budget_clears_what_real_hardware_measured(self):
-        """471 MB took ~370s on the lab switch (CLAUDE.md). A deadline that
-        fires on a healthy run is worse than no deadline.
+        """471 MB took ~370s on the lab switch (docs/device-layer.md). A
+        deadline that fires on a healthy run is worse than no deadline.
         """
         from datetime import datetime, timezone
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -399,7 +397,7 @@ class TestPhaseDeadlines:
 
 
 class TestRetry:
-    """PLAN.md WS-8: retrying the hosts that failed a phase, from the gate the
+    """Retrying the hosts that failed a phase, from the gate the
     run moved on to."""
 
     @pytest.fixture
@@ -443,7 +441,7 @@ class TestRetry:
             assert credential.password == PASSWORD
 
     def test_flask_leaves_the_host_cursors_to_the_sibling(self, app, partial_stage):
-        """§7.3: every per-host edge is the sibling's."""
+        """Every per-host edge is the sibling's."""
         with app.app_context():
             self.retry(partial_stage)
             states = {h.hostname: h.state
@@ -572,7 +570,7 @@ class TestAttempts:
 
 
 class TestApproveRace:
-    """WS-5.2: check-then-insert, and the check is not the thing that holds."""
+    """Check-then-insert, and the check is not the thing that holds."""
 
     def test_a_concurrent_duplicate_approval_is_a_message_not_a_500(
         self, app, user, confirmed, monkeypatch
@@ -650,12 +648,12 @@ class TestCancelDropsTheCredential:
         with app.app_context():
             job = UpgradePhaseJob.query.one()
             # Cleared, but still `queued`: the sibling writes `cancelled`,
-            # since Flask writes no job-status edge after creation (§7.3).
+            # since Flask writes no job-status edge after creation.
             assert (job.status, job.sealed_credential) == ('queued', None)
 
 
 class TestHostkeyScanDispatch:
-    """WS-6.2b: scanning is dispatched to the sibling, not run inline."""
+    """Scanning is dispatched to the sibling, not run inline."""
 
     def login(self, client):
         client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
@@ -695,7 +693,7 @@ class TestHostkeyScanDispatch:
 
 
 class TestConfirmHostkeyBinding:
-    """WS-6.3: confirm_hostkey binds to a HostKeyScan NetHub itself produced,
+    """confirm_hostkey binds to a HostKeyScan NetHub itself produced,
     rather than trusting whatever a form claims.
     """
 
@@ -759,8 +757,7 @@ class TestConfirmHostkeyBinding:
         assert b'No matching scan' in resp.data
 
     def test_an_already_consumed_scan_cannot_confirm_twice(self, app, client, user):
-        """A succeeded scan confirms at most once -- the same one-shot
-        pattern §4.1 uses for the provisioning allowlist."""
+        """A succeeded scan confirms at most once."""
         scan_id = self.make_scan(app, requested_by=user)
         self.login(client)
         client.post('/hostkeys/confirm', data={'scan_id': scan_id}, follow_redirects=True)
@@ -795,7 +792,7 @@ class TestConfirmHostkeyBinding:
 
 
 class TestHostkeyAudit:
-    """WS-6.4: confirm/delete leave an audit row with the pre-image."""
+    """Confirm/delete leave an audit row with the pre-image."""
 
     def login(self, client):
         client.post('/login', data={'username': 'alice', 'password': 'hunter2'})
@@ -846,9 +843,8 @@ class TestHostkeyAudit:
 
 
 class TestSealedInTheSameTransaction:
-    """WS-1.1's race, closed by construction. The queued row used to be
-    committed before its credential was held, so the sibling could claim it
-    in the gap and fail the run. Now the ciphertext is part of the row: the
+    """No committed queued row ever lacks its credential, because the
+    ciphertext is written in the same transaction: the
     hook below plays the sibling at the worst moment, straight after the
     commit that makes the job claimable, and finds it already there."""
 
@@ -949,8 +945,8 @@ class TestApproverChecks:
     def test_an_approver_without_a_device_username_is_refused(
         self, app, user, confirmed
     ):
-        """WS-1.2: the route used to hold `None` as the username, and the
-        sibling refused it as malformed after the gate had been spent."""
+        """Without the check, the sibling would refuse a `None` username as
+        malformed after the gate had been spent."""
         with app.app_context():
             run, _ = submit(user)
             self.park(run)
@@ -965,8 +961,8 @@ class TestApproverChecks:
     def test_an_expired_gate_is_refused_even_before_the_sibling_sees_it(
         self, app, user, confirmed
     ):
-        """WS-1.4: the TTL holds while the sibling is down. Flask refuses; it
-        does not write the `expired` edge, which is the sibling's (§7.3)."""
+        """The TTL holds while the sibling is down. Flask refuses; it
+        does not write the `expired` edge, which is the sibling's."""
         with app.app_context():
             run, _ = submit(user)
             run.gate_expires_at = upgrades._utcnow() - timedelta(seconds=1)
@@ -981,7 +977,7 @@ class TestSubmitRacingADelete:
     def test_a_submit_whose_artifact_vanishes_is_a_refusal_not_a_500(
         self, app, user, confirmed, monkeypatch
     ):
-        """WS-2.2: the artifact is deleted between resolving the bundle and
+        """The artifact is deleted between resolving the bundle and
         inserting the host rows. The foreign key refuses the insert, and the
         submitter gets the ordinary "not registered" message."""
         real = upgrades.resolve_bundle
@@ -1004,7 +1000,7 @@ class TestSubmitRacingADelete:
 
 
 class TestReloadCount:
-    """PLAN.md WS-15: the request's order reaches the rows (the first host is
+    """The request's order reaches the rows (the first host is
     the activate canary), and an activate approval chooses how many devices
     reload at once after it, recorded on the job and capped."""
 
@@ -1088,7 +1084,7 @@ class TestReloadCount:
 
 
 class TestScheduledApprovals:
-    """PLAN.md WS-14: an approval may carry a start time, in UTC, bounded by
+    """An approval may carry a start time, in UTC, bounded by
     the cap and by the gate it was made at."""
 
     LATER = "2026-09-09T02:00"  # 2h after NOW
@@ -1189,7 +1185,7 @@ class TestScheduledApprovals:
 
     def test_the_cap_bounds_how_long_a_credential_is_stored(self):
         """The window is the only thing that lengthens it, so this cap plus one
-        phase's budget is the whole bound (design doc §9.1)."""
+        phase's budget is the whole bound."""
         assert upgrades.MAX_SCHEDULE_AHEAD == timedelta(hours=72)
 
     def test_the_route_refuses_a_bad_time_without_spending_the_gate(

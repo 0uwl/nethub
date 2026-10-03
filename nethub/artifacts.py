@@ -1,17 +1,13 @@
 """The single ingest path: upload, hash, size, store, record.
 
-Design doc §3.4. This replaced the `software_registry` YAML store at build
-step 7 -- that block existed so an Ansible playbook could read it, and with
-the playbooks gone nothing in NetHub read it any more.
+See docs/artifacts.md.
 
 Three properties this layer is responsible for:
 
 - **The digest is computed once, over the bytes as they are written**, not by
   re-reading the file afterwards. A 1.2 GB upload plus its hash is the longest
-  operation in the system after a device transfer, and Flask holds the only
-  unauthenticated route -- doing it in two passes doubles a window §3.2 spends
-  its length bounding. It is then consumed three times without recomputation
-  (§3.4).
+  operation the web process does, and a second pass would double it. It is
+  then consumed three times without recomputation.
 - **The submitted checksum is checked against what we computed**, and a
   mismatch means the bytes never enter the store. The uploader's claim is the
   thing being verified, so it is never what gets recorded.
@@ -79,7 +75,7 @@ def get_published(bundle_key: str, platform: str = 'iosxe') -> Artifact:
     """Resolve a request's bundle key server-side.
 
     A request names a key; it never names a filename or a digest. That is the
-    whole point of the key existing (§5) -- a submitted filename against a
+    whole point of the key existing -- a submitted filename against a
     submitted checksum would bypass this table entirely.
     """
     artifact = Artifact.query.filter_by(
@@ -100,7 +96,7 @@ def ingest(*, file_storage, bundle_key, version, sha512, user,
     """Take an uploaded file into the store and record it.
 
     It lands `published`, unless the two-person rule for artifacts binds
-    `user` (PLAN.md WS-16): then it lands `staged`, with its bytes in the
+    `user`: then it lands `staged`, with its bytes in the
     store and its row written, but nothing can name it until someone else
     publishes it (`publish`). The bundle-key check is left to that moment.
 
@@ -167,13 +163,11 @@ def ingest(*, file_storage, bundle_key, version, sha512, user,
         # `os.link`, not `os.replace`: link fails with FileExistsError if the
         # target is taken, and replace silently overwrites. The three checks
         # above all ran minutes ago -- before the upload streamed -- so under
-        # concurrency they prove nothing by the time we get here. Two uploads
-        # sharing a filename used to both reach `os.replace`, and the loser
-        # overwrote the winner's already-committed bytes *before* hitting its
-        # own IntegrityError at commit. The row then recorded one artifact's
-        # SHA-512 against the other's bytes, which is exactly the chain of
-        # custody §3.4 is built on, broken silently. The cleanup below only
-        # ever removed the temp file, so nothing put the winner's bytes back.
+        # concurrency they prove nothing by the time we get here. With
+        # `os.replace`, the loser of two uploads sharing a filename overwrites
+        # the winner's committed bytes before failing at commit, and the
+        # winner's row then records one image's SHA-512 against another's
+        # bytes (docs/artifacts.md [link-never-replace]).
         #
         # Both paths are in `store` by construction (tempfile.mkstemp(dir=store)),
         # so they are on one filesystem and a hard link is available.
@@ -226,7 +220,7 @@ def _staged_for(user):
 
 
 def publish(artifact: Artifact, user) -> None:
-    """Make a staged upload nameable by a run (PLAN.md WS-16).
+    """Make a staged upload nameable by a run.
 
     Under the two-person rule an operator cannot publish their own upload;
     the rule is read now, so turning it off lets the uploader publish. The
@@ -265,7 +259,7 @@ def publish(artifact: Artifact, user) -> None:
 def withdraw(artifact: Artifact, user) -> None:
     """Discard a staged upload, row and bytes. Nothing can have used it, so
     it needs no second person -- but only its uploader or an admin may
-    withdraw it (PLAN.md WS-16): otherwise the person meant to be the second
+    withdraw it: otherwise the person meant to be the second
     check could erase someone's upload, possibly an hour's transfer, alone.
     A reviewer who will not publish an upload simply does not.
 
@@ -296,7 +290,7 @@ def withdraw(artifact: Artifact, user) -> None:
 def delete(artifact: Artifact, user=None) -> bool:
     """Hard removal of the row and its bytes, unless a live run needs them.
 
-    Under the two-person rule for artifacts (PLAN.md WS-16), an operator's
+    Under the two-person rule for artifacts, an operator's
     delete is a request, and returns False: the artifact stays usable until
     a different user deletes it. That second delete, and any delete by an
     admin or with the rule off, removes it and returns True.

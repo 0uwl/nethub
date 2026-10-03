@@ -1,4 +1,4 @@
-"""Baseline: the schema as it stood when migrations were introduced (PLAN.md WS-6).
+"""Baseline: the schema as it stood when migrations were introduced.
 
 Revision ID: 0001_baseline
 Revises:
@@ -23,7 +23,7 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-#: §7.3: a job row in a terminal status is never written to again.
+#: A job row in a terminal status is never written to again.
 TERMINAL_TRIGGER = """
 CREATE TRIGGER upgrade_phase_jobs_terminal_immutable
 BEFORE UPDATE ON upgrade_phase_jobs

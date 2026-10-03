@@ -18,7 +18,7 @@
 #   systemctl --user start nethub nethub-sibling
 #
 # Running this unit alone gets you a UI that accepts work and never performs
-# any: Flask writes a `queued` row and stops there by design (§9), so with no
+# any: Flask writes a `queued` row and stops there by design, so with no
 # sibling a host-key scan and an upgrade both hang at "Still working" forever.
 #
 # Host prep -- rootless, so this lives under the invoking user's own XDG
@@ -49,9 +49,8 @@ PublishPort=8080:8080
 # --- Required ---
 # /app/data holds the SQLite database. /app/artifacts is ARTIFACT_STORE --
 # NetHub's own flat directory of uploaded image bytes, which the SCP push
-# addresses by filename. Unlike the REGISTRIES_ROOT it replaced at build step 7,
-# this is not somewhere an admin mounts *their* files for NetHub to point at:
-# NetHub owns it, and it is usually a much larger volume than /app/data (a
+# addresses by filename. NetHub owns it; it is not somewhere an admin mounts
+# their own files. It is usually a much larger volume than /app/data (a
 # single IOS-XE image is ~450 MB and nothing is superseded or pruned yet).
 #
 # ARTIFACT_STORE must be set explicitly. Its default is <repo root>/instance/
@@ -75,7 +74,7 @@ Environment=ARTIFACT_STORE=/app/artifacts
 # --- Required ---
 # Flask/Flask-Login session-signing key. No default, and deliberately NOT
 # filled in here: this file is public, so any value committed to it is a
-# published signing key. There is no server-side session row in this alpha,
+# published signing key. There is no server-side session row,
 # which makes the cookie signature the only thing authenticating a user --
 # a known key is a forged admin session with no password and no login event.
 # nethub/config.py refuses an absent key, a placeholder, and anything under
@@ -134,7 +133,7 @@ Environment=PHASE_CONCURRENCY=4
 # plus the login lockout would let anyone on the network keep it locked out.
 # Left unset, NetHub starts with no users and logs that one is needed; create
 # it with `podman exec -it nethub flask --app nethub create-admin <name>`.
-# Everyone who can log in is an admin in this alpha -- there are no roles yet.
+# The first account is an admin; admins create operators from the Users page.
 #Environment=ADMIN_USERNAME=
 
 # If ADMIN_USERNAME is set and neither of the password sources below is, a
@@ -149,8 +148,8 @@ Environment=PHASE_CONCURRENCY=4
 # Local-development escape hatch only -- turns on Werkzeug's interactive
 # debugger and reloader. NEVER set this in a deployed Quadlet unit: the
 # debugger renders frame locals -- including a submitted password -- into
-# an HTTP response on any unhandled exception (see CLAUDE.md's DEBUG hard
-# rule). It also has no effect here anyway -- gunicorn (ENTRYPOINT in
+# an HTTP response on any unhandled exception (docs/credentials.md
+# [debug-off]). It also has no effect here anyway -- gunicorn (ENTRYPOINT in
 # Containerfile) doesn't consult it; it exists for `flask run`/dev.sh.
 #Environment=DEBUG=1
 
@@ -165,7 +164,7 @@ Restart=on-failure
 # A core dump would write this process's heap -- which holds a submitted
 # device password for the length of the request that seals it -- to
 # /var/lib/systemd/coredump, where it outlives the credential by however long
-# the retention allows. See CLAUDE.md's note that this was a known-open item.
+# the retention allows.
 LimitCORE=0
 
 # /proc of other processes is not this container's business.

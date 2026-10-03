@@ -75,8 +75,8 @@ def client(app):
 @pytest.fixture
 def make_user(app):
     """Create a user with a known password, inside the app's db. An admin
-    unless `role` says otherwise, as every user was before roles (PLAN.md
-    WS-16), so tests that are not about roles need not care."""
+    unless `role` says otherwise, as every user was before roles, so tests that
+    are not about roles need not care."""
     def _make(username='alice', password='hunter2', role='admin'):
         with app.app_context():
             user = User(username=username, role=role)

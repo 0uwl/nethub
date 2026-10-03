@@ -36,11 +36,9 @@ hardware (a Catalyst 9200CX on IOS-XE 17.12.06, including two live
 upgrades); a full run driven end-to-end from the UI has not been done
 yet.
 
-See [CLAUDE.md](CLAUDE.md) for that slice's exact scope and its deliberate
-deviations from the design below. The full target architecture — data
-model, security model, failure/concurrency semantics — is written up in
-[design-document.md](design-document.md). Treat that document as the
-design target, not a description of current code.
+How it works, and why, is in [docs/](docs/index.md): one file per area of
+the code, describing what is built today. What is planned but not built is
+in [docs/future.md](docs/future.md).
 
 ## Running it
 
@@ -332,8 +330,9 @@ before being merged.
 
 ## Learn more
 
-- [design-document.md](design-document.md) — full architecture, security
-  model, data model, and open questions.
-- [CLAUDE.md](CLAUDE.md) — the settled decisions, and the list of things
-  that deliberately must not be built.
+- [docs/index.md](docs/index.md): architecture, security model, data
+  model, deployment, and where to look for each area of the code.
+- [docs/future.md](docs/future.md): what is not built, and the open
+  questions.
+- [CLAUDE.md](CLAUDE.md): the short version, with the hard rules.
 - [LICENSE](LICENSE)

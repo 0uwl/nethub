@@ -1,4 +1,4 @@
-"""Keeping the database at the schema this code expects (PLAN.md WS-6).
+"""Keeping the database at the schema this code expects.
 
 Upgrading NetHub is meant to be "back up the database, bump the image tag,
 restart". So the **web process** brings the database to the latest migration
@@ -52,8 +52,8 @@ class SchemaError(RuntimeError):
 
 # -- what a database created before migrations may carry ---------------------
 #
-# `create_all()` ran at every start before WS-6. It added missing *tables*, so
-# every pre-migration database has all of them, but it never added a column to
+# `create_all()` ran at every start before migrations existed. It added
+# missing *tables*, so every pre-migration database has all of them, but it never added a column to
 # a table that already existed and never removed one. These are the columns
 # that drifted, from the history of nethub/models.py, and what adoption does
 # about each. tests/fixtures/schemas/ holds real create_all() output from the
@@ -61,8 +61,8 @@ class SchemaError(RuntimeError):
 
 #: Columns the models deliberately deleted. Their values are dropped.
 RETIRED_COLUMNS = frozenset({
-    # WS-5 deleted the pull transport and shared account mode. On a database
-    # created before it, image_transport_used is NOT NULL with no default, so
+    # Left by the deleted pull transport and shared account mode. On such a
+    # database image_transport_used is NOT NULL with no default, so
     # every submit fails until it is gone.
     ('upgrade_runs', 'image_transport_used'),
     ('upgrade_runs', 'distribution_host_used'),
@@ -77,7 +77,7 @@ ADOPT_DEFAULTS = {
 
 #: Columns copied through an expression rather than as they are.
 ADOPT_EXPRESSIONS = {
-    # Before WS-2 there was no foreign key here, so a run could outlive the
+    # Older databases had no foreign key here, so a run could outlive the
     # artifact it named with the id left dangling. ON DELETE SET NULL is what
     # the key now does; apply it to rows that predate the key.
     ('upgrade_run_hosts', 'artifact_id'):

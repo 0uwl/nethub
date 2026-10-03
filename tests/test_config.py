@@ -35,8 +35,8 @@ def test_absent_key_is_refused(monkeypatch):
 
 
 def test_the_quadlet_placeholder_is_refused(monkeypatch):
-    # The exact string the reference unit used to ship. Refusing an absent key
-    # was never enough: a published placeholder is a forgeable admin session.
+    # A placeholder a copied example unit could carry. Refusing an absent key
+    # is not enough: a published placeholder is a forgeable admin session.
     with pytest.raises(ValueError, match='known placeholder'):
         _reload(monkeypatch, 'CHANGE_ME_use_openssl_rand_hex_32')
 

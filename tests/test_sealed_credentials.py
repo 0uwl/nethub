@@ -1,4 +1,4 @@
-"""Checks for nethub/sealed_credentials.py (PLAN.md WS-7).
+"""Checks for nethub/sealed_credentials.py.
 
 The sealed box is libsodium's; what is ours, and tested here, is what gets
 sealed, what opening it checks, and how the keys are found. Every refusal is

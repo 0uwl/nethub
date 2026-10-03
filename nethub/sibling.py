@@ -1,6 +1,6 @@
 """The dispatch process: claims phase jobs, runs them, advances the run.
 
-Design doc §7.3 and §9. This is a *separate process* from Flask, in its own
+See docs/dispatch.md. This is a *separate process* from Flask, in its own
 unit and its own PID namespace -- distinct namespaces are what prevent
 same-uid `ptrace` between the two, so never put them in a shared `Pod=`.
 
@@ -8,10 +8,9 @@ Everything after a job row is created belongs here. Flask writes exactly one
 job edge (the `queued` row); the sibling writes every other one, plus the
 per-host rows via `phases.execute_phase`. The startup sweep lives here rather
 than in Flask so it can never fire against a run that is healthy under another
-process -- with the consequence, stated in §7.3, that a sibling which dies and
-stays dead is swept by nobody. Flask reads `heartbeat_at` and renders
-"stalled" instead (`nethub/worker_status.py`, PLAN.md WS-11); noticing is not
-the sweep's job.
+process -- with the consequence that a sibling which dies and stays dead is
+swept by nobody. Flask reads `heartbeat_at` and renders "stalled" instead
+(`nethub/worker_status.py`); noticing is not the sweep's job.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ from nethub.sealed_credentials import CredentialError, open_sealed
 
 #: What runs next once a phase succeeds. `None` means a gate: the run parks at
 #: `awaiting_approval` until a human approves the next phase. `verify` follows
-#: `activate` with no gate because §8.1's table gives it none -- it is
+#: `activate` with no gate -- it is
 #: read-only and runs on completion, on activate's credential (`run_once`).
 NEXT_PHASE = {
     'precheck': ('stage', True),
@@ -52,8 +51,8 @@ NEXT_PHASE = {
 DEFAULT_GATE_TTL = timedelta(days=7)
 
 #: Hosts a phase runs at once unless `PHASE_CONCURRENCY` says otherwise
-#: (PLAN.md decision 6). The setting lives in `shared_config`, because the
-#: web process shows it as the cap on an activate approval (WS-15).
+#:. The setting lives in `shared_config`, because the
+#: web process shows it as the cap on an activate approval.
 DEFAULT_PHASE_CONCURRENCY = shared_config.DEFAULT_PHASE_CONCURRENCY
 phase_concurrency = shared_config.phase_concurrency
 
@@ -78,7 +77,7 @@ class Sibling:
 
     It is a UUID and never a PID: a PID is reused across container restarts
     and is meaningless across PID namespaces, so a sweep keyed on one would
-    either miss abandoned rows or steal live ones (§7.3).
+    either miss abandoned rows or steal live ones.
     """
 
     #: The sibling's private key (nethub/sealed_credentials.py). Only this
@@ -92,8 +91,8 @@ class Sibling:
     #: Handed to every `PhaseContext`; None means `phases.default_connect`.
     #: Only the end-to-end test sets it, to put a fake device behind a real run.
     connect: Callable | None = None
-    #: Hosts a phase runs at once (PLAN.md WS-9), and the cap on the reload
-    #: count an activate approval chose (WS-15). `main()` reads it from
+    #: Hosts a phase runs at once, and the cap on the reload
+    #: count an activate approval chose. `main()` reads it from
     #: `PHASE_CONCURRENCY`.
     phase_concurrency: int = DEFAULT_PHASE_CONCURRENCY
     #: How often a running phase writes its heartbeat and runs queued scans.
@@ -138,8 +137,8 @@ class Sibling:
         return len(stale)
 
     def _sweep_stale_scans(self) -> None:
-        """Mark a `HostKeyScan` left `running` by a dead instance `abandoned`
-        (WS-6.2b). Folded into `sweep()` rather than a separate call so
+        """Mark a `HostKeyScan` left `running` by a dead instance `abandoned`.
+        Folded into `sweep()` rather than a separate call so
         nothing has to remember to invoke both; same NULL-safe predicate as
         the phase-job sweep above, same reasoning. Not counted in `sweep()`'s
         return value -- that return is a count of phase rows, asserted
@@ -160,18 +159,13 @@ class Sibling:
     def _abandon_run(self, job: UpgradePhaseJob) -> None:
         """Park the run back at this phase's gate, rather than failing it.
 
-        §7.3: "An `abandoned` device-touching phase needs a fresh approval,
-        not an auto-retry -- the approval is what supplies the credential and
-        names the human. The retry is a new row with an incremented
-        `attempt`." That retry was unreachable: this used to call
-        `_fail_run`, so the run went terminal and `approve()`'s first guard
-        (`run.state != 'awaiting_approval'`) refused forever. The whole
-        mechanism was built for -- `models.py` says `attempt` exists to permit
-        it, and `approve()` computes `1 + count(abandoned)` -- and that
-        expression had never returned anything but 1.
+        An abandoned device-touching phase needs a fresh approval, never an
+        auto-retry: the approval supplies the credential and names the human
+        (docs/dispatch.md [abandoned-needs-approval]). Approving again writes
+        the next `attempt`.
 
         Only a phase someone *can* approve is parked. `precheck` has no gate
-        by design (§8.1) and `verify` follows `activate` without one, so
+        by design and `verify` follows `activate` without one, so
         parking either would leave the run at `awaiting_approval` with an
         `awaiting_phase` that `approve()` refuses as "not a phase anyone
         approves" -- stuck rather than failed, which is worse. Those stay
@@ -207,7 +201,7 @@ class Sibling:
         run.finished_at = None
 
     def _return_to_gate(self, job: UpgradePhaseJob) -> None:
-        """Undo an abandoned retry of `precheck` or `verify` (PLAN.md WS-8).
+        """Undo an abandoned retry of `precheck` or `verify`.
 
         Nobody approves either phase, so there is no gate of its own to park
         it at; failing the run would throw away every host that had passed.
@@ -237,7 +231,7 @@ class Sibling:
         `failure_stage='internal'`, not `connect`: nothing here says the device
         was at fault, and `connect` sent operators looking at the network.
         The summary is fixed text. The exception went to the log, and
-        `error_summary` is retained for a year (§7.4).
+        `error_summary` is retained for a year.
         """
         jobs = UpgradePhaseJob.query.filter_by(
             status='running', runner_instance_id=self.runner_instance_id
@@ -263,7 +257,7 @@ class Sibling:
     def expire_gates(self) -> int:
         """Move runs parked at a gate past `gate_expires_at` to `expired`.
 
-        §7.3 gives this edge to the sibling. No job row exists at a gate (the
+        This edge belongs to the sibling. No job row exists at a gate (the
         approval is what writes one), so only the run changes. Candidates are
         compared in Python, through `_aware`, because SQLite hands the column
         back naive; there are few parked runs. The write is then conditional on
@@ -296,11 +290,11 @@ class Sibling:
     def tick(self) -> str | None:
         """One pass of `main()`'s loop. Returns None when there was nothing to do.
 
-        A scan is checked before a phase job every pass (WS-6.2b): it is
+        A scan is checked before a phase job every pass: it is
         bounded by `connection.CONNECT_TIMEOUT` and an admin is very likely
         watching the result page. A scan queued while a phase is running does
         not wait for this pass: `execute_phase` calls `_between_hosts` on
-        every heartbeat tick, which runs it then (PLAN.md WS-9).
+        every heartbeat tick, which runs it then.
         """
         try:
             self.expire_gates()
@@ -328,7 +322,7 @@ class Sibling:
         """Claim the job and take its sealed credential off the row, at once.
 
         A read-then-write double-claims under WAL, and nothing enforces that
-        only one sibling is running (§9.1) -- so the claim has to be the
+        only one sibling is running -- so the claim has to be the
         `WHERE status='queued'` itself, with the rowcount as the answer.
 
         The ciphertext is cleared in that same statement, so a claimed job
@@ -362,8 +356,8 @@ class Sibling:
 
     def next_queued(self) -> UpgradePhaseJob | None:
         """One FIFO queue, ordered by `created_at` -- `started_at` is null
-        until dispatch, so there is nothing else to order by (§5) -- except
-        the start time an approver chose (`models.due_at`, PLAN.md WS-14).
+        until dispatch, so there is nothing else to order by -- except
+        the start time an approver chose (`models.due_at`).
 
         A job scheduled for tonight is skipped rather than blocking the
         queue: it is not "next", it is not due. Everything that follows is
@@ -390,7 +384,7 @@ class Sibling:
             .first()
         )
 
-    # -- host-key scans (WS-6.2b) -------------------------------------------
+    # -- host-key scans -------------------------------------------
     #
     # A scan is dispatched exactly like a phase job -- same conditional-claim
     # shape, same queue shape -- but simpler: no credential, no PhaseContext,
@@ -440,10 +434,9 @@ class Sibling:
             key = connection.scan_host_key(scan.ansible_host)
         except connection.DeviceConnectionError as exc:
             scan.status = 'failed'
-            # phases._summarise reads exc.summary rather than str(exc)
-            # (WS-4.2) -- the same "state the fault, don't quote the OS or
-            # the peer" discipline as everywhere else a device exception is
-            # recorded, folding in WS-5.4's fix for this specific finding.
+            # phases._summarise reads exc.summary rather than str(exc): state
+            # the fault, don't quote the OS or the peer
+            # (docs/credentials.md [error-summary-reads-summary-attr]).
             scan.error_summary = phases._summarise(exc)
             scan.finished_at = self.now()
             db.session.commit()
@@ -552,12 +545,12 @@ class Sibling:
             return self._finish(job, 'expired')
         return None
 
-    # -- the run state machine (§7.3) -------------------------------------
+    # -- the run state machine -------------------------------------
     @staticmethod
     def _supplier(job: UpgradePhaseJob) -> int:
         """Whose credential this job must carry: the approver for a gated
-        phase, the submitter for pre-check, which has no gate (§8.1). Refusing
-        a null here once failed every pre-check dispatched."""
+        phase, the submitter for pre-check, which has no gate. Requiring a
+        non-null approver here would fail every pre-check."""
         return job.approved_by if job.approved_by is not None else job.run.submitted_by
 
     def _finish(self, job: UpgradePhaseJob, status: str) -> str:
@@ -565,7 +558,7 @@ class Sibling:
 
         The ciphertext goes in the same update, because the terminal-status
         trigger forbids touching the row afterwards. An expired job that was
-        carrying one says so (maintainer decision, PLAN.md WS-7): the operator
+        carrying one says so: the operator
         sees a credential that waited past its deadline, not a bare `expired`.
         """
         if status == 'expired' and job.sealed_credential is not None:
@@ -595,7 +588,7 @@ class Sibling:
         on the same credential (see `run_once`); None otherwise.
 
         A phase with a gate of its own that stopped on its first attempt goes
-        back to that gate (PLAN.md WS-15, decision 13): a refused password, a
+        back to that gate: a refused password, a
         fault in NetHub's code, a failed canary or a bad image in the store
         left the hosts it did not reach where they were, so approving the gate
         again runs them. That is what keeps a mistyped password from failing
@@ -608,8 +601,8 @@ class Sibling:
         Parking goes through `_park`, so a cancel requested while the phase
         ran ends the run instead of putting it back in front of approvers.
 
-        A `partial` phase moves the run on with the hosts that passed (PLAN.md
-        WS-8). So does a `failed` one while hosts that passed earlier phases
+        A `partial` phase moves the run on with the hosts that passed. So does
+        a `failed` one while hosts that passed earlier phases
         are still in the run: that is a retry, or a re-approved abandoned
         phase, that got nowhere, and the run goes back to the gate it was at
         with those hosts intact. On a first attempt `failed` means every host
@@ -648,7 +641,7 @@ class Sibling:
             # An approval is a row, so the run parks here until a human writes
             # one. `awaiting_phase` says which gate -- inferring it from the
             # highest phase row present cannot tell "awaiting cleanup" from
-            # "cleanup declined" (§5).
+            # "cleanup declined".
             self._park(run, following)
             return None
         run.state = 'running'
@@ -659,7 +652,7 @@ class Sibling:
         previous = (db.session.query(db.func.max(UpgradePhaseJob.attempt))
                     .filter_by(run_id=run.id, phase=following).scalar())
         # Only `verify` gets here, and it runs on `activate`'s credential, so
-        # the device sees the same username (PLAN.md WS-16).
+        # the device sees the same username.
         queued = UpgradePhaseJob(
             run_id=run.id, phase=following, attempt=(previous or 0) + 1, status='queued',
             created_at=self.now(), device_username_used=job.device_username_used,
@@ -677,7 +670,7 @@ def _database_app():
     `SECRET_KEY`: the sibling signs nothing, and should not hold the key that
     forges an admin session. The two processes share the database settings
     and nothing else -- separate units in separate PID namespaces on
-    purpose (§9).
+    purpose.
     """
     from flask import Flask
 
@@ -696,8 +689,8 @@ def main(poll_interval: float = 5.0) -> None:
     upgrade it waits here until the web unit's startup has brought the
     database to the revision this code expects.
 
-    `NETHUB_SEARCH_DIR` is the published subtree the push reads from (§3.3 --
-    NetHub is the one source of the bytes). The private key comes from the
+    `NETHUB_SEARCH_DIR` is the published subtree the push reads from (NetHub
+    is the one source of the bytes). The private key comes from the
     systemd credential `credential_private_key` or `NETHUB_CREDENTIAL_KEY_FILE`,
     and must match `NETHUB_CREDENTIAL_PUBLIC_KEY`, the key Flask seals to.
     `PHASE_CONCURRENCY` is how many hosts a phase runs at once (default 4).

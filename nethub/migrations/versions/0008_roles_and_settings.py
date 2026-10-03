@@ -1,4 +1,4 @@
-"""Roles, settings and the two-person rules (PLAN.md WS-16).
+"""Roles, settings and the two-person rules.
 
 Revision ID: 0008_roles_and_settings
 Revises: 0007_scheduled_approvals
@@ -7,7 +7,7 @@ Create Date: 2026-10-01
 - `user.role`, `admin` or `operator`. Every user that exists now becomes an
   admin, which is what everyone was before roles, so nobody loses access.
 - `role_changed` joins `user_admin_audit.action`.
-- `settings` and the append-only `settings_audit` (design doc §5), holding the
+- `settings` and the append-only `settings_audit`, holding the
   three two-person rules for now.
 - `artifacts.published_by`/`published_at` and `delete_requested_by`/`_at`, and
   an append-only `artifact_audit` that outlives the row a delete removes;

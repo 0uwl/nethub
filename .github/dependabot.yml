@@ -1,4 +1,4 @@
-# Keeps the pins in this repository moving (PLAN.md WS-12). Pinning every
+# Keeps the pins in this repository moving. Pinning every
 # action to a commit, every Python package to a hash and the base image to a
 # digest stops anything changing without a diff; without something proposing
 # those diffs, the pins just rot, and a stale pin is its own vulnerability.

@@ -2,7 +2,7 @@
 
 No device, and no reload. The guards and the reconnect loop are what is
 testable here; the install command itself is exercised only through its
-output handling, which is where the ported playbook had no coverage at all.
+output handling.
 """
 
 import pytest
@@ -121,7 +121,7 @@ class TestGuards:
         assert excinfo.value.status == "image_missing"
 
     def test_present_image_with_the_wrong_bytes_is_refused(self):
-        """The gap in the playbook: a `dir` check passes a failed staging."""
+        """A `dir` check would pass a failed staging; the verify does not."""
         device = FakeDevice(digest=OTHER_DIGEST)
         with pytest.raises(Exception) as excinfo:
             install.assert_ready_to_activate(
@@ -131,7 +131,7 @@ class TestGuards:
         assert "install add" not in " ".join(device.commands)
 
     def test_an_uppercase_or_padded_digest_is_normalised_before_comparing(self):
-        """WS-4.4: stage_image already normalises (transfer._normalise_digest);
+        """stage_image already normalises (transfer._normalise_digest);
         without the same normalisation here, an uppercase or whitespace-padded
         digest that staged successfully would be refused at activate with an
         error whose two halves differ only in case."""
@@ -253,7 +253,7 @@ class TestWaitForDevice:
         assert now["t"] <= 180 + 30
 
     def test_reload_timeout_summary_omits_the_last_attempts_text(self):
-        """WS-4.2: `message` still names the last attempt's exception for
+        """`message` still names the last attempt's exception for
         local debugging, but `summary` -- the year-retained column -- must
         not repeat it."""
         _now, clock, sleep = self.make_clock()
@@ -271,7 +271,7 @@ class TestWaitForDevice:
         assert "hunter2" in str(excinfo.value), "message may still carry it for debugging"
 
     def test_an_authentication_error_is_not_treated_as_transient(self):
-        """WS-4.1: with the same credential presented on every reconnect
+        """With the same credential presented on every reconnect
         attempt, retrying a rejected credential risks tripping a fleet-wide
         AAA lockout. It must propagate immediately rather than being retried
         or folded into ReloadTimeout."""
@@ -287,13 +287,13 @@ class TestWaitForDevice:
         assert len(attempts) == 1, "must not retry a rejected credential"
 
     def test_a_hostkey_error_is_still_treated_as_transient_for_now(self):
-        """WS-4.1/WS-7.3: unlike AuthenticationError above, HostKeyError is
+        """Unlike AuthenticationError above, HostKeyError is
         deliberately left on the transient path until the open hardware
-        question in WS-7.3 (can an IOS-XE upgrade legitimately regenerate a
-        device's host key?) is answered. This test pins that as a deliberate
+        question (can an IOS-XE upgrade legitimately regenerate a device's host
+        key? docs/future.md §4) is answered. This test pins that as a deliberate
         choice, not an oversight -- if it starts failing because someone
-        carved out HostKeyError too, update this test only after WS-7.3 has
-        actually been answered."""
+        carved out HostKeyError too, update this test only after that question
+        has actually been answered."""
         _now, clock, sleep = self.make_clock()
         results = [
             connection.HostKeyError("changed"),

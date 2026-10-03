@@ -1,4 +1,4 @@
-"""Scheduled approvals: an approval may carry a start time (PLAN.md WS-14).
+"""Scheduled approvals: an approval may carry a start time.
 
 Revision ID: 0007_scheduled_approvals
 Revises: 0006_canary_activation

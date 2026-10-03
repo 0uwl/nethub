@@ -1,9 +1,6 @@
 """Artifact routes: the ingest UI, plus the `check-store` CLI command.
 
-Thin over `nethub/artifacts.py`. This replaced `registry_routes.py` at build
-step 7; there is no longer a file to adopt or a pointer row to manage, so the
-two-blueprint split that layer needed (`registries` for files, `registry` for
-their entries) collapses into one.
+Thin over `nethub/artifacts.py` (docs/artifacts.md).
 """
 import click
 from flask import (

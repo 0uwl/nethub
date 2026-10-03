@@ -1,14 +1,14 @@
-"""What the web pages can say about the sibling, read from rows (PLAN.md WS-11).
+"""What the web pages can say about the sibling, read from rows.
 
-Flask writes a `queued` row and stops (design doc §9); the sibling does the
+Flask writes a `queued` row and stops; the sibling does the
 rest. A sibling that is not running, or that died mid-phase, changes nothing,
 so without these checks the pages just say "still working" forever. Every
-function here reads and none writes: the sweep is the sibling's job (§7.3),
+function here reads and none writes: the sweep is the sibling's job,
 and Flask noticing a dead worker must not turn into Flask failing its rows.
 
 There is no sibling heartbeat outside a running phase, so "is anything
-picking up work" is inferred from the queue itself (maintainer decision,
-2026-09-28): something has waited longer than `NO_WORKER_AFTER` while nothing
+picking up work" is inferred from the queue itself: something has waited longer
+than `NO_WORKER_AFTER` while nothing
 is running with a fresh heartbeat. An idle, healthy sibling claims a queued
 row within its poll interval, and a busy one has a running job whose
 heartbeat is fresh, so neither trips this.
@@ -21,7 +21,7 @@ from .models import HostKeyScan, UpgradePhaseJob, due_at
 from .upgrades import _utcnow
 
 #: A running phase writes `heartbeat_at` every `HEARTBEAT_INTERVAL` while its
-#: hosts are in flight (WS-9). Three missed beats is a stall, not a slow tick:
+#: hosts are in flight. Three missed beats is a stall, not a slow tick:
 #: a tick can also run a queued host-key scan, which is bounded by the
 #: connection timeout, well inside this.
 STALLED_AFTER = timedelta(seconds=3 * HEARTBEAT_INTERVAL)
@@ -62,8 +62,8 @@ def _live_work(now):
 
 def is_waiting(job, now=None):
     """True for a queued job the sibling could take right now. A job approved
-    for a maintenance window is queued but not waiting until then (PLAN.md
-    WS-14), so it must not read as a job nothing is picking up."""
+    for a maintenance window is queued but not waiting until then, so it must
+    not read as a job nothing is picking up."""
     if job.status != 'queued':
         return False
     start = _aware(job.not_before)
@@ -100,7 +100,7 @@ def no_worker(now=None):
 def queue_depth(now=None):
     """`(queued, running)` phase jobs across every run: what an approval made
     now would wait behind. The sibling runs one phase execution at a time,
-    oldest first (§9), so this is the whole queue, not this run's share.
+    oldest first, so this is the whole queue, not this run's share.
 
     Jobs scheduled for later are not counted: they are not ahead of an
     approval made now, and the sibling skips them until they are due.

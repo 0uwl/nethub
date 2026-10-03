@@ -6,7 +6,7 @@ Create Date: 2026-09-24
 
 `Sibling.recover_own()` records an error in NetHub's own code. It used
 `connect`, the closest word available, which read as a device connection
-problem (PLAN.md "Found while working", from WS-1).
+problem.
 
 The vocabulary is a CHECK constraint, and SQLite cannot alter a constraint in
 place, so both tables that carry it are rebuilt (batch mode: new table, copy,

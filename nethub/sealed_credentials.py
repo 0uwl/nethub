@@ -1,4 +1,4 @@
-"""Device credentials sealed into the job row (PLAN.md WS-7, design doc §9.1).
+"""Device credentials sealed into the job row.
 
 An approval collects the approver's device password. Flask seals it to the
 sibling's **public** key with libsodium's sealed box (PyNaCl `SealedBox`) and
