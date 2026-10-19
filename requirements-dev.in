@@ -10,7 +10,7 @@
 pytest==9.1.1
 # Pinned so the lockfile check in CI regenerates with the same resolver and
 # header this file was compiled with.
-pip-tools==7.6.1
+pip-tools==7.6.2
 # The linters CI runs, here rather than in an unhashed `pip install` in the
 # workflow, so they are hash-checked too and a local `pip install -r
 # requirements-dev.txt` gets exactly CI's versions. That matters: ruff 0.16
