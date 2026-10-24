@@ -29,7 +29,7 @@ Flask-Migrate==4.1.0
 alembic==1.20.0
 gunicorn==26.2.0
 # Seals device credentials into the job row. Already installed
-# as a paramiko dependency; pinned in its own right because NetHub now calls
+# as a paramiko dependency; pinned in its own right because NetHub calls
 # it directly and a change in it changes what can open a stored credential.
 PyNaCl==1.6.2
 netmiko==4.8.0
