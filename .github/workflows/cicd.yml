@@ -1,7 +1,6 @@
-name: CI/CD
+name: CI
 
-# Structure taken from DynaForm's cicd.yml, adapted for NetHub
-# (docs/deployment.md §4). Every `uses:` is pinned to a commit SHA with its
+# Every `uses:` is pinned to a commit SHA with its
 # tag as a comment, because a tag can be moved to other code after the fact and
 # this workflow can publish images; Dependabot proposes the bumps
 # (.github/dependabot.yml) and zizmor, in the lint job, fails a new unpinned

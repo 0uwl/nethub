@@ -4,7 +4,7 @@
 # resolve): a rebuild of the same commit gets the same Debian and Python, and a
 # base change arrives as a reviewable diff -- Dependabot's docker ecosystem
 # proposes the new digest weekly. The cost is that Debian security fixes land
-# only through that bump; the weekly scan of the published image (cicd.yml,
+# only through that bump; the weekly scan of the published image (ci.yml,
 # scan-published) is what notices when one is overdue.
 # uv runs only in this stage, to turn uv.lock into a hashed requirements file
 # that plain pip installs below; it never reaches the final image. The uv

@@ -13,7 +13,7 @@
 # scan of the published image instead.
 version: 2
 updates:
-  # The SHA pins in .github/workflows/cicd.yml and in the local composite
+  # The SHA pins in .github/workflows/ci.yml and in the local composite
   # action it calls. Dependabot rewrites the SHA and the version comment beside
   # it together. `/` covers .github/workflows only; a composite action's own
   # `uses:` lines are found only if its directory is listed as well.
@@ -44,7 +44,7 @@ updates:
   # The python:3.12-slim and uv image digests in Containerfile and
   # Containerfile.dev. This is how Debian security fixes reach the image, so it
   # has the shortest cooldown. The uv image only runs `uv export` at build time;
-  # bump the uv version in cicd.yml with it.
+  # bump the uv version in ci.yml with it.
   # Digest updates only: moving to 3.13-slim changes the Python the lockfiles
   # were compiled for, which is a deliberate change of its own (regenerate the
   # locks on the new version, update CI's python-version), not a weekly bump.

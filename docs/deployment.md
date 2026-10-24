@@ -1,5 +1,5 @@
 # Deployment
-Code: `Containerfile`, `Containerfile.dev`, `dev.sh`, `nethub/gunicorn.conf.py`, `quadlet/nethub.container`, `quadlet/nethub-sibling.container`, `nethub/shared_config.py`, `nethub/config.py`, `nethub/credentials.py`, `.github/workflows/cicd.yml`, `.github/actions/trivy-scan/`, `.github/dependabot.yml`, `scripts/smoke_test.sh`, `scripts/trivy_report.sh`, `pyproject.toml`, `uv.lock` · Tests: `tests/test_config.py`, `tests/test_credentials.py`, `scripts/smoke_test.sh` (run in CI)
+Code: `Containerfile`, `Containerfile.dev`, `dev.sh`, `nethub/gunicorn.conf.py`, `quadlet/nethub.container`, `quadlet/nethub-sibling.container`, `nethub/shared_config.py`, `nethub/config.py`, `nethub/credentials.py`, `.github/workflows/ci.yml`, `.github/actions/trivy-scan/`, `.github/dependabot.yml`, `scripts/smoke_test.sh`, `scripts/trivy_report.sh`, `pyproject.toml`, `uv.lock` · Tests: `tests/test_config.py`, `tests/test_credentials.py`, `scripts/smoke_test.sh` (run in CI)
 
 ---
 
@@ -167,7 +167,7 @@ Pinned by: `scripts/smoke_test.sh`
 
 ---
 
-## 4. CI and releases (`.github/workflows/cicd.yml`)
+## 4. CI and releases (`.github/workflows/ci.yml`)
 
 ### 4.1 [ci-jobs]
 **[SPEC]**
@@ -366,7 +366,7 @@ not run the units under systemd or Quadlet.
 - When Python moves past 3.12, update the workflow's `python-version`,
   `requires-python` in `pyproject.toml` and the base image, then run
   `uv lock`. Dependabot sends digest updates for the base image only.
-- The uv version in `cicd.yml` and the uv image in the Containerfiles are
+- The uv version in `ci.yml` and the uv image in the Containerfiles are
   bumped separately (actions and docker ecosystems). A mismatch is harmless,
   because `uv lock --check` compares content.
 - The `:z` volumes have not been tested on an enforcing SELinux host.
