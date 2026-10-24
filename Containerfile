@@ -6,7 +6,7 @@
 # proposes the new digest weekly. The cost is that Debian security fixes land
 # only through that bump; the weekly scan of the published image (cicd.yml,
 # scan-published) is what notices when one is overdue.
-FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
