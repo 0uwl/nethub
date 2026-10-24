@@ -55,7 +55,7 @@ jobs:
       - name: yamllint
         run: uv run --no-sync yamllint .
       - name: shellcheck
-        run: uv run --no-sync shellcheck scripts/*
+        run: uv run --no-sync shellcheck scripts/*.sh
       - name: zizmor (workflow audit)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
