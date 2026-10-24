@@ -1,14 +1,14 @@
 # NetHub
 
-> NetHub is in early bootstrap — see [Project status](#project-status)
-> below for what's actually implemented.
+> NetHub is in very early development and not guaranteed to work. 
+> See [Project status](#project-status) below for what's actually implemented.
 
 NetHub is a small, self-hosted dashboard that unifies both halves of a
 network device's lifecycle in one Flask app, one database, one admin UI:
 
-- **Provisioning (day-0)** — a new device phones home, is checked against
+- **Provisioning (day-0)** - a new device phones home, is checked against
   a serial allowlist, and receives its initial config/image.
-- **Software Lifecycle (day-2)** — admins onboard IOS-XE software images
+- **Software Lifecycle (day-2)** - admins onboard IOS-XE software images
   and install them on devices, one approval gate per phase.
 
 It's aimed at smaller teams who want ZTP + upgrade management without
@@ -28,8 +28,7 @@ Software Lifecycle exists: local username/password auth with two roles
 (admin and operator) and optional two-person rules, an artifact store NetHub owns, a
 fail-closed SSH host-key pin, and the day-2 upgrade path.
 
-There is no Ansible anywhere in this repo any more. Device work is
-ordinary Python over [Netmiko](https://github.com/ktbyers/netmiko) in
+Device work is ordinary Python over [Netmiko](https://github.com/ktbyers/netmiko) in
 `nethub/devices/`, dispatched out-of-band by a sibling process rather
 than from a request handler. The device layer is validated against real
 hardware (a Catalyst 9200CX on IOS-XE 17.12.06, including two live
@@ -40,7 +39,71 @@ How it works, and why, is in [docs/](docs/index.md): one file per area of
 the code, describing what is built today. What is planned but not built is
 in [docs/future.md](docs/future.md).
 
-## Running it
+## Deploying NetHub
+
+NetHub is deployed as two rootless Podman Quadlet units on one host:
+`quadlet/nethub.container` serves the UI, and
+`quadlet/nethub-sibling.container` does all of the device work. Both run
+the same image, published to
+[`ghcr.io/0uwl/nethub`](https://github.com/0uwl/nethub/pkgs/container/nethub)
+for each release. Every environment variable is documented inline in the
+units.
+
+```bash
+# 1. Pull the image and give it the name both units run.
+podman pull ghcr.io/0uwl/nethub:latest
+
+# 2. Make the volumes and the sibling's key pair. Device passwords are sealed
+#    with the public key, and only the private key can open them, so the
+#    private key is only mounted into the sibling unit.
+mkdir -p ~/.local/share/nethub/{data,artifacts} ~/.config/nethub
+podman run --rm --userns=keep-id:uid=1000,gid=1000 -v ~/.config/nethub:/keys:z \
+  --entrypoint python ghcr.io/0uwl/nethub:latest \
+  -m nethub.sealed_credentials keygen --out /keys/credential_private_key
+
+# 3. Create the unit directory and install the units
+mkdir -p ~/.config/containers/systemd/
+cp quadlet/nethub.container quadlet/nethub-sibling.container \
+  ~/.config/containers/systemd/
+```
+
+1. Edit both copies in `~/.config/containers/systemd/`:
+   - **`nethub.container`:** set `SECRET_KEY` (`openssl rand -hex 32`),
+     preferably as a systemd credential rather than plaintext. Also set
+     `NETHUB_CREDENTIAL_PUBLIC_KEY`, `DEVICE_TARGET_CIDRS` (every run submission
+     is refused while it's unset) and `ADMIN_USERNAME`.
+   - **`nethub-sibling.container`:** use the same
+     `NETHUB_CREDENTIAL_PUBLIC_KEY`, and uncomment the private key's
+     `Volume=` and `NETHUB_CREDENTIAL_KEY_FILE=` lines.
+2. Start both units:
+   `systemctl --user daemon-reload && systemctl --user start nethub nethub-sibling`.
+
+On first boot, NetHub creates the admin account named by `ADMIN_USERNAME`
+and prints a random password once to `journalctl --user -u nethub`, unless
+you supplied `ADMIN_PASSWORD`. If `ADMIN_USERNAME` is unset, NetHub starts
+with no users. Create the admin with
+`podman exec -it nethub flask --app nethub create-admin <name>`.
+
+You need both units. Without the sibling, the UI accepts work and never
+performs it, so scans and upgrades sit at "Still working".
+
+The session cookie is `Secure` by default, so a deployment reached over plain
+HTTP needs a TLS terminator in front of it. `http://localhost:8080` works
+(browsers treat localhost as a trustworthy origin). Over a LAN address
+without TLS, the browser silently drops the cookie, and login bounces back
+to the form. Set `SESSION_COOKIE_INSECURE=1` to prevent that, but only for
+local testing.**
+
+### Building from source 
+To run your own build instead of the published image, build it with a local
+tag and change the units to use the newly built image, then restart them:
+```bash
+podman build -t localhost/nethub:latest -f Containerfile .
+scripts/smoke_test.sh                  # optional: runs tests the same way the units do
+systemctl --user restart nethub nethub-sibling
+```
+
+### Running it locally
 
 ```bash
 pip install --require-hashes -r requirements-dev.txt   # the runtime set plus
@@ -58,54 +121,17 @@ flask --app nethub create-admin <username>   # bootstrap the first login user --
                                               # there is no self-registration route
 ```
 
-The database is created, and kept up to date, by NetHub itself: every start
+The database is created and kept up to date by NetHub itself: every start
 applies any pending migrations before serving (see
 [Upgrading NetHub](#upgrading-nethub)). `flask --app nethub db current` and
 `flask --app nethub db history` show where a database stands.
 
 Uploaded image bytes land in `instance/artifacts/` (next to the repo
-root) — set `ARTIFACT_STORE` to point it elsewhere, and do set it in a
+root). Set `ARTIFACT_STORE` to point it elsewhere, and do set it in a
 container, where the default falls on a read-only layer. Submitting an
 upgrade also needs `DEVICE_TARGET_CIDRS`, which has no default and
 refuses every submit while unset. See [Using it](#using-it) below for the
 admin flow.
-
-```bash
-pytest                            # runs tests/ -- see tests/conftest.py for the
-                                   # app/client fixtures (temp DB + artifact store per test)
-```
-
-`.github/workflows/cicd.yml` runs on every pull request and push to `main`:
-lint (`ruff`, `yamllint`, `shellcheck`, the `Containerfile`, `zizmor` over
-the workflow itself, and a check that the lockfiles match their `.in`
-files), the test suite, and an image build that is smoke-tested
-(`scripts/smoke_test.sh`: web and sibling containers started the way the
-Quadlet units start them) and scanned by Trivy for fixable CRITICAL and HIGH
-CVEs. It also scans the published image weekly. The scans report and do not
-fail the build: findings are listed in the job summary, flagged as a warning
-on the run, and uploaded to the repository's Security tab (Code scanning).
-Most are in the Debian base image and are fixed by Dependabot's base-image
-update; one in a pinned Python package is fixed by bumping the pin. Dependabot proposes updates to
-the pinned actions, Python packages and base image. A merge to `main` publishes
-nothing; see [Releasing](#releasing).
-
-To change a dependency, edit `requirements.in` (or `requirements-dev.in`) and
-regenerate both lockfiles on Python 3.12 with the commands at the top of
-`requirements.in`. CI fails a pull request whose lockfiles are stale.
-
-To run the smoke test locally against an image you built:
-`scripts/smoke_test.sh localhost/nethub:latest` (podman, as the units use;
-`ENGINE=docker` also works).
-
-### Releasing
-
-Push a version tag: `git tag v1.4.0 && git push origin v1.4.0`. CI lints and
-tests, builds the image, runs the smoke test and the Trivy scan (which reports
-findings but does not stop the release), and only then pushes `ghcr.io/<owner>/nethub` as `:1.4.0`, `:1.4` and `:latest` (amd64 and
-arm64), then creates the GitHub release with generated notes. A tag with a
-hyphen (`v1.4.0-rc1`) is a prerelease: it publishes `:1.4.0-rc1` only, never
-`:latest`. A release drafted by hand in the web UI works too; its notes are
-left alone.
 
 ## Using it
 
@@ -117,62 +143,58 @@ creates on the **Users** page is an operator unless the admin picks admin.
 
 Once you're logged in:
 
-1. **Profile** — set your *device* username: the name NetHub logs into
-   switches with on your behalf. It is separate from your NetHub login,
-   is read server-side so a request can never assert it, and an upgrade
-   cannot be submitted without it.
-2. **Artifacts → Upload an image** — publish an image: a bundle key (what
-   an upgrade request names to select it), a version, the image's
-   SHA-512, and the file. NetHub hashes the bytes as it receives them
-   and rejects the upload if the digest doesn't match what you claimed;
-   the submitted checksum is the claim being verified, never what gets
-   recorded.
-3. **Host keys → Scan** — for each device address, fetch its SSH host
-   key and compare the fingerprint against the device itself, out of
-   band. Then **Confirm** it. This spends no credential, and an address
-   with no confirmed key cannot be named by a run at all — first contact
-   is a deliberate action by a person rather than trust-on-first-use.
-4. **Upgrades → New run** — pick a published bundle, list
+1. **Set your profile** - set your *device* username: the name NetHub logs into
+   switches with on your behalf. It's separate from your NetHub login
+   and an upgrade cannot be submitted without it.
+2. **Upload an Artifact** - publish an image: a *bundle key* (the name
+   which an upgrade request uses to select the image), a version, the 
+   image's SHA-512 checksum, and the file. NetHub rejects the upload if
+   the checksum doesn't match what you claimed.
+3. **Scan host keys** - for each device address you want to use, 
+   fetch its SSH host key and compare the fingerprint against the device itself,
+   then **Confirm** it. An address with no confirmed key cannot
+   be used in a run at all.
+4. **Start a new upgrade run** - pick a published bundle, list
    `hostname, address` pairs (IP literals inside a configured CIDR), and
    enter your device password. Pre-check runs immediately: privilege 15,
-   boot mode, free space.
-5. The run then parks at an **approval gate** before each phase that
-   touches a device — stage, activate, cleanup. Each gate collects your
-   device password again for that one phase. It is stored only encrypted,
-   sealed to a key only the dispatch process holds, and only until that
-   phase starts; never in the clear in a row, a log, or the session.
-   Activate reloads the devices; verify runs after they come back, on the
-   password the activate approval supplied. The **first host you listed is
-   the canary**: it is reloaded alone and checked for the new version before
-   any other device starts, so list a representative one, and put stacks
-   and standalone switches in separate runs. After it, the approve form lets
-   you reload several devices at a time (default one, at most
-   `PHASE_CONCURRENCY`). NetHub does not know which devices back each other
-   up, so don't reload both halves of a redundant pair at once.
-   A host that fails a phase does not stop the others: the run carries on
-   with the hosts that passed, and the next gate offers to **retry** the
-   failed ones (collecting your password again). What does stop a phase is
-   a refused password (tried on one device, not all of them, so a typo
-   cannot lock your account out), an error in NetHub itself, a canary that
-   fails, or an image missing from or altered in NetHub's store (checked
-   before anything is copied). The run then comes back to the same gate
-   with nothing marked failed that wasn't the device's fault: approve it
-   again, with the right password, to carry on.
+   boot mode, free space. If a run says **No
+   worker has picked this up**, or marks a phase **stalled**, the
+   `nethub-sibling` unit is down or stuck.
 
-   Each gate also takes an optional **start at** time, in UTC, so a fleet can
-   be staged during the day and reloaded in a maintenance window that night
-   with nobody at the gate. The approval is an ordinary approval — it names
-   you, and your password is sealed into that job as always — the dispatch
-   process simply does not pick the job up until then, and other work is not
-   held up behind it. A time is refused if it has passed, is more than 72
-   hours ahead, or is after the gate itself expires. To change it, cancel the
-   run and submit a new one.
-6. `flask --app nethub check-store` re-hashes every published image against
-   what is on disk and flags a missing file or a digest that no longer
-   matches. It is a command rather than a page, because it hashes
-   everything.
-7. Deleting an artifact removes the row and its image file.
-8. **Users** (admins only) — create accounts, choose each one's role, reset
+### The upgrade run
+- **Approval gates** - The run parks at an **approval gate** before each
+   phase that touches a device: stage, activate, cleanup. Each gate prompts for 
+   your device password again for that one phase. It's encrypted by a key that
+   only the dispatch process holds, and only until that phase starts.  
+- **The canary** - The activation phase reloads the devices and verifies runs after
+   they come back. The **first host you listed is the canary**: It's reloaded 
+   alone and checked for the new version before any other device starts, so you should
+   choose a representative one, and put stacks and standalone switches in separate runs.
+- **Upgrade order** - After the canary comes up and is verified, the approval
+   form lets you reload several devices at a time (default one, at most
+   `PHASE_CONCURRENCY`). NetHub doesn't know which devices back each other
+   up, so don't reload both halves of a redundant pair at once.
+- **Upgrade failures** - A host that fails a phase doesn't stop the others so
+   the run carries on with the hosts that passed. The next gate offers to
+   **retry** the failed ones (collecting your password again). What does stop
+   a phase is a refused password (tried on one device first so a typo
+   cannot lock your account out), an error in NetHub itself, a canary that
+   fails, or an image missing from or altered in NetHub's store. The run then
+   comes back to the same gate with nothing marked failed that wasn't the device's
+   fault: approve it again, with the right password, to carry on.
+- **Scheduling runs** - Each gate also takes an optional **start at** time, 
+   in UTC, so a fleet can be staged during the day and reloaded in a maintenance
+   window that night with nobody at the gate. The approval work as normal -
+   it names you, and your password is sealed into that job - the dispatch
+   process simply doesn't pick the job up until the set time. You can schedule a 
+   run a maximum of 72 hours ahead.
+- **Re-hashing the store** - `flask --app nethub check-store` re-hashes every
+   published image against what is on disk and flags a missing file or a digest
+   that no longer matches. it's a command rather than a GUI button since it hashes
+   everything at once which could take multiple blocking minutes.
+
+### Admin only actions
+- **Users** (admins only) - create accounts, choose each one's role, reset
    someone's password, disable or re-enable an account, and unlock one that
    too many failed logins locked. The last active admin cannot be disabled
    or made an operator.
@@ -180,7 +202,7 @@ Once you're logged in:
    on their next click. Change your own password on your **Profile**; that
    ends your other sessions. Every one of these is recorded, and each
    user's **History** shows who did what.
-9. **Settings** (admins only) — three **two-person rules**, each off until
+- **Settings** (admins only) - three **two-person rules**, each off until
    an admin turns it on. They bind operators only; an admin may act alone,
    and the records say an admin did.
    - *Artifacts*: an upload waits, unusable, until someone other than the
@@ -201,106 +223,50 @@ Once you're logged in:
    Each phase on a run page shows the device username it ran under: the
    approver's, which with the run rule on is never the submitter's.
 
-Anything that deletes, reloads or disables something asks you to tick a box
-stating what will happen; the server refuses the request without it. A run
-or scan page reloads itself while NetHub has work in flight. If it says **No
-worker has picked this up**, or marks a phase **stalled**, the
-`nethub-sibling` unit is down or stuck: the web unit only queues work, and the
-sibling does all of it.
+## Upgrading NetHub
 
-## Running it in a container
+> NOTE: Only upgrade while no upgrade phase is running.
+>
+> The online backup for local deployments requires the `sqlite3` command-line tool.
 
-```bash
-podman build -t localhost/nethub:latest .
+Whichever way you deployed NetHub, back up the database first. NetHub has no
+downgrades, so restoring a backup is the only way back. SQLite's online backup
+is safe while NetHub is running:
+`sqlite3 <db> ".backup '/path/to/nethub-$(date +%F).db'"`, where `<db>` is
+`~/.local/share/nethub/data/database.db` for Quadlet or `database.db` at the
+repo root locally. Or stop NetHub and copy `database.db` together with any
+`database.db-wal`/`database.db-shm` beside it.
 
-# The dispatch process's key pair: device passwords are sealed to the public
-# half and only the private half can open them. Keep the private key for the
-# sibling unit only.
-mkdir -p ~/.config/nethub
-podman run --rm --userns=keep-id:uid=1000,gid=1000 -v ~/.config/nethub:/keys:z \
-  --entrypoint python localhost/nethub:latest \
-  -m nethub.sealed_credentials keygen --out /keys/credential_private_key
-# ...prints NETHUB_CREDENTIAL_PUBLIC_KEY=<key>
+### Quadlet deployment
 
-podman run --rm -p 8080:8080 \
-  -e SECRET_KEY="$(openssl rand -hex 32)" \
-  -e ADMIN_USERNAME=<first-user-name> \
-  -e ADMIN_PASSWORD=<initial-admin-password> \
-  -e ARTIFACT_STORE=/app/artifacts \
-  -e NETHUB_CREDENTIAL_PUBLIC_KEY=<key> \
-  localhost/nethub:latest
-```
+1. Pull the new image with `podman pull ghcr.io/0uwl/nethub:latest`. If you
+   pinned a version in `Image=`, change it in both units first and pull that tag instead.
+2. Restart both units:
+   `systemctl --user daemon-reload && systemctl --user restart nethub nethub-sibling`.
 
-That serves the UI but performs no device work; that is the sibling's job
-(`quadlet/nethub-sibling.container`). `ADMIN_USERNAME` has no default: without
-it, NetHub starts with no users and logs that you need to run
-`flask --app nethub create-admin <name>` inside the container.
+### Local deployments
 
-The session cookie is `Secure` by default, so a deployment reached over plain
-HTTP needs a TLS terminator in front of it. `http://localhost:8080` works as
-shown (browsers treat localhost as a trustworthy origin), but reaching the
-same container over a LAN address without TLS means the browser silently
-drops the cookie and login bounces back to the form. Add
-`-e SESSION_COOKIE_INSECURE=1` for that case, and only for local testing.
 
-`quadlet/nethub.container` (the UI) and `quadlet/nethub-sibling.container`
-(all device work) are reference Podman Quadlet units for running NetHub as
-systemd user services, with every environment variable documented inline:
-loading `SECRET_KEY`/`ADMIN_PASSWORD` as systemd credentials instead of
-plaintext, the `ARTIFACT_STORE` volume that has to be set explicitly (its
-default lands on the image's read-only layer), the public key in both units
-and the private key mounted into the sibling only. Copy both to
-`~/.config/containers/systemd/`, fill in the required values, then
-`systemctl --user daemon-reload && systemctl --user start nethub nethub-sibling`.
+1. `git pull` the new code.
+2. Re-run `pip install --require-hashes -r requirements-dev.txt`, then restart
+   `flask --app nethub run` with the same `SECRET_KEY`.
 
-For local development with live edits (no rebuild on every change):
-
-```bash
-./dev.sh
-```
-
-This builds `Containerfile.dev` (Flask's own dev server, debug + reload)
-and runs it with the repo bind-mounted in, at `http://localhost:8080`. On
-first run it also creates a local key pair in `instance/credential_private_key`
-(gitignored) and passes the public half to the app, which refuses to start
-without one.
-
-### Upgrading NetHub
-
-Upgrade while no phase is running (the runs list shows none `running`).
-Restarting the sibling mid-phase stops that phase, and its next start marks
-it abandoned: a gated phase goes back to its gate for re-approval, while an
-interrupted pre-check or verify fails the run. Either way a reload cut short
-is not something to cause on purpose.
-
-1. **Back up the database.** NetHub has no downgrades; the backup is the way
-   back. With the units running, SQLite's online backup is safe:
-   `sqlite3 ~/.local/share/nethub/data/database.db ".backup '/path/to/nethub-$(date +%F).db'"`.
-   Or stop both units and copy `database.db` together with any
-   `database.db-wal`/`database.db-shm` beside it.
-2. **Put the new image in place.** The reference units both run
-   `localhost/nethub:latest`, so rebuild that tag, or pull a release and tag
-   it (`podman pull ghcr.io/<owner>/nethub:1.4.0` then
-   `podman tag ghcr.io/<owner>/nethub:1.4.0 localhost/nethub:latest`); or
-   point `Image=` at the release in both `nethub.container` and
-   `nethub-sibling.container`. Either way, both units must run the same image.
-3. **Restart:** `systemctl --user daemon-reload && systemctl --user restart nethub nethub-sibling`.
-
+### Database migrations
 The web unit migrates the database at startup and logs
-`migrating the database from <old> to <new>`; the sibling logs that it is
+`migrating the database from <old> to <new>`; the sibling logs that it's
 waiting for this, then starts. A migration that fails changes nothing and the
-web unit does not start: check `journalctl --user -u nethub`, fix or go back.
+web unit doesn't start: check `journalctl --user -u nethub`, fix or go back.
 
 To go back to an older version, restore the backup and the older image
 together. An older image refuses to start on a database a newer one has
-migrated, rather than run against a schema it does not understand.
+migrated, rather than run against a schema it doesn't understand.
 
 A database created before NetHub had migrations is adopted automatically on
 the first start of a version that has them, including repairing the columns
 earlier versions could not add or remove. If it differs in any other way,
 NetHub refuses to start and lists the differences.
 
-### Upgrading a device with NetHub switched off
+## Upgrading a device with NetHub CLI
 
 `nethub/upgrade_cli.py` is a deliberate escape hatch: the Ansible
 playbooks it replaced were standalone, so an operator could run them by
@@ -316,15 +282,13 @@ python -m nethub.upgrade_cli --host 192.0.2.10 --user jsmith \
     --version 17.12.06 --phases all
 ```
 
-It **writes nothing** — a manual run is absent from the audit trail, and
-the tool says so on every invocation. It is a bypass of the web app and
-not of the host-key pin: with no confirmed pin and no `--fingerprint` it
-refuses rather than accepting first contact. A bare invocation runs
-`precheck` only, and every mutating phase prompts.
+A manual run is absent from the audit trail. The CLI command still requires a confirmed
+host key, `--fingerprint` is required. A bare invocation runs
+`precheck` only, and every phase which changes the device prompts for confirmation.
 
 ## AI usage
 
-Parts of this codebase and its documentation are developed with AI
+Large parts of this codebase and its documentation are developed with AI
 assistance (Claude Code). Every change is reviewed by a human maintainer
 before being merged.
 
@@ -336,3 +300,4 @@ before being merged.
   questions.
 - [CLAUDE.md](CLAUDE.md): the short version, with the hard rules.
 - [LICENSE](LICENSE)
+- [CONTRIBUTING.md](CONTRIBUTING.md): How to contribute to NetHub's development.

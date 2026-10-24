@@ -32,7 +32,7 @@ Wants=network-online.target
 # database (nethub/schema.py).
 
 [Container]
-Image=localhost/nethub:latest
+Image=ghcr.io/0uwl/nethub:latest
 ContainerName=nethub-sibling
 
 # `python -m nethub.sibling`, replacing the image's gunicorn entrypoint.

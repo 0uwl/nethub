@@ -1,6 +1,5 @@
 # Test and tooling dependencies, on top of the runtime set. Not installed in the
-# image: pytest has no business in production. See requirements.in for how to
-# regenerate requirements-dev.txt.
+# image. See requirements.in for how to regenerate requirements-dev.txt.
 #
 # -c keeps every runtime package at exactly the version the image runs, so the
 # tests exercise what ships; -r pulls the runtime set in, so the test job needs
