@@ -36,7 +36,8 @@ None of these exist in the code:
 - tamper-evidence for artifact digests, pins or settings
   (`check-store` only catches bytes drifting from their row);
 - a device-side pull transport, and shared device-account mode;
-- a fully non-interactive (unattended) run.
+- a fully non-interactive (unattended) run;
+- a device inventory (admin-managed slots shared by day-0 and day-2).
 
 ---
 
@@ -159,6 +160,46 @@ Scheduled approvals (dispatch.md) were built instead.
   It gives up device-side attribution, and must never be inferred from a
   missing IdP.
 
+### 2.6 Device inventory: admin-managed slots
+**[NOTE]**
+One inventory serves day-0 and day-2 by recording **intent** (what a
+device should be), never **observation** (what it is). Observed facts
+stay in runs and pins, which keeps it inside `[not-an-inventory]`
+(architecture.md).
+- **The slot is the logical device.** A `devices` row holds hostname,
+  address, group/site and platform, and only admins write it, with an
+  audit table like `device_host_key_audit`. Writes apply the request
+  checks: an IP literal inside `DEVICE_TARGET_CIDRS`.
+- **The chassis attaches to the slot.** Day-0's allowlist row (§2.1)
+  gains a `device_id`. An RMA keeps the slot and re-arms a new serial
+  (`rearmed_from_id`), so groups and history are untouched.
+- **Pins stay keyed on address.** `device_host_keys` joins a slot by its
+  address string, as it does today, not by a foreign key.
+- **Day-0 renders from the slot.** The bootstrap config comes from a
+  template fixed in the repo, filled with the slot's validated fields, and
+  Kea reservations come from the same rows. What a device is told to
+  become cannot drift from what day-2 targets.
+- **Day-2 selects slots.** A run picks slots or a group, not typed
+  lines, so a request stays a closed document of row ids plus one bundle
+  key (`[request-is-a-closed-document]`, architecture.md).
+- **First contact binds them.** Precheck compares the serial from
+  `show version` with the slot's consumed allowlist serial, so a device
+  that is not the enrolled chassis is caught at the address.
+- **No stored lifecycle column.** `planned`, `provisioned` and
+  `reachable` are derived when a page renders, from an armed allowlist
+  row, a consumed one, and a confirmed pin. A stored state would drift,
+  and it is observation.
+- **Rules to reword when built:** `[not-an-inventory]` and
+  `[request-is-a-closed-document]` must say that a slot list is intent
+  and is allowed.
+- **Nornir is not needed for this.** Its inventory is an in-memory
+  object that still needs this table behind it, and its runner,
+  connection plugins and results duplicate `execute_phase` and
+  `connect()` without the canary, login gate or pin check. At NetHub's
+  current scope (one platform, one task type) it does not repay the
+  rewrite and the dependency. Reopen it if NetHub takes on many task
+  types (config push, backups, compliance) across several platforms.
+
 ---
 
 ## 3. Rejected alternatives
@@ -212,3 +253,11 @@ Scheduled approvals (dispatch.md) were built instead.
   second-hop fetches? Give day-0 artifacts their own promotion gate?
 - Sessions: how should the absolute timeout be sized against the IdP's
   revocation delay? May a user hold more than one session?
+- Inventory (§2.6): must every day-2 run target a slot, or may ad-hoc
+  `hostname, address` lines remain for devices onboarded before it?
+- Inventory: should a serial mismatch at precheck fail the host or only
+  warn, given RMAs done outside NetHub?
+- Inventory: should slots own IP assignment through Kea reservations,
+  making NetHub the source of truth for addresses?
+- Inventory: should the day-0 service write the slot table in the same
+  SQLite file, making it a third writer?

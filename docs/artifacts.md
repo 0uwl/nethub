@@ -142,6 +142,14 @@ re-hashes every artifact that has not been pruned:
 It is a CLI command, never a web route.
 Pinned by: `tests/test_artifacts.py::TestResolveAndCheck::test_check_store_reports_altered_bytes_and_never_guesses`, `tests/test_artifacts.py::TestResolveAndCheck::test_check_store_silently_corrects_a_stale_size`, `tests/test_artifacts.py::TestCheckStoreCommand::test_there_is_no_web_route_any_more`
 
+**[NOTE]**
+It hashes every image, which is minutes of work. In a request handler
+that outlives gunicorn's `timeout = 120` and holds one of four threads
+(deployment.md [one-worker-four-threads]). As a command it has no
+timeout, and its exit code lets cron or a timer alert on drift. A
+button would have to queue the work for a background process, the way
+an upgrade does.
+
 ---
 
 ## 3. The two-person rule for artifacts
