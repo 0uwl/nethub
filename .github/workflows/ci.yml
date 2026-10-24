@@ -1,0 +1,236 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Publishing is driven by a version tag
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly
+    - cron: '23 5 * * 1'
+  # So the weekly scan can be run on demand instead of waited for.
+  workflow_dispatch:
+
+# Every job reads and nothing more, unless otherwise specified below.
+permissions:
+  contents: read  # checkout, and zizmor's online audits
+
+# A new push to a pull request cancels that pull request's run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SCAN_SEVERITY: 'CRITICAL,HIGH'
+  SCAN_VULN_TYPE: 'os,library'
+
+jobs:
+  lint:
+    name: Lint
+    # Code events only
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+      - name: Lockfile is current
+        run: |
+          if ! uv lock --check; then
+            echo "::error::uv.lock is stale. Run \`uv lock\` and commit it."
+            exit 1
+          fi
+      - run: uv sync --locked
+      - name: Ruff (Python)
+        run: uv run --no-sync ruff check .
+      - name: yamllint
+        run: uv run --no-sync yamllint .
+      - name: shellcheck
+        run: uv run --no-sync shellcheck scripts/*.sh
+      - name: zizmor (workflow audit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run --no-sync zizmor --format=github .github/
+      - name: Containerfile linting
+        uses: immanuwell/dockerfile-roast@1c87b2aa189338c24db4acde40864dae8994de8f  # 1.7.0
+        with:
+          files: 'Containerfile'
+          image-tag: '1.7.0@sha256:4f31be49f26804c0a2f8a0ab0ae578719e30376323e8fd5951c6dcc79a478b40'
+          engine: podman
+          preset: production
+
+  test:
+    name: Test
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+      - run: uv sync --locked
+      - name: Pytest
+        run: uv run --no-sync pytest -v
+
+  image:
+    name: Build, smoke test and scan
+    # The scan is for reporting, not blocking PRs
+    # Pull requests and main
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # upload the scan's SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      # amd64 only, and no QEMU: this image is never pushed. It exists to be
+      # started by the smoke test and read by Trivy.
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          load: true
+          tags: localhost/nethub:ci
+          cache-from: type=gha,scope=nethub
+          cache-to: type=gha,scope=nethub,mode=max
+      - name: Smoke test
+        run: |
+          podman pull docker-daemon:localhost/nethub:ci
+          scripts/smoke_test.sh localhost/nethub:ci
+      - name: Scan image for CVEs
+        uses: $/.github/actions/trivy-scan
+        with:
+          image-ref: localhost/nethub:ci
+          category: trivy-image
+          label: Trivy (built image)
+
+  scan-published:
+    name: Scan published image
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # pull the published image from ghcr.io to scan it
+      security-events: write  # upload the scan's SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: published
+        name: Check for a published image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:latest
+        run: |
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No published :latest image yet, nothing to scan."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Scan published image for CVEs
+        if: steps.published.outputs.exists == 'true'
+        uses: $/.github/actions/trivy-scan
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          category: trivy-published
+          label: Trivy (published :latest)
+
+  publish:
+    name: Publish container
+    needs: [lint, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the GitHub release, the job's last step
+      packages: write  # push the image to ghcr.io
+      security-events: write  # upload the scan's SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Build image for testing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          load: true
+          no-cache: true
+          tags: localhost/nethub:release
+          cache-to: type=local,dest=${{ runner.temp }}/buildcache,mode=max
+      - name: Smoke test
+        run: |
+          podman pull docker-daemon:localhost/nethub:release
+          scripts/smoke_test.sh localhost/nethub:release
+      - name: Scan image for CVEs
+        uses: $/.github/actions/trivy-scan
+        with:
+          image-ref: localhost/nethub:release
+          category: trivy-image
+          label: Trivy (release image)
+          cache: 'false'
+      # linux/arm64 covers e.g. a 64-bit Raspberry Pi host
+      - name: Build and publish image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=${{ runner.temp }}/buildcache
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists -- leaving it as it is."
+            exit 0
+          fi
+          flags=(--generate-notes --verify-tag)
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}"

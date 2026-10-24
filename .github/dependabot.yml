@@ -1,22 +1,8 @@
-# Keeps the pins in this repository moving. Pinning every
-# action to a commit, every Python package to a hash and the base image to a
-# digest stops anything changing without a diff; without something proposing
-# those diffs, the pins just rot, and a stale pin is its own vulnerability.
+# Keeps the pins in this repository moving.
 #
-# Every update arrives as an ordinary pull request, so it goes through the same
-# CI as any other change: lint (including the lockfile check and zizmor), the
-# tests, and the image build, smoke test and Trivy scan.
-#
-# cooldown holds a release back for a few days before proposing it. Most
-# poisoned-package incidents are found and yanked within that window, and none
-# of these updates is urgent in hours: a CVE fix that is shows up in the weekly
-# scan of the published image instead.
+# cooldown holds a release back for a few days before proposing it
 version: 2
 updates:
-  # The SHA pins in .github/workflows/cicd.yml and in the local composite
-  # action it calls. Dependabot rewrites the SHA and the version comment beside
-  # it together. `/` covers .github/workflows only; a composite action's own
-  # `uses:` lines are found only if its directory is listed as well.
   - package-ecosystem: github-actions
     directories:
       - /
@@ -30,9 +16,6 @@ updates:
       actions:
         patterns: ['*']
 
-  # pyproject.toml and uv.lock, updated together. CI's `uv lock --check`
-  # compares what the lock resolves to, not its bytes, so Dependabot's own uv
-  # version does not matter.
   - package-ecosystem: uv
     directory: /
     schedule:
@@ -41,13 +24,6 @@ updates:
     cooldown:
       default-days: 7
 
-  # The python:3.12-slim and uv image digests in Containerfile and
-  # Containerfile.dev. This is how Debian security fixes reach the image, so it
-  # has the shortest cooldown. The uv image only runs `uv export` at build time;
-  # bump the uv version in cicd.yml with it.
-  # Digest updates only: moving to 3.13-slim changes the Python the lockfiles
-  # were compiled for, which is a deliberate change of its own (regenerate the
-  # locks on the new version, update CI's python-version), not a weekly bump.
   - package-ecosystem: docker
     directory: /
     schedule:

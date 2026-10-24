@@ -8,7 +8,7 @@
 [project]
 name = "nethub"
 version = "0"
-# The image and CI run 3.12 (Containerfile, cicd.yml). Moving to 3.13 is a
+# The image and CI run 3.12 (Containerfile, ci.yml). Moving to 3.13 is a
 # deliberate change: bump this, the base image and CI together.
 requires-python = "==3.12.*"
 # The ones NetHub imports directly. The pins stay exact rather than ranges,

@@ -69,7 +69,7 @@ that catch people most often:
 - `tests/captures/` and `tests/fixtures/schemas/` are evidence. Never edit
   them to make a test pass.
 
-`.github/workflows/cicd.yml` runs on every pull request and push to `main`:
+`.github/workflows/ci.yml` runs on every pull request and push to `main`:
 lint (`ruff`, `yamllint`, `shellcheck`, the `Containerfile`, `zizmor` over
 the workflow itself, and a check that `uv.lock` matches
 `pyproject.toml`), the test suite, and an image build that is smoke-tested
