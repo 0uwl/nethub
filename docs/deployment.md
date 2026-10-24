@@ -1,5 +1,5 @@
 # Deployment
-Code: `Containerfile`, `Containerfile.dev`, `dev.sh`, `nethub/gunicorn.conf.py`, `quadlet/nethub.container`, `quadlet/nethub-sibling.container`, `nethub/shared_config.py`, `nethub/config.py`, `nethub/credentials.py`, `.github/workflows/cicd.yml`, `.github/actions/trivy-scan/`, `.github/dependabot.yml`, `scripts/smoke_test.sh`, `scripts/trivy_report.sh`, `requirements*.in`/`.txt` · Tests: `tests/test_config.py`, `tests/test_credentials.py`, `scripts/smoke_test.sh` (run in CI)
+Code: `Containerfile`, `Containerfile.dev`, `dev.sh`, `nethub/gunicorn.conf.py`, `quadlet/nethub.container`, `quadlet/nethub-sibling.container`, `nethub/shared_config.py`, `nethub/config.py`, `nethub/credentials.py`, `.github/workflows/cicd.yml`, `.github/actions/trivy-scan/`, `.github/dependabot.yml`, `scripts/smoke_test.sh`, `scripts/trivy_report.sh`, `pyproject.toml`, `uv.lock` · Tests: `tests/test_config.py`, `tests/test_credentials.py`, `scripts/smoke_test.sh` (run in CI)
 
 ---
 
@@ -91,8 +91,9 @@ Pinned by: `scripts/smoke_test.sh`
 **[SPEC]**
 - The base is `python:3.12-slim`, pinned by digest.
 - The app runs as non-root UID 1000.
-- Dependencies are installed with `pip install --require-hashes -r
-  requirements.txt`; pytest and the linters are not in the image.
+- A build stage exports `uv.lock` with `uv export --frozen --no-dev`, and
+  the image installs that with `pip install --require-hashes`. uv,
+  pytest and the linters are not in the image.
 - `/app/data` and `/app/artifacts` are mount points, never baked in.
 
 Pinned by: none
@@ -233,25 +234,25 @@ fixed by bumping the pin.
 - Checkouts use `persist-credentials: false`, and untrusted values reach
   the shell only through `env:`.
 - Nothing on the tag path reads a cache another run wrote: `lint` and
-  `test` use no pip cache, and `publish` builds with `no-cache`,
+  `test` use no uv cache, and `publish` builds with `no-cache`,
   passing layers on through a job-local `type=local` cache.
 
 Pinned by: none
 
 ### 4.6 [linters-and-locks-hashed]
 **[SPEC]**
-- `requirements.in` lists the direct runtime dependencies.
-- `requirements.txt` is compiled from it by `pip-compile --generate-hashes`
-  with every transitive package pinned.
-- `requirements-dev.in` pulls in the runtime set with `-c requirements.txt`
-  and adds pytest, pip-tools and the linters.
-- Compile on Python 3.12, runtime lock first. CI recompiles both and
-  fails on any diff.
+- `pyproject.toml` lists the direct runtime dependencies, pinned exactly,
+  and a `dev` group with pytest and the linters.
+- `uv.lock` resolves both together, with every transitive package pinned
+  and hashed, for `requires-python = "==3.12.*"`.
+- CI runs `uv lock --check`, which fails when the lock no longer matches
+  `pyproject.toml`. It compares content, not bytes, so a lock written by
+  another uv version (Dependabot's) passes.
 
 Pinned by: none
 
 **[NOTE]**
-The linters are pinned in the dev lockfile so that local runs match CI.
+The linters are pinned in the dev group so that local runs match CI.
 An unpinned ruff once widened its default rules and failed CI on files
 that passed locally. When a pin is bumped, fix the new findings; do not
 unpin.
@@ -289,8 +290,8 @@ podman build -t localhost/nethub:latest -f Containerfile .
 scripts/smoke_test.sh [image]          # ENGINE=docker if no podman; SMOKE_PORT, SMOKE_TIMEOUT
 ./dev.sh                               # dev container with reload; needs SECRET_KEY, DEVICE_TARGET_CIDRS
 python -m nethub.sealed_credentials keygen --out <file>
-pip-compile --generate-hashes --allow-unsafe --strip-extras --output-file=requirements.txt requirements.in
-pip-compile --generate-hashes --allow-unsafe --strip-extras --output-file=requirements-dev.txt requirements-dev.in
+uv sync                                # local venv at CI's versions
+uv lock                                # after editing pyproject.toml
 ```
 
 ### 5.3 Upgrading NetHub
@@ -362,9 +363,12 @@ not run the units under systemd or Quadlet.
   `MAX_CONTENT_LENGTH=1610612736` line (1536 MiB), but nothing reads that
   variable, and the real cap is 1500 MiB. Uncommenting it changes
   nothing.
-- When Python moves past 3.12, update the workflow's `python-version` and
-  recompile the locks by hand. Dependabot sends digest updates for the
-  base image only.
+- When Python moves past 3.12, update the workflow's `python-version`,
+  `requires-python` in `pyproject.toml` and the base image, then run
+  `uv lock`. Dependabot sends digest updates for the base image only.
+- The uv version in `cicd.yml` and the uv image in the Containerfiles are
+  bumped separately (actions and docker ecosystems). A mismatch is harmless,
+  because `uv lock --check` compares content.
 - The `:z` volumes have not been tested on an enforcing SELinux host.
 - The two-unit layout has been run with docker and podman by hand. It
   has not been run under Quadlet since the `ARTIFACT_STORE` volume was

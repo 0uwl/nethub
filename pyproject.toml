@@ -1,3 +1,62 @@
+# NetHub's dependencies. uv.lock is the lockfile generated from this file,
+# with every transitive dependency pinned and hashed. Edit the lists below,
+# then run `uv lock`. CI runs `uv lock --check` and fails when uv.lock no
+# longer matches, so an edit here without a regenerated lock does not merge.
+#
+# NetHub is an application, not a library: there is no [build-system], so uv
+# installs only the dependencies and never builds or installs NetHub itself.
+[project]
+name = "nethub"
+version = "0"
+# The image and CI run 3.12 (Containerfile, cicd.yml). Moving to 3.13 is a
+# deliberate change: bump this, the base image and CI together.
+requires-python = "==3.12.*"
+# The ones NetHub imports directly. The pins stay exact rather than ranges,
+# because docs/deployment.md relies on specific versions (gunicorn 26.x
+# parsing `nethub:create_app()` as a call, and control_socket_disable
+# existing at all); gunicorn has already changed relevant behaviour once at
+# 25.1. A version bump is a deliberate diff.
+dependencies = [
+    "Flask==3.1.3",
+    "Flask-SQLAlchemy==3.1.1",
+    "Flask-Login==0.6.3",
+    "Flask-WTF==1.3.0",
+    # Schema migrations (nethub/schema.py, nethub/migrations/). alembic is
+    # pinned in its own right, not left to Flask-Migrate's range: it is what
+    # actually rewrites the database at every upgrade.
+    "Flask-Migrate==4.1.0",
+    "alembic==1.20.0",
+    "gunicorn==26.2.0",
+    # Seals device credentials into the job row. Already installed as a
+    # paramiko dependency; pinned in its own right because NetHub calls it
+    # directly and a change in it changes what can open a stored credential.
+    "PyNaCl==1.6.2",
+    "netmiko==4.8.0",
+    "ntc-templates==9.3.0",
+]
+
+# Test and lint tools. uv installs this group by default (`uv sync`) and the
+# image never does: the Containerfile exports the lock with --no-dev. One
+# lock resolves both sets together, so the tests run against exactly the
+# runtime versions the image ships.
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    # The linters CI runs, pinned here rather than installed loose in the
+    # workflow, so a local `uv sync` gets exactly CI's versions. That
+    # matters: ruff 0.16 widened its default rule set over 0.15, so an
+    # unpinned local ruff passed while CI failed on byte-identical files.
+    # Bumping any of these is a deliberate diff, and new findings are fixed
+    # rather than the pin loosened.
+    "ruff==0.17.0",
+    "yamllint==1.38.0",
+    # Audits .github/workflows for unpinned actions, over-broad permissions,
+    # template injection and cache poisoning.
+    "zizmor==1.30.1",
+    # shellcheck itself, as a wheel carrying the binary: lints scripts/*.sh.
+    "shellcheck-py==0.11.0.1",
+]
+
 [tool.pytest.ini_options]
 # Bare `pytest` (no `python -m`) doesn't put the repo root on sys.path,
 # so `import nethub` fails without this -- see README.md's documented

@@ -73,25 +73,42 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      # No pip cache, here or in test. Both jobs run on the tag push that
+      # No uv cache, here or in test. Both jobs run on the tag push that
       # publishes, and a cache written by an earlier run is an input to that
-      # run (zizmor's cache-poisoning audit). --require-hashes would refuse a
-      # poisoned wheel anyway, but the saving is seconds, and a clean audit is
-      # worth more than a suppression comment in the one file that publishes.
+      # run (zizmor's cache-poisoning audit). uv checks every hash in uv.lock
+      # and would refuse a poisoned wheel anyway, but the saving is seconds,
+      # and a clean audit is worth more than a suppression comment in the one
+      # file that publishes.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      # The linters are in the hashed dev lockfile, not a loose `pip install`
-      # here: pinned so they cannot change what they enforce without a commit
-      # (ruff 0.16 widened its default rules over 0.15 and broke three
-      # branches at once), and hash-checked like everything else.
-      - run: pip install --require-hashes -r requirements-dev.txt
+      # uv is pinned here as well as by SHA: the action otherwise installs
+      # whichever uv is newest. Bump it with the uv image in the Containerfiles.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+      # uv.lock must be what pyproject.toml resolves to. Without this, an edit
+      # to pyproject.toml merges with a stale lock, and the image installs
+      # something no one reviewed as a diff. The check compares what the lock
+      # says, not its bytes, so a different uv version (Dependabot's) passes.
+      - name: Lockfile is current
+        run: |
+          if ! uv lock --check; then
+            echo "::error::uv.lock is stale. Run \`uv lock\` and commit it."
+            exit 1
+          fi
+      # The linters are in the dev group of the hashed lock, not a loose
+      # install here: pinned so they cannot change what they enforce without
+      # a commit (ruff 0.16 widened its default rules over 0.15 and broke
+      # three branches at once), and hash-checked like everything else.
+      - run: uv sync --locked
       - name: Ruff (Python)
-        run: ruff check .
+        run: uv run --no-sync ruff check .
       - name: yamllint
-        run: yamllint .
+        run: uv run --no-sync yamllint .
       - name: shellcheck
-        run: shellcheck scripts/*.sh
+        run: uv run --no-sync shellcheck scripts/*.sh
       # zizmor audits this workflow and dependabot.yml: unpinned actions,
       # permissions wider than a job needs, template injection, credentials
       # left in the checkout, cache poisoning on the release path. The token
@@ -100,20 +117,7 @@ jobs:
       - name: zizmor (workflow audit)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: zizmor --format=github .github/
-      # The lockfiles must be what their .in files compile to. Without this, an
-      # edit to requirements.in merges with a stale requirements.txt, and the
-      # image installs something no one reviewed as a diff.
-      - name: Lockfiles are current
-        run: |
-          pip-compile -q --generate-hashes --allow-unsafe --strip-extras \
-            --output-file=requirements.txt requirements.in
-          pip-compile -q --generate-hashes --allow-unsafe --strip-extras \
-            --output-file=requirements-dev.txt requirements-dev.in
-          if ! git diff --exit-code -- requirements.txt requirements-dev.txt; then
-            echo "::error::requirements*.txt are stale. Regenerate them on Python 3.12 with the commands in requirements.in."
-            exit 1
-          fi
+        run: uv run --no-sync zizmor --format=github .github/
       # Containerfile.dev is dev-only, deliberately incomplete (no COPY of app
       # code) and never used in production, so it is not linted against the
       # production preset.
@@ -141,11 +145,17 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
-      # requirements-dev.txt carries the runtime set at exactly the image's
-      # versions plus pytest, so this one install is all the tests need.
-      - run: pip install --require-hashes -r requirements-dev.txt
+      # uv is pinned here as well as by SHA: the action otherwise installs
+      # whichever uv is newest. Bump it with the uv image in the Containerfiles.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+      # The dev group comes with the runtime set at exactly the image's
+      # versions, so this one sync is all the tests need.
+      - run: uv sync --locked
       - name: Pytest
-        run: pytest -v
+        run: uv run --no-sync pytest -v
 
   image:
     name: Build, smoke test and scan
@@ -319,7 +329,7 @@ jobs:
       # tag's ref, and the push goes ahead.
       #
       # Only the amd64 image is scanned: both platforms install the same
-      # Debian and pip packages from the same Containerfile and lockfile, so
+      # Debian and Python packages from the same Containerfile and lockfile, so
       # arm64 would report the same list. Pinning the action pins the Trivy
       # binary, but its vulnerability database is fetched at run time, so the
       # report reflects the day of the release. cache: false for the same
