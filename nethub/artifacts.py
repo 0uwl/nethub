@@ -24,7 +24,7 @@ import hashlib
 import os
 import re
 import tempfile
-from datetime import datetime, timezone, UTC
+from datetime import UTC, datetime
 
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import exists

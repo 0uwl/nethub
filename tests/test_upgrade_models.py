@@ -6,7 +6,7 @@ absent if the declaration is wrong -- SQLite enforces no foreign key unless
 asked, and a trigger that was never created raises nothing.
 """
 
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError

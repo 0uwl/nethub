@@ -138,7 +138,7 @@ def test_repeated_failures_lock_the_account(client, app, make_user):
 
 
 def test_a_lock_expires(client, app, make_user):
-    from datetime import datetime, timedelta, timezone, UTC
+    from datetime import UTC, datetime, timedelta
 
     from nethub.extensions import db
     from nethub.models import User

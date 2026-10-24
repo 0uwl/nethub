@@ -6,7 +6,7 @@ and the confirmed host key -- and where the credential is taken without ever
 being stored.
 """
 
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from flask import current_app
@@ -366,14 +366,14 @@ class TestPhaseDeadlines:
             assert _aware(fresh.deadline_at) > upgrades._utcnow()
 
     def test_a_bigger_image_gets_a_longer_stage_budget(self):
-        from datetime import datetime, timezone, UTC
+        from datetime import UTC, datetime
         now = datetime(2026, 1, 1, tzinfo=UTC)
         small = upgrades.phase_deadline('stage', hosts=1, image_bytes=100 << 20, now=now)
         large = upgrades.phase_deadline('stage', hosts=1, image_bytes=1200 << 20, now=now)
         assert large > small, "stage is dominated by the transfer"
 
     def test_more_hosts_gets_a_longer_budget(self):
-        from datetime import datetime, timezone, UTC
+        from datetime import UTC, datetime
         now = datetime(2026, 1, 1, tzinfo=UTC)
         one = upgrades.phase_deadline('activate', hosts=1, now=now)
         many = upgrades.phase_deadline('activate', hosts=20, now=now)
@@ -389,7 +389,7 @@ class TestPhaseDeadlines:
         """471 MB took ~370s on the lab switch (docs/device-layer.md). A
         deadline that fires on a healthy run is worse than no deadline.
         """
-        from datetime import datetime, timezone, UTC
+        from datetime import UTC, datetime
         now = datetime(2026, 1, 1, tzinfo=UTC)
         budget = (upgrades.phase_deadline(
             'stage', hosts=1, image_bytes=471 << 20, now=now) - now).total_seconds()

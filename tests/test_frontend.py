@@ -5,7 +5,7 @@ Rendering is tested in test_templates.py; this file holds what a template
 test cannot show -- that an unticked box is refused by the route, not only
 by the browser.
 """
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest

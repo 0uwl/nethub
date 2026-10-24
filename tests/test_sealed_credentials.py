@@ -11,7 +11,7 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from nacl.public import PrivateKey, SealedBox

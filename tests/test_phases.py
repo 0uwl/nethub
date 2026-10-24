@@ -9,7 +9,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 
 import paramiko
 import pytest

@@ -7,7 +7,7 @@ does under contention.
 """
 
 import threading
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from nacl.public import PrivateKey
