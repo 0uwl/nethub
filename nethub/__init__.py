@@ -31,6 +31,7 @@ def create_app():
     from .artifact_routes import register_cli as register_artifact_cli
     from .auth import auth_bp, register_cli
     from .bootstrap import bootstrap_admin
+    from .cli import register_cli as register_frontend_cli
     from .settings import settings_bp
     from .upgrade_routes import hostkeys_bp, upgrade_bp
 
@@ -41,6 +42,7 @@ def create_app():
     app.register_blueprint(settings_bp)
     register_cli(app)
     register_artifact_cli(app)
+    register_frontend_cli(app)
 
     # Content-Security-Policy and friends on every response.
     from .web import set_security_headers

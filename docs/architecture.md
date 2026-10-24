@@ -128,6 +128,7 @@ Pinned by: none
 | `worker_status.py` | stalled / no-worker / queue depth (read-only) | frontend.md |
 | `devices/phases.py` | per-host driver, `LoginGate`, canary, failure mapping, rows | dispatch.md |
 | `devices/{connection,transfer,install,facts}.py` | Netmiko, SCP push, install/reload, parsing | device-layer.md |
+| `cli.py` | `artifacts` and `hostkeys` command groups over the service layer | cli.md |
 | `upgrade_cli.py` | manual escape hatch | device-layer.md |
 | `gunicorn.conf.py` | 1 worker, gthread × 4, no control socket | deployment.md |
 

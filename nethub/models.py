@@ -478,7 +478,7 @@ class HostKeyScan(db.Model):
 
     `ansible_host` is a plain string, not a foreign key to `DeviceHostKey` --
     this row's lifecycle is independent of whatever pin exists (or does not)
-    at that address, and `confirm_hostkey` has to bind against a
+    at that address, and `upgrades.confirm_scan` has to bind against a
     scan even when no `DeviceHostKey` row exists there yet.
     """
 

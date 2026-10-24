@@ -50,64 +50,68 @@ def _password_too_short(password):
     return len(password) < MIN_PASSWORD_LENGTH
 
 
+def authenticate(username, password, *, source):
+    """The user these credentials name, or None. `/login` and the CLI's `--as`
+    both go through here (docs/auth-and-roles.md [login-always-pays-for-a-hash]).
+
+    Always pays for exactly one password verification, whatever happens
+    next -- see `_ABSENT_USER_HASH`. A locked account is verified too, so
+    "locked" and "wrong password" cost the same. `source` is only for the
+    log line: a remote address, or `cli`.
+    """
+    user = User.query.filter_by(username=username).first()
+    if user is None:
+        check_password_hash(_ABSENT_USER_HASH, password)
+        correct = False
+    else:
+        correct = user.check_password(password)
+
+    locked = user is not None and user.is_locked()
+    inactive = user is not None and not user.is_active
+    if correct and not locked and not inactive:
+        user.clear_failed_logins()
+        db.session.commit()
+        return user
+
+    # Username is logged because the account is the thing being attacked
+    # and an operator needs to know which one; the password never is.
+    if user is not None and not correct:
+        now_locked = user.register_failed_login(
+            limit=MAX_FAILED_LOGINS, lockout=LOCKOUT_DURATION
+        )
+        db.session.commit()
+        current_app.logger.warning(
+            'failed login for %r from %s (%s)',
+            username, source,
+            'now locked out' if now_locked else f'{user.failed_logins} consecutive',
+        )
+    elif locked:
+        current_app.logger.warning(
+            'login attempt for locked account %r from %s', username, source)
+    elif inactive:
+        current_app.logger.warning(
+            'login attempt for disabled account %r from %s', username, source)
+    else:
+        current_app.logger.warning(
+            'failed login for unknown username %r from %s', username, source)
+    return None
+
+
 @auth_bp.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
         return redirect(url_for('artifacts.list_artifacts'))
 
     if request.method == 'POST':
-        username = request.form.get('username', '')
-        password = request.form.get('password', '')
-        user = User.query.filter_by(username=username).first()
-
-        # Always pay for exactly one password verification, whatever happens
-        # next -- see `_ABSENT_USER_HASH`. A locked account is verified too, so
-        # "locked" and "wrong password" cost the same.
-        if user is None:
-            check_password_hash(_ABSENT_USER_HASH, password)
-            correct = False
-        else:
-            correct = user.check_password(password)
-
-        locked = user is not None and user.is_locked()
-        inactive = user is not None and not user.is_active
-        if correct and not locked and not inactive:
-            user.clear_failed_logins()
-            db.session.commit()
+        user = authenticate(request.form.get('username', ''),
+                            request.form.get('password', ''), source=request.remote_addr)
+        if user is not None:
             # Marks the session for PERMANENT_SESSION_LIFETIME. Flask applies
             # that setting only to a permanent session; without this line it is
             # configured and inert, and the cookie carries no expiry of its own.
             session.permanent = True
             login_user(user)
             return redirect(url_for('artifacts.list_artifacts'))
-
-        # Username is logged because the account is the thing being attacked
-        # and an operator needs to know which one; the password never is.
-        if user is not None and not correct:
-            now_locked = user.register_failed_login(
-                limit=MAX_FAILED_LOGINS, lockout=LOCKOUT_DURATION
-            )
-            db.session.commit()
-            current_app.logger.warning(
-                'failed login for %r from %s (%s)',
-                username, request.remote_addr,
-                'now locked out' if now_locked else f'{user.failed_logins} consecutive',
-            )
-        elif locked:
-            current_app.logger.warning(
-                'login attempt for locked account %r from %s',
-                username, request.remote_addr,
-            )
-        elif inactive:
-            current_app.logger.warning(
-                'login attempt for disabled account %r from %s',
-                username, request.remote_addr,
-            )
-        else:
-            current_app.logger.warning(
-                'failed login for unknown username %r from %s',
-                username, request.remote_addr,
-            )
 
         # One message for every failure, including a locked or disabled
         # account: saying either would confirm the username exists and hand

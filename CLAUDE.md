@@ -39,6 +39,7 @@ which routes a task to its topic file. Each topic file follows HADS:
 | Containerfile, Quadlet units, env vars, CI | [deployment.md](docs/deployment.md) |
 | templates, CSS, `web.py`, `worker_status.py` | [frontend.md](docs/frontend.md) |
 | tests, fixtures, captures | [testing.md](docs/testing.md) |
+| `cli.py`, the `artifacts` / `hostkeys` commands | [cli.md](docs/cli.md) |
 
 ## Commands
 
@@ -52,6 +53,7 @@ export NETHUB_CREDENTIAL_PUBLIC_KEY=...                 # from the keygen below
 flask --app nethub run                                  # dev server (DEBUG off)
 flask --app nethub create-admin <username>
 flask --app nethub check-store                          # re-hash the store; exit 1 on drift
+flask --app nethub artifacts|hostkeys <cmd> --as <user> # web actions from a terminal (docs/cli.md)
 flask --app nethub db current | db history | db migrate -m "..."   # see docs/schema.md
 python -m nethub.sealed_credentials keygen --out <file>
 python -m nethub.sibling                                # needs NETHUB_SEARCH_DIR + private key

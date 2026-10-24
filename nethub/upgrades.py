@@ -29,6 +29,7 @@ from .models import (
     RETRYABLE_AT,
     DeviceHostKey,
     DeviceHostKeyAudit,
+    HostKeyScan,
     UpgradePhaseJob,
     UpgradeRun,
     UpgradeRunHost,
@@ -264,6 +265,107 @@ def delete_pin(row: DeviceHostKey, user) -> bool:
     db.session.delete(row)
     db.session.commit()
     return True
+
+
+#: How long a succeeded scan stays confirmable. Not strictly
+#: required by the design, but cheap: without it a HostKeyScan row would stay
+#: "confirmable" forever, and a scan from days ago backing a confirmation of a
+#: device that has since changed hands on that address is exactly the kind of
+#: staleness a fresh scan is supposed to rule out.
+SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
+
+
+class ConfirmRefused(RequestError):
+    """`confirm_scan` said no. `back_to` is where the web flow sends the
+    person next: `scan` (scan again), `result` (the scan's page) or `list`."""
+
+    def __init__(self, message, back_to='scan'):
+        super().__init__(message)
+        self.back_to = back_to
+
+
+def may_confirm(scan, user):
+    """Whether `user` may confirm a pin from `scan`.
+
+    With the two-person rule for host keys off, only whoever requested the
+    scan confirms it. With it on, the confirmer must be
+    someone else, except that an admin may confirm any scan,
+    their own included: admins are exempt, and the audit row records the
+    role they acted in.
+    """
+    own = scan.requested_by == user.id
+    if settings.enabled('two_person_hostkeys'):
+        return not own or user.is_admin
+    return own
+
+
+def confirm_by(scan):
+    """The moment `scan` stops being confirmable (`SCAN_CONFIRM_WINDOW`)."""
+    return _aware(scan.finished_at) + SCAN_CONFIRM_WINDOW
+
+
+def queue_scan(address, *, user, cidrs) -> HostKeyScan:
+    """Queue a host-key scan for the sibling. Scanning is device I/O, so
+    Flask only writes the row (docs/architecture.md [no-device-io-in-flask]).
+    `check_target` applies the same CIDR check as submit: a rejected address
+    never becomes a row, and never reaches the sibling at all."""
+    address = check_target(address, cidrs)
+    scan = HostKeyScan(ansible_host=address, requested_by=user.id)
+    db.session.add(scan)
+    db.session.commit()
+    return scan
+
+
+def confirm_scan(scan, user) -> DeviceHostKey:
+    """Confirm a pin from a scan NetHub itself performed.
+
+    The key type, fingerprint and address all come from the `HostKeyScan`
+    row, never from the caller. Who may confirm which scan is `may_confirm`;
+    the rule is read now, so turning it off releases a scan waiting for a
+    second person.
+    """
+    if scan is None or scan.status != 'succeeded':
+        raise ConfirmRefused('No matching scan to confirm. Scan the address again.')
+    if not may_confirm(scan, user):
+        if scan.requested_by == user.id:
+            raise ConfirmRefused('The two-person rule for host keys is on: someone other '
+                                 'than whoever requested the scan has to confirm it.',
+                                 back_to='result')
+        raise ConfirmRefused('No matching scan to confirm. Scan the address again.')
+    if scan.consumed_at is not None:
+        # A succeeded scan confirms at most once. Without this, one scan
+        # could back two different confirmations later.
+        raise ConfirmRefused('That scan has already been used to confirm a pin. '
+                             'Scan the address again.')
+    if _utcnow() - _aware(scan.finished_at) > SCAN_CONFIRM_WINDOW:
+        raise ConfirmRefused('That scan is too old to confirm. Scan the address again.')
+
+    address, key_type, fingerprint = scan.ansible_host, scan.key_type, scan.fingerprint_sha256
+    row = DeviceHostKey.query.filter_by(ansible_host=address).first()
+    if row is None:
+        row = DeviceHostKey(ansible_host=address, key_type=key_type,
+                            fingerprint_sha256=fingerprint)
+        db.session.add(row)
+    elif row.is_confirmed and (row.key_type, row.fingerprint_sha256) != (key_type, fingerprint):
+        # Re-accepting a *changed* key is the one thing this must not make
+        # casual: it is indistinguishable from the attack the pin exists to
+        # catch. Deleting the row is deliberate friction.
+        raise ConfirmRefused(f'{address} is already pinned to a different key. Remove the '
+                             f'existing pin first if the device genuinely changed.',
+                             back_to='list')
+    else:
+        row.key_type, row.fingerprint_sha256 = key_type, fingerprint
+
+    row.confirmed_by = user.id
+    row.confirmed_at = _utcnow()
+    scan.consumed_at = _utcnow()
+    db.session.add(DeviceHostKeyAudit(
+        ansible_host=address, action='confirmed', key_type=key_type,
+        fingerprint_sha256=fingerprint, actor_id=user.id,
+        requested_by=scan.requested_by, actor_role=user.role,
+    ))
+    db.session.commit()
+    return row
 
 
 def resolve_bundle(bundle: str, platform: str = 'iosxe'):

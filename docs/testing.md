@@ -143,6 +143,7 @@ Pinned by: `tests/test_roles.py::TestRoles::test_an_operator_is_refused_every_ad
 | `test_artifacts.py`, `test_errors.py` | artifacts.md |
 | `test_auth.py`, `test_user_management.py`, `test_roles.py`, `test_bootstrap.py`, `test_config.py`, `test_models.py`, `test_credentials.py` | auth-and-roles.md, deployment.md |
 | `test_schema.py` | schema.md |
+| `test_cli.py` | cli.md |
 | `test_templates.py`, `test_frontend.py` | frontend.md |
 | `test_end_to_end.py` | whole runs |
 | `test_docs.py` | the docs' cited tests and slugs exist |

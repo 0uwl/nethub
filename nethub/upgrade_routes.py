@@ -10,7 +10,6 @@ Thin over `nethub/upgrades.py`. Two things these handlers must not do:
   (`upgrades._seal_into`): Flask can write it and never read it back. Not
   into the session, not into a log.
 """
-from datetime import timedelta
 
 from flask import (
     Blueprint,
@@ -25,7 +24,6 @@ from flask_login import current_user, login_required
 
 from . import artifacts as artifact_store
 from . import settings, upgrades, worker_status
-from .devices.phases import _aware
 from .extensions import db
 from .models import (
     STATE_BEFORE,
@@ -41,34 +39,6 @@ from .web import confirmed
 
 upgrade_bp = Blueprint('upgrades', __name__)
 hostkeys_bp = Blueprint('hostkeys', __name__)
-
-#: How long a succeeded scan stays confirmable. Not strictly
-#: required by the design, but cheap: without it a HostKeyScan row would stay
-#: "confirmable" forever, and a scan from days ago backing a confirmation of a
-#: device that has since changed hands on that address is exactly the kind of
-#: staleness a fresh scan is supposed to rule out.
-SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
-
-
-def may_confirm(scan, user):
-    """Whether `user` may confirm a pin from `scan`.
-
-    With the two-person rule for host keys off, only whoever requested the
-    scan confirms it. With it on, the confirmer must be
-    someone else, except that an admin may confirm any scan,
-    their own included: admins are exempt, and the audit row records the
-    role they acted in.
-    """
-    own = scan.requested_by == user.id
-    if settings.enabled('two_person_hostkeys'):
-        return not own or user.is_admin
-    return own
-
-
-def confirm_by(scan):
-    """The moment `scan` stops being confirmable (`SCAN_CONFIRM_WINDOW`)."""
-    return _aware(scan.finished_at) + SCAN_CONFIRM_WINDOW
-
 
 def _when(job):
     """What to add to an approval's flash: nothing, or the window it waits
@@ -86,9 +56,9 @@ def list_hostkeys():
     keys = DeviceHostKey.query.order_by(DeviceHostKey.ansible_host).all()
     # Scans someone could still confirm, so the person who has to confirm one
     # finds it here rather than depending on a forwarded link.
-    waiting = [(scan, confirm_by(scan)) for scan in HostKeyScan.query.filter(
+    waiting = [(scan, upgrades.confirm_by(scan)) for scan in HostKeyScan.query.filter(
         HostKeyScan.status == 'succeeded', HostKeyScan.consumed_at.is_(None),
-        HostKeyScan.finished_at > upgrades._utcnow() - SCAN_CONFIRM_WINDOW,
+        HostKeyScan.finished_at > upgrades._utcnow() - upgrades.SCAN_CONFIRM_WINDOW,
     ).order_by(HostKeyScan.finished_at)]
     return render_template('pages/hostkeys_list.html', keys=keys, waiting=waiting,
                            two_person=settings.applies('two_person_hostkeys', current_user),
@@ -109,15 +79,11 @@ def scan_hostkey():
     address = request.form.get('address', '').strip()
     if request.method == 'POST':
         try:
-            address = upgrades.check_target(
-                address, current_app.config['DEVICE_TARGET_CIDRS']
-            )
+            scan = upgrades.queue_scan(address, user=current_user,
+                                       cidrs=current_app.config['DEVICE_TARGET_CIDRS'])
         except upgrades.RequestError as exc:
             flash(str(exc))
             return render_template('pages/hostkeys_scan.html', address=address)
-        scan = HostKeyScan(ansible_host=address, requested_by=current_user.id)
-        db.session.add(scan)
-        db.session.commit()
         return redirect(url_for('hostkeys.scan_result', scan_id=scan.id))
     return render_template('pages/hostkeys_scan.html', address=address)
 
@@ -134,8 +100,8 @@ def scan_result(scan_id):
         return redirect(url_for('hostkeys.scan_hostkey'))
     return render_template(
         'pages/hostkeys_scan_result.html', scan=scan,
-        can_confirm=may_confirm(scan, current_user),
-        confirm_by=confirm_by(scan) if scan.status == 'succeeded' else None,
+        can_confirm=upgrades.may_confirm(scan, current_user),
+        confirm_by=upgrades.confirm_by(scan) if scan.status == 'succeeded' else None,
         no_worker=scan.status == 'queued' and worker_status.no_worker(),
     )
 
@@ -153,51 +119,16 @@ def confirm_hostkey():
     """
     raw_scan_id = request.form.get('scan_id', '')
     scan = db.session.get(HostKeyScan, int(raw_scan_id)) if raw_scan_id.isdigit() else None
-    if scan is None or scan.status != 'succeeded':
-        flash('No matching scan to confirm. Scan the address again.')
-        return redirect(url_for('hostkeys.scan_hostkey'))
-    if not may_confirm(scan, current_user):
-        if scan.requested_by == current_user.id:
-            flash('The two-person rule for host keys is on: someone other than '
-                  'whoever requested the scan has to confirm it.')
+    try:
+        row = upgrades.confirm_scan(scan, current_user)
+    except upgrades.ConfirmRefused as exc:
+        flash(str(exc))
+        if exc.back_to == 'result':
             return redirect(url_for('hostkeys.scan_result', scan_id=scan.id))
-        flash('No matching scan to confirm. Scan the address again.')
+        if exc.back_to == 'list':
+            return redirect(url_for('hostkeys.list_hostkeys'))
         return redirect(url_for('hostkeys.scan_hostkey'))
-    if scan.consumed_at is not None:
-        # A succeeded scan confirms at most once. Without this, one scan
-        # could back two different confirmations later.
-        flash('That scan has already been used to confirm a pin. Scan the address again.')
-        return redirect(url_for('hostkeys.scan_hostkey'))
-    if upgrades._utcnow() - _aware(scan.finished_at) > SCAN_CONFIRM_WINDOW:
-        flash('That scan is too old to confirm. Scan the address again.')
-        return redirect(url_for('hostkeys.scan_hostkey'))
-
-    address, key_type, fingerprint = scan.ansible_host, scan.key_type, scan.fingerprint_sha256
-    row = DeviceHostKey.query.filter_by(ansible_host=address).first()
-    if row is None:
-        row = DeviceHostKey(ansible_host=address, key_type=key_type,
-                            fingerprint_sha256=fingerprint)
-        db.session.add(row)
-    elif row.is_confirmed and (row.key_type, row.fingerprint_sha256) != (key_type, fingerprint):
-        # Re-accepting a *changed* key is the one thing this screen must not
-        # make casual: it is indistinguishable from the attack the pin exists
-        # to catch. Deleting the row is deliberate friction.
-        flash(f'{address} is already pinned to a different key. Remove the '
-              f'existing pin first if the device genuinely changed.')
-        return redirect(url_for('hostkeys.list_hostkeys'))
-    else:
-        row.key_type, row.fingerprint_sha256 = key_type, fingerprint
-
-    row.confirmed_by = current_user.id
-    row.confirmed_at = upgrades._utcnow()
-    scan.consumed_at = upgrades._utcnow()
-    db.session.add(DeviceHostKeyAudit(
-        ansible_host=address, action='confirmed', key_type=key_type,
-        fingerprint_sha256=fingerprint, actor_id=current_user.id,
-        requested_by=scan.requested_by, actor_role=current_user.role,
-    ))
-    db.session.commit()
-    flash(f'Confirmed {address} ({key_type}).', 'success')
+    flash(f'Confirmed {row.ansible_host} ({row.key_type}).', 'success')
     return redirect(url_for('hostkeys.list_hostkeys'))
 
 

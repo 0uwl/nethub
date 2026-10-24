@@ -538,7 +538,7 @@ class TestHostKeyRule:
 
     def test_the_confirmer_is_told_the_deadline_and_finds_the_scan_listed(self, app,
                                                                          people):
-        from nethub.upgrade_routes import confirm_by
+        from nethub.upgrades import confirm_by
         rule(app, 'two_person_hostkeys', True)
         with app.app_context():
             scan = scan_by('alice')

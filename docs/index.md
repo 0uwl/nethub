@@ -30,6 +30,7 @@ that apply.
 | Containers, Quadlet units, env vars, CI, releases | [deployment.md](deployment.md) |
 | Templates, CSP, confirmation boxes, worker status | [frontend.md](frontend.md) |
 | Fixtures, captures, the end-to-end test | [testing.md](testing.md) |
+| The `artifacts` and `hostkeys` Flask CLI groups | [cli.md](cli.md) |
 | Anything not built (day-0, OIDC, retention), open questions, rejected ideas | [future.md](future.md) |
 
 ---
