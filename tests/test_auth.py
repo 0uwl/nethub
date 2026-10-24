@@ -138,7 +138,7 @@ def test_repeated_failures_lock_the_account(client, app, make_user):
 
 
 def test_a_lock_expires(client, app, make_user):
-    from datetime import datetime, timedelta, timezone
+    from datetime import UTC, datetime, timedelta
 
     from nethub.extensions import db
     from nethub.models import User
@@ -146,7 +146,7 @@ def test_a_lock_expires(client, app, make_user):
     username, password = make_user(username='heidi', password='heidi-long-pw')
     with app.app_context():
         user = User.query.filter_by(username=username).first()
-        user.locked_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+        user.locked_until = datetime.now(UTC) - timedelta(minutes=1)
         db.session.commit()
         assert not user.is_locked()
 
