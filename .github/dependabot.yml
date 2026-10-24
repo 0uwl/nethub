@@ -30,10 +30,10 @@ updates:
       actions:
         patterns: ['*']
 
-  # requirements.in and the pip-compile lockfiles generated from it. If an
-  # update leaves requirements-dev.txt stale, CI's lockfile check fails the
-  # pull request rather than letting the two drift.
-  - package-ecosystem: pip
+  # pyproject.toml and uv.lock, updated together. CI's `uv lock --check`
+  # compares what the lock resolves to, not its bytes, so Dependabot's own uv
+  # version does not matter.
+  - package-ecosystem: uv
     directory: /
     schedule:
       interval: weekly
@@ -41,8 +41,10 @@ updates:
     cooldown:
       default-days: 7
 
-  # The python:3.12-slim digest in Containerfile and Containerfile.dev. This is
-  # how Debian security fixes reach the image, so it has the shortest cooldown.
+  # The python:3.12-slim and uv image digests in Containerfile and
+  # Containerfile.dev. This is how Debian security fixes reach the image, so it
+  # has the shortest cooldown. The uv image only runs `uv export` at build time;
+  # bump the uv version in cicd.yml with it.
   # Digest updates only: moving to 3.13-slim changes the Python the lockfiles
   # were compiled for, which is a deliberate change of its own (regenerate the
   # locks on the new version, update CI's python-version), not a weekly bump.

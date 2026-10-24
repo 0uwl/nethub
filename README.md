@@ -106,12 +106,11 @@ systemctl --user restart nethub nethub-sibling
 ### Running it locally
 
 ```bash
-pip install --require-hashes -r requirements-dev.txt   # the runtime set plus
-                                   # pytest and CI's own linters, at CI's versions.
-                                   # Both files are hashed lockfiles compiled from
-                                   # requirements.in / requirements-dev.in on
-                                   # Python 3.12; requirements.txt alone is what
-                                   # the image installs.
+uv sync                            # the runtime set plus pytest and CI's own
+                                   # linters, at CI's versions, from the hashed
+                                   # uv.lock into .venv. Activate it
+                                   # (source .venv/bin/activate) or prefix the
+                                   # commands below with `uv run`.
 
 export SECRET_KEY=$(openssl rand -hex 32)   # required; nethub/config.py rejects an absent
                                    # key, a known placeholder, or anything under 32 chars
@@ -248,7 +247,7 @@ repo root locally. Or stop NetHub and copy `database.db` together with any
 
 
 1. `git pull` the new code.
-2. Re-run `pip install --require-hashes -r requirements-dev.txt`, then restart
+2. Re-run `uv sync`, then restart
    `flask --app nethub run` with the same `SECRET_KEY`.
 
 ### Database migrations

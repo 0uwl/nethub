@@ -7,9 +7,9 @@
   topic file. Read the topic file for the code you're about to touch. A
   change that seems to need breaking a hard rule needs a design discussion
   first, not a workaround.
-- Use Python 3.12, the version the lockfiles are compiled on, and install
-  CI's exact tool versions:
-  `pip install --require-hashes -r requirements-dev.txt`.
+- Install [uv](https://docs.astral.sh/uv/) and run `uv sync`. It installs
+  Python 3.12 and CI's exact tool versions into `.venv`; run the commands
+  below with `uv run` or after activating it.
 
 ## Development server
 
@@ -71,8 +71,8 @@ that catch people most often:
 
 `.github/workflows/cicd.yml` runs on every pull request and push to `main`:
 lint (`ruff`, `yamllint`, `shellcheck`, the `Containerfile`, `zizmor` over
-the workflow itself, and a check that the lockfiles match their `.in`
-files), the test suite, and an image build that is smoke-tested
+the workflow itself, and a check that `uv.lock` matches
+`pyproject.toml`), the test suite, and an image build that is smoke-tested
 (`scripts/smoke_test.sh`: web and sibling containers started the way the
 Quadlet units start them) and scanned by Trivy for fixable CRITICAL and HIGH
 CVEs. It also scans the published image weekly. The scans report and do not
@@ -83,9 +83,9 @@ update; one in a pinned Python package is fixed by bumping the pin. Dependabot p
 the pinned actions, Python packages and base image. A merge to `main` publishes
 nothing; see [Releasing](#releasing).
 
-To change a dependency, edit `requirements.in` (or `requirements-dev.in`) and
-regenerate both lockfiles on Python 3.12 with the commands at the top of
-`requirements.in`. CI fails a pull request whose lockfiles are stale.
+To change a dependency, edit `pyproject.toml` (`dependencies` for the
+runtime, the `dev` group for tools), run `uv lock` and commit `uv.lock`. CI
+fails a pull request whose lock is stale.
 
 To run the smoke test locally against an image you built:
 `scripts/smoke_test.sh localhost/nethub:latest` (podman, as the units use;

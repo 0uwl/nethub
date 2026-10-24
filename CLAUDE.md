@@ -43,7 +43,7 @@ which routes a task to its topic file. Each topic file follows HADS:
 ## Commands
 
 ```bash
-pip install --require-hashes -r requirements-dev.txt   # CI's exact tool versions
+uv sync                                                 # CI's exact versions into .venv; activate it or prefix `uv run`
 pytest                                                  # all tests
 ruff check . && yamllint .                              # lint as CI does
 
@@ -58,10 +58,7 @@ python -m nethub.sibling                                # needs NETHUB_SEARCH_DI
 python -m nethub.upgrade_cli --scan <host>              # manual escape hatch (docs/device-layer.md)
 python scripts/check_device_facts.py <ip> --user <name> | --replay <dir>
 scripts/smoke_test.sh [image]                           # ENGINE=docker if no podman
-
-pip-compile --generate-hashes --allow-unsafe --strip-extras --output-file=requirements.txt requirements.in
-pip-compile --generate-hashes --allow-unsafe --strip-extras --output-file=requirements-dev.txt requirements-dev.in
-# Python 3.12, runtime lock first; CI fails on any diff
+uv lock                                                 # after editing pyproject.toml; CI runs `uv lock --check`
 ```
 
 ## Hard rules

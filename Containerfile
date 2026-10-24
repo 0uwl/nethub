@@ -6,6 +6,16 @@
 # proposes the new digest weekly. The cost is that Debian security fixes land
 # only through that bump; the weekly scan of the published image (cicd.yml,
 # scan-published) is what notices when one is overdue.
+# uv runs only in this stage, to turn uv.lock into a hashed requirements file
+# that plain pip installs below; it never reaches the final image. The uv
+# image is pinned by digest like the base, and Dependabot bumps both.
+FROM ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 AS lock
+WORKDIR /src
+COPY pyproject.toml uv.lock ./
+# --frozen exports the lock as committed and never re-resolves; --no-dev
+# leaves out pytest and the linters.
+RUN ["/uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--output-file", "requirements.txt"]
+
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -14,11 +24,10 @@ ENV PYTHONUNBUFFERED=1
 RUN useradd --no-log-init --uid 1000 --create-home nethub
 
 WORKDIR /app
-# requirements.txt is a hashed lockfile (pip-compile, from requirements.in):
-# every package, transitive ones included, is pinned and must match its hash,
-# so a replaced file on the index fails the build instead of shipping. pytest
-# and the lint tools are in requirements-dev.txt and never reach this image.
-COPY requirements.txt .
+# Every package, transitive ones included, is pinned and must match its hash
+# from uv.lock, so a replaced file on the index fails the build instead of
+# shipping.
+COPY --from=lock /src/requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY --chown=nethub:nethub nethub nethub
