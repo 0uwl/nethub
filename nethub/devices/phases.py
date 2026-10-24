@@ -29,7 +29,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 
 import paramiko
@@ -262,7 +262,7 @@ class PhaseContext:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -275,7 +275,7 @@ def _aware(value: datetime | None) -> datetime | None:
     in production and never in a test that skips the round trip.
     """
     if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 

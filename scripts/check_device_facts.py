@@ -20,7 +20,7 @@ import argparse
 import ipaddress
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -61,7 +61,7 @@ def capture(args) -> Path:
     else:
         password = getpass("Device password: ")
 
-    out = Path(args.out or f"captures/{args.host}-{datetime.now(tz=timezone.utc):%Y%m%d-%H%M%S}")
+    out = Path(args.out or f"captures/{args.host}-{datetime.now(tz=UTC):%Y%m%d-%H%M%S}")
     out.mkdir(parents=True, exist_ok=True)
 
     with connection.connect(args.host, args.user, password, pin, auth=args.auth) as conn:

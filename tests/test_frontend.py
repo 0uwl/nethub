@@ -5,7 +5,7 @@ Rendering is tested in test_templates.py; this file holds what a template
 test cannot show -- that an unticked box is refused by the route, not only
 by the browser.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +23,7 @@ from nethub.models import (
 )
 from nethub.web import CONTENT_SECURITY_POLICY
 
-NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 
 
 # --- headers ----------------------------------------------------------------

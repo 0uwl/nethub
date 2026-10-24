@@ -11,7 +11,7 @@ import hashlib
 import os
 import re
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 
@@ -110,7 +110,7 @@ def make_scan(app):
                 key_type=key_type if status == 'succeeded' else None,
                 fingerprint_sha256=fingerprint if status == 'succeeded' else None,
                 error_summary=error_summary,
-                finished_at=datetime.now(timezone.utc), consumed_at=consumed_at,
+                finished_at=datetime.now(UTC), consumed_at=consumed_at,
             )
             db.session.add(scan)
             db.session.commit()
@@ -422,7 +422,7 @@ def test_a_failed_scan_shows_the_error_summary(logged_in_client, make_scan):
 
 
 def test_a_consumed_scan_offers_no_confirm_button(logged_in_client, make_scan):
-    scan_id = make_scan(status='succeeded', consumed_at=datetime.now(timezone.utc))
+    scan_id = make_scan(status='succeeded', consumed_at=datetime.now(UTC))
     body = logged_in_client.get(f'/hostkeys/scan/{scan_id}').get_data(as_text=True)
     assert 'action="/hostkeys/confirm"' not in body
     assert 'already been used' in body.lower()
@@ -533,7 +533,7 @@ def test_every_destructive_form_carries_a_confirmation_box(
 def _add_job(app, run_id, status, *, phase='stage', age=timedelta(0), beat_age=None,
              not_before=None):
     """A job on `run_id`, created `age` ago, last heartbeat `beat_age` ago."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with app.app_context():
         attempt = 1 + UpgradePhaseJob.query.filter_by(run_id=run_id, phase=phase).count()
         job = UpgradePhaseJob(run_id=run_id, phase=phase, attempt=attempt, status=status,
@@ -599,7 +599,7 @@ def test_a_queued_scan_with_nobody_working_asks_about_the_sibling(
     scan = make_scan(status='queued')
     with app.app_context():
         db.session.get(HostKeyScan, scan).created_at = (
-            datetime.now(timezone.utc) - timedelta(minutes=2))
+            datetime.now(UTC) - timedelta(minutes=2))
         db.session.commit()
     body = logged_in_client.get(f'/hostkeys/scan/{scan}').get_data(as_text=True)
     assert 'No worker has picked this up' in body
@@ -770,7 +770,7 @@ def test_a_scheduled_job_is_shown_with_its_window_and_does_not_refresh(
     wrong."""
     run = make_run(state='running', awaiting_phase=None)
     _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
-             not_before=datetime.now(timezone.utc) + timedelta(hours=6))
+             not_before=datetime.now(UTC) + timedelta(hours=6))
     body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
     assert 'is scheduled for' in body
     assert 'http-equiv="refresh"' not in body
@@ -784,7 +784,7 @@ def test_a_job_whose_window_has_just_opened_is_not_a_missing_worker(
     keys on when the job became due, not on when the row was written."""
     run = make_run(state='running', awaiting_phase=None)
     _add_job(app, run, 'queued', phase='activate', age=timedelta(hours=6),
-             not_before=datetime.now(timezone.utc) - timedelta(seconds=2))
+             not_before=datetime.now(UTC) - timedelta(seconds=2))
     body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
     assert '<meta http-equiv="refresh" content="5">' in body, 'it is due, so it refreshes'
     assert 'No worker has picked this up' not in body
@@ -795,7 +795,7 @@ def test_a_due_job_still_refreshes_and_still_reports_a_missing_worker(
 ):
     run = make_run(state='running', awaiting_phase=None)
     _add_job(app, run, 'queued', phase='activate', age=timedelta(minutes=30),
-             not_before=datetime.now(timezone.utc) - timedelta(minutes=30))
+             not_before=datetime.now(UTC) - timedelta(minutes=30))
     body = operator.get(f'/upgrades/{run}').get_data(as_text=True)
     assert '<meta http-equiv="refresh" content="5">' in body
     assert 'No worker has picked this up' in body

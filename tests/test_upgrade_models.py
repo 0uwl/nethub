@@ -6,7 +6,7 @@ absent if the declaration is wrong -- SQLite enforces no foreign key unless
 asked, and a trigger that was never created raises nothing.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -23,7 +23,7 @@ from nethub.models import (
     is_terminal,
 )
 
-NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 9, tzinfo=UTC)
 DIGEST = "a" * 128
 
 

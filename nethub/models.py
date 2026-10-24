@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 from flask_login import UserMixin
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -32,7 +32,7 @@ class User(db.Model, UserMixin):
     # submitted without it, because the two-sided attribution property is
     # what the whole credential path is built for.
     device_username = db.Column(db.String(80))
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(UTC))
     #: Least privilege unless something says otherwise: `create-admin` and
     #: first-boot bootstrap set `admin`, and the migration that added the
     #: column made every user who existed then an admin, which they all were.
@@ -84,18 +84,18 @@ class User(db.Model, UserMixin):
     def is_locked(self, now=None):
         if self.locked_until is None:
             return False
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         # SQLite hands back naive datetimes for values written aware, so a
         # round-tripped `locked_until` would raise TypeError against an aware
         # `now` -- the same trap phases._aware()/sibling._aware() exist for.
         locked_until = self.locked_until
         if locked_until.tzinfo is None:
-            locked_until = locked_until.replace(tzinfo=timezone.utc)
+            locked_until = locked_until.replace(tzinfo=UTC)
         return locked_until > now
 
     def register_failed_login(self, *, limit, lockout, now=None):
         """Count one failure and lock the account once it reaches `limit`."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         self.failed_logins = (self.failed_logins or 0) + 1
         if self.failed_logins >= limit:
             self.locked_until = now + lockout
@@ -108,7 +108,7 @@ class User(db.Model, UserMixin):
 
 
 def _utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 #: An upload lands `staged` when the two-person rule for artifacts applies to

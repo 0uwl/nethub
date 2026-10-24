@@ -20,7 +20,7 @@ import io
 import logging
 import re
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 
 import pytest
@@ -250,7 +250,7 @@ class Clock:
         self.offset = timedelta(0)
 
     def __call__(self) -> datetime:
-        return datetime.now(timezone.utc) + self.offset
+        return datetime.now(UTC) + self.offset
 
 
 @pytest.fixture
@@ -806,7 +806,7 @@ class TestScheduledApproval:
         approve(web, submitted, "stage")
         assert work() == ["succeeded"]
 
-        window = datetime.now(timezone.utc) + timedelta(hours=6)
+        window = datetime.now(UTC) + timedelta(hours=6)
         approve(web, submitted, "activate", start_at=window.strftime("%Y-%m-%dT%H:%M"))
         seen = len(switch.commands)
 
