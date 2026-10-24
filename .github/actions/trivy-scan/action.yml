@@ -2,11 +2,7 @@ name: Trivy scan and report
 description: >
   Scan a container image for CVEs with Trivy, report the findings in the job
   summary and as a warning annotation, and upload the SARIF to GitHub code
-  scanning. Never fails the job on a finding. Modelled on DynaForm's action of
-  the same name, which gates instead. Reads SCAN_SEVERITY and SCAN_VULN_TYPE
-  from the calling workflow's env, so every scan follows one severity policy.
-  The caller must have checked out the repository (for
-  scripts/trivy_report.sh) and grant security-events write for the upload.
+  scanning. Does not fail jobs on a finding.
 
 inputs:
   image-ref:
@@ -35,10 +31,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # No exit-code: a finding must not fail the job.
-    # limit-severities-for-sarif is load-bearing. Without it the action drops
-    # `severity` whenever the format is SARIF and reports every fixable LOW
-    # and MEDIUM as well (46 results against 7 on the pinned base, measured).
     - name: Scan image for CVEs
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
       with:
