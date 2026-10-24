@@ -9,7 +9,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import paramiko
 import pytest
@@ -27,7 +27,7 @@ from nethub.models import (
     User,
 )
 
-NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 9, tzinfo=UTC)
 #: Captured before the autouse fixture below replaces it, for the tests of
 #: the check itself.
 REAL_CHECK_SOURCE = phases.check_source

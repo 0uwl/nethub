@@ -6,7 +6,7 @@ and the confirmed host key -- and where the credential is taken without ever
 being stored.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from flask import current_app
@@ -24,7 +24,7 @@ from nethub.models import (
     User,
 )
 
-NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 9, tzinfo=UTC)
 DIGEST = "a" * 128
 PASSWORD = "d3vice-pass"
 IMAGE = "cat9k_lite_iosxe.17.12.06.SPA.bin"
@@ -292,7 +292,7 @@ class TestSealedAtSubmitAndApprove:
     @staticmethod
     def open_as_sibling(key, job, approved_by, now=None):
         return SC.open_sealed(key, job.sealed_credential, job_id=job.id,
-                              approved_by=approved_by, now=now or datetime.now(timezone.utc))
+                              approved_by=approved_by, now=now or datetime.now(UTC))
 
     def test_precheck_is_sealed_for_the_submitter(
             self, app, user, confirmed, credential_private_key):
@@ -318,7 +318,7 @@ class TestSealedAtSubmitAndApprove:
             self, app, user, confirmed, credential_private_key):
         with app.app_context():
             _run, job = submit(user)
-            deadline = job.deadline_at.replace(tzinfo=timezone.utc)
+            deadline = job.deadline_at.replace(tzinfo=UTC)
             self.open_as_sibling(credential_private_key, job, user,
                                  now=deadline - timedelta(seconds=1))
             with pytest.raises(SC.CredentialError, match='expired'):
@@ -366,15 +366,15 @@ class TestPhaseDeadlines:
             assert _aware(fresh.deadline_at) > upgrades._utcnow()
 
     def test_a_bigger_image_gets_a_longer_stage_budget(self):
-        from datetime import datetime, timezone
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        from datetime import UTC, datetime
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         small = upgrades.phase_deadline('stage', hosts=1, image_bytes=100 << 20, now=now)
         large = upgrades.phase_deadline('stage', hosts=1, image_bytes=1200 << 20, now=now)
         assert large > small, "stage is dominated by the transfer"
 
     def test_more_hosts_gets_a_longer_budget(self):
-        from datetime import datetime, timezone
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        from datetime import UTC, datetime
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         one = upgrades.phase_deadline('activate', hosts=1, now=now)
         many = upgrades.phase_deadline('activate', hosts=20, now=now)
         assert many > one, "a phase walks hosts one at a time"
@@ -389,8 +389,8 @@ class TestPhaseDeadlines:
         """471 MB took ~370s on the lab switch (docs/device-layer.md). A
         deadline that fires on a healthy run is worse than no deadline.
         """
-        from datetime import datetime, timezone
-        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        from datetime import UTC, datetime
+        now = datetime(2026, 1, 1, tzinfo=UTC)
         budget = (upgrades.phase_deadline(
             'stage', hosts=1, image_bytes=471 << 20, now=now) - now).total_seconds()
         assert budget > 370 * 4, f"only {budget / 370:.1f}x the measured time"
@@ -1115,7 +1115,7 @@ class TestScheduledApprovals:
                           start_at=self.LATER)
             # SQLite hands the column back naive, as it does every timestamp.
             assert upgrades._aware(job.not_before) == datetime(
-                2026, 9, 9, 2, 0, tzinfo=timezone.utc)
+                2026, 9, 9, 2, 0, tzinfo=UTC)
             assert job.approved_at is not None, "approved now, running later"
 
     def test_the_deadline_runs_from_the_window_not_the_approval(
@@ -1215,4 +1215,4 @@ class TestScheduledApprovals:
         with app.app_context():
             job = UpgradePhaseJob.query.filter_by(phase="activate").one()
             assert upgrades._aware(job.not_before) == datetime(
-                2026, 9, 9, 2, 0, tzinfo=timezone.utc)
+                2026, 9, 9, 2, 0, tzinfo=UTC)

@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
@@ -113,8 +113,8 @@ def start_time(raw, *, gate_expires_at, now=None):
             f'"{text}" is not a date and time. Use the form\'s picker, or type '
             f'something like 2026-10-01T02:00.'
         ) from None
-    when = (when.replace(tzinfo=timezone.utc) if when.tzinfo is None
-            else when.astimezone(timezone.utc))
+    when = (when.replace(tzinfo=UTC) if when.tzinfo is None
+            else when.astimezone(UTC))
     now = now or _utcnow()
     if when <= now:
         raise RequestError('That start time has passed. Leave it empty to start now.')
@@ -164,12 +164,12 @@ def _aware(value):
     helper as `phases._aware`, kept here so this module needs no device
     imports."""
     if value is not None and value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 
 def _utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def parse_hosts(raw: str) -> list[tuple[str, str]]:

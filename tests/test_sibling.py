@@ -7,7 +7,7 @@ does under contention.
 """
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from nacl.public import PrivateKey
@@ -29,7 +29,7 @@ from nethub.models import (
 )
 from tests.test_phases import cancel_as_flask
 
-NOW = datetime(2026, 9, 9, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 9, tzinfo=UTC)
 DIGEST = "a" * 128
 
 
