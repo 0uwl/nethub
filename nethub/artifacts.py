@@ -24,7 +24,7 @@ import hashlib
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import exists
@@ -52,7 +52,7 @@ class ArtifactError(Exception):
 
 
 def _utcnow():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def store_dir(app_config) -> str:

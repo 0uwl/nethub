@@ -33,7 +33,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from nacl.exceptions import CryptoError
 from nacl.public import PrivateKey, PublicKey, SealedBox
@@ -143,7 +143,7 @@ def check_pair(private_key: PrivateKey, public_key: PublicKey) -> None:
 # -- sealing and opening --------------------------------------------------------
 
 def _aware(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def seal(public_key: PublicKey, *, job_id: int, approved_by: int, username: str,

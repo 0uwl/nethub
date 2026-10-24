@@ -11,14 +11,14 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from nacl.public import PrivateKey, SealedBox
 
 from nethub import sealed_credentials as SC
 
-NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
 KEY = PrivateKey.generate()
 
 
