@@ -87,13 +87,18 @@ def test_quitting_while_a_phase_runs_is_refused(make_run, monkeypatch):  # noqa:
 
 
 def test_a_whole_run_goes_through_every_gate_dialog(make_run, fleet):  # noqa: F811
-    """Each gate's buttons are real widget ids, and pressing them runs the phase."""
+    """Each gate's buttons are real widget ids, pressing them runs the phase, and
+    only pre-check asks for the device password."""
     app = NetHubTUI(make_run())
 
     async def press(app, pilot, button):
         await pilot.press('a')
         await pilot.pause()
-        app.screen.query_one('#password', Input).value = DEVICE_PASS
+        fields = app.screen.query('#password')
+        if button == 'precheck':
+            fields.first(Input).value = DEVICE_PASS
+        else:
+            assert not fields, 'the password is asked for once, at pre-check'
         await pilot.click(f'#{button}')
         await settle(app, pilot)
 

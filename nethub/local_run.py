@@ -7,10 +7,12 @@ the canary, the wave stops and "an activated host is never kept" hold here
 by construction ([tui-shares-the-phase-engine]).
 
 Nothing is written anywhere ([tui-stores-nothing]): the result rows live in
-`MemoryLedger.results` for the summary. The device password is collected per
-gate, as the web app does, and held only in that phase's `PhaseContext`, so
-a password refused at one gate is simply typed again at the next approval.
-A run made here is outside NetHub's audit trail.
+`MemoryLedger.results` for the summary. The device password is given once and
+held in this run's `PhaseContext` (whose repr hides it) until the process
+ends. The run lives no longer than the process, so asking again at each gate
+would protect nothing. A phase stopped by a refused credential drops it, and
+the next step asks again ([tui-refused-password-is-dropped]). A run made
+here is outside NetHub's audit trail.
 
 Imports no Flask and no SQLAlchemy ([tui-imports-no-flask]).
 """
@@ -147,23 +149,33 @@ class LocalRun:
         self.reload_wait = reload_wait
         self.on_tick = on_tick
         self.jobs: list[Job] = []
+        #: The run's credential, None until given and after a refusal.
+        self._ctx: phases.PhaseContext | None = None
 
     @property
     def finished(self) -> bool:
         return self.run.state in ('completed', 'failed', 'cancelled')
 
-    def precheck(self, password: str) -> str:
+    @property
+    def needs_password(self) -> bool:
+        return self._ctx is None
+
+    def close(self) -> None:
+        """Drop the credential."""
+        self._ctx = None
+
+    def precheck(self, password: str | None = None) -> str:
         if self.run.state != 'pre_checking' or self.jobs:
             raise LocalRunError('Pre-check has already run.')
         return self._dispatch('precheck', password)
 
-    def approve(self, phase: str, password: str, reload_count=None) -> str:
+    def approve(self, phase: str, password: str | None = None, reload_count=None) -> str:
         self._at_gate(phase)
         concurrency = targets.reload_count(reload_count, self.concurrency) \
             if phase == 'activate' else None
         return self._dispatch(phase, password, concurrency=concurrency)
 
-    def retry(self, phase: str, password: str, reload_count=None) -> str:
+    def retry(self, phase: str, password: str | None = None, reload_count=None) -> str:
         """Run `phase` again on the hosts that failed it (`RETRYABLE_AT`)."""
         if self.run.state != 'awaiting_approval' or \
                 phase not in RETRYABLE_AT.get(self.run.awaiting_phase, ()):
@@ -191,25 +203,26 @@ class LocalRun:
                 or self.run.awaiting_phase != phase:
             raise LocalRunError(f'This run is not waiting at the {phase} gate.')
 
-    def _dispatch(self, phase: str, password: str, *, concurrency=None,
+    def _dispatch(self, phase: str, password: str | None, *, concurrency=None,
                   is_retry=False) -> str:
-        # The same allowlist the web app applies before sealing a credential.
-        for what, value in (('Device username', self.username), ('Device password', password)):
-            try:
-                check_credential(value)
-            except CredentialError as exc:
-                raise LocalRunError(f'{what} refused: {exc}.') from None
-        # The credential's whole lifetime: this phase, and the verify that
-        # follows an activate on it, as in the sibling.
-        ctx = phases.PhaseContext(
-            device_username=self.username, device_password=password,
-            search_dir=self.search_dir, reload_wait=self.reload_wait,
-            connect=self.connect,
-        )
-        try:
-            return self._run_phases(phase, ctx, concurrency, is_retry)
-        finally:
-            ctx.device_password = ''
+        """`password`, if given, becomes the run's credential; otherwise the
+        one already given is used."""
+        if password:
+            # The same allowlist the web app applies before sealing one.
+            for what, value in (('Device username', self.username),
+                                ('Device password', password)):
+                try:
+                    check_credential(value)
+                except CredentialError as exc:
+                    raise LocalRunError(f'{what} refused: {exc}.') from None
+            self._ctx = phases.PhaseContext(
+                device_username=self.username, device_password=password,
+                search_dir=self.search_dir, reload_wait=self.reload_wait,
+                connect=self.connect,
+            )
+        if self._ctx is None:
+            raise LocalRunError('Enter the device password.')
+        return self._run_phases(phase, self._ctx, concurrency, is_retry)
 
     def _run_phases(self, phase, ctx, concurrency, is_retry) -> str:
         run = self.run
@@ -221,6 +234,10 @@ class LocalRun:
             result = phases.execute_phase(
                 job, ctx, ledger=self.ledger, concurrency=self.concurrency,
                 on_tick=self.on_tick)
+            if result.stopped_by == 'credential':
+                # Never offered again: each entry costs one AAA failure at
+                # most, and the next step asks for the password anew.
+                self._ctx = None
             step, following = flow.next_step(run, job, result)
             if step == 'run':
                 # Only verify, after activate, on the same credential.

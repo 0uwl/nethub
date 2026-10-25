@@ -317,7 +317,8 @@ nhtui --hosts hosts.txt --image /path/to/image.bin --sha512 <hex> \
   bring the keys you've already checked with `--pins` (one
   `address key-type SHA256:...` per line).
 - Press `a` for the next step: pre-check first, then each gate's approve,
-  retry or decline. Each step asks for the device password again.
+  retry or decline. The device password is asked for once, at pre-check,
+  and again only if a switch refuses it.
 - Press `x` to cancel and `q` to quit. You can't quit while a phase is
   running.
 

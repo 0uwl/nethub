@@ -114,6 +114,43 @@ class TestWholeRun:
         assert DEVICE_PASS not in repr(vars(local))
 
 
+class TestOnePassword:
+    def test_the_password_is_asked_once(self, make_run, fleet):
+        local = make_run()
+        assert local.needs_password
+        local.precheck(DEVICE_PASS)
+        assert not local.needs_password
+        local.approve('stage')
+        local.approve('activate')
+        local.approve('cleanup')
+        assert local.run.state == 'completed'
+        assert all(fleet[a].version == TARGET for a in (ADDRESS, ADDRESS2))
+
+    def test_a_refused_password_is_dropped_and_asked_for_again(self, make_run, fleet):
+        local = make_run()
+        local.precheck(DEVICE_PASS)
+        assert local.approve('stage', 'typo') == 'failed'
+        assert [login for a in (ADDRESS, ADDRESS2)
+                for login in fleet[a].logins if login[1] == 'typo'] == [(DEVICE_USER, 'typo')]
+        assert local.needs_password, 'a refused password is never offered again'
+        with pytest.raises(LocalRunError, match='Enter the device password'):
+            local.approve('stage')
+        assert local.approve('stage', DEVICE_PASS) == 'succeeded'
+
+    def test_a_refusal_at_precheck_ends_the_run(self, make_run):
+        """Pre-check has no gate to return to, as in the web app; nothing has
+        been changed on a device, so restarting is the recovery."""
+        local = make_run()
+        assert local.precheck('typo') == 'failed'
+        assert (local.run.state, local.needs_password) == ('failed', True)
+
+    def test_close_drops_the_password(self, make_run):
+        local = make_run()
+        local.precheck(DEVICE_PASS)
+        local.close()
+        assert local.needs_password
+
+
 class TestFailures:
     def test_a_mistyped_password_is_tried_once_and_the_run_waits_at_the_gate(
             self, make_run, fleet):

@@ -52,17 +52,33 @@ session still kills the process, so the TUI warns when it is not inside
 **[SPEC]**
 `nhtui` writes no file and no database row. The one exception is
 `--report FILE`, which is written at quit when the operator asks for it.
-The device password is collected at each gate, as in the web app. It
-lives only in that phase's `PhaseContext`, never in a result, the run
-object or the report.
-Pinned by: `tests/test_local_run.py::TestWholeRun::test_no_password_is_kept_in_the_record`
+The device password is entered once, at pre-check, and held in memory in
+the run's `PhaseContext` (whose repr hides it) until the process exits. It
+is never in a result, the run's repr or the report.
+Pinned by: `tests/test_local_run.py::TestWholeRun::test_no_password_is_kept_in_the_record`, `tests/test_local_run.py::TestOnePassword::test_the_password_is_asked_once`, `tests/test_local_run.py::TestOnePassword::test_close_drops_the_password`, `tests/test_tui.py::test_a_whole_run_goes_through_every_gate_dialog`
 
 **[NOTE]**
 A run made here is outside NetHub's audit trail, and the TUI and its
 summary say so. Writing NetHub's tables from here would be the third
 writer device-layer.md §7 rejects.
 
-### 1.4 [tui-never-tofu]
+### 1.4 [tui-refused-password-is-dropped]
+**[SPEC]**
+A phase that stops on a refused credential drops the stored password, and
+the next step asks for it again; it is never offered to a device twice.
+A refusal at pre-check ends the run, which has no gate to return to; it
+has changed nothing, so restarting `nhtui` is the recovery.
+Pinned by: `tests/test_local_run.py::TestOnePassword::test_a_refused_password_is_dropped_and_asked_for_again`, `tests/test_local_run.py::TestOnePassword::test_a_refusal_at_precheck_ends_the_run`
+
+**[NOTE]**
+The web app collects the password at every gate because a run can wait
+at a gate for days and the credential is sealed into a row. Here the
+run lives no longer than the process and nothing reaches disk, so
+asking again would protect nothing. Each phase's `LoginGate` still tries
+a password on one switch only, so each entry costs at most one AAA
+failure.
+
+### 1.5 [tui-never-tofu]
 **[SPEC]**
 A pin comes only from `--pins FILE` or from a scan the operator confirms
 in a dialog that shows the fingerprint. Pre-check refuses to start until
@@ -70,7 +86,7 @@ every address has a pin, and an address without one fails as `hostkey`
 without a connection.
 Pinned by: `tests/test_tui.py::test_precheck_waits_for_every_pin_and_then_stops_at_the_stage_gate`, `tests/test_tui.py::test_closing_the_scan_dialog_pins_nothing`, `tests/test_local_run.py::TestFailures::test_an_address_with_no_pin_fails_that_host_alone`
 
-### 1.5 [tui-targets-get-submit-checks]
+### 1.6 [tui-targets-get-submit-checks]
 **[SPEC]**
 `load_hosts` applies `targets.parse_hosts` and `targets.check_target`, as
 a web submit does: IP literals inside `--cidr`/`DEVICE_TARGET_CIDRS`
@@ -78,7 +94,7 @@ only, and an empty list refuses every address. The image's SHA-512 must
 equal the one claimed, as an upload's must.
 Pinned by: `tests/test_local_run.py::TestSetup::test_targets_get_the_web_submit_checks`, `tests/test_local_run.py::TestSetup::test_an_image_that_does_not_match_its_digest_is_refused`
 
-### 1.6 [tui-imports-no-flask]
+### 1.7 [tui-imports-no-flask]
 **[SPEC]**
 Importing `nethub.tui` or `nethub.local_run` loads no Flask, SQLAlchemy,
 Werkzeug or Alembic, so `nhtui` runs with no web configuration at all.
@@ -102,6 +118,8 @@ nhtui --hosts hosts.txt --image cat9k_lite_iosxe.17.12.08.SPA.bin \
 - Keys: `s` scans the selected host's key, `a` takes the next step
   (pre-check, or the current gate's approve, retry or decline), `x`
   cancels, `q` quits.
+- The device password is asked for once, with pre-check, and again only
+  after a refusal (rule 1.4).
 - The gates and their consequence text match the run page: pre-check,
   stage, activate (with the reload count, capped at `--concurrency`),
   then cleanup, with verify chained after activate. Retry of failed
@@ -136,6 +154,9 @@ nhtui --hosts hosts.txt --image cat9k_lite_iosxe.17.12.08.SPA.bin \
 ## 4. Known gaps
 
 **[SPEC]**
+- The device password stays in this process's memory for the whole run,
+  and `nhtui` sets no core-dump limit or `PR_SET_DUMPABLE`. Run it as the
+  device user on a host you trust (credentials.md, Known gaps).
 - `nhtui` has not been run against hardware. Only the engine it shares
   has (device-layer.md §6).
 - There is no non-interactive mode: every gate needs someone at the

@@ -177,7 +177,6 @@ class NetHubTUI(App):
         if self.local.finished:
             self.notify(f'The run is {run.state}. Press q to quit.')
             return
-        user = self.local.username
         if run.state == 'pre_checking':
             unpinned = [h.ansible_host for h in run.hosts
                         if h.ansible_host not in self.local.ledger.pins]
@@ -187,7 +186,7 @@ class NetHubTUI(App):
             text = (f'Run pre-check on {len(run.hosts)} device(s). This releases your '
                     f'device credential against every address listed.')
             self.push_screen(ChoiceScreen(text, [('precheck', 'Run pre-check')],
-                                          password_for=user), self.choose)
+                                          password_for=self._password_for()), self.choose)
             return
         gate = run.awaiting_phase
         hosts = [h for h in run.hosts if h.state == STATE_BEFORE[gate]]
@@ -210,9 +209,14 @@ class NetHubTUI(App):
         if gate == 'cleanup':
             actions.append(('decline-cleanup', 'Decline cleanup and close the run'))
         reloads = gate == 'activate' or any(a == 'retry-activate' for a, _ in actions)
-        self.push_screen(ChoiceScreen(text, actions, password_for=user,
+        self.push_screen(ChoiceScreen(text, actions, password_for=self._password_for(),
                                       reload_cap=self.local.concurrency if reloads else None),
                          self.choose)
+
+    def _password_for(self) -> str | None:
+        """Ask for the password only when the run holds none: at pre-check,
+        and after a refusal dropped it."""
+        return self.local.username if self.local.needs_password else None
 
     def choose(self, choice) -> None:
         if choice is None:
@@ -232,12 +236,16 @@ class NetHubTUI(App):
         verb, _, phase = action.partition('-')
         try:
             if verb == 'precheck':
-                status = self.local.precheck(password)
+                status = self.local.precheck(password or None)
             elif verb == 'approve':
-                status = self.local.approve(phase, password, reload)
+                status = self.local.approve(phase, password or None, reload)
             else:
-                status = self.local.retry(phase, password, reload)
+                status = self.local.retry(phase, password or None, reload)
             message = f'{phase or "precheck"}: {status}.'
+            if self.local.needs_password:
+                message += (' The device password was refused and has been dropped; '
+                            + ('restart nhtui to try again.' if self.local.finished
+                               else 'the next step will ask for it again.'))
         except (LocalRunError, targets.RequestError) as exc:
             message = f'Refused: {exc}'
         self.call_from_thread(self.finish_dispatch, message)
@@ -330,6 +338,7 @@ def main(argv=None) -> int:
         return 2
 
     NetHubTUI(local).run()
+    local.close()
     print(_summary(local))
     if args.report:
         with open(args.report, 'w') as handle:
