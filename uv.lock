@@ -357,12 +357,14 @@ dependencies = [
 
 [package.optional-dependencies]
 tui = [
+    { name = "rich" },
     { name = "textual" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "rich" },
     { name = "ruff" },
     { name = "shellcheck-py" },
     { name = "textual" },
@@ -382,6 +384,7 @@ requires-dist = [
     { name = "netmiko", specifier = "==4.8.0" },
     { name = "ntc-templates", specifier = "==9.3.0" },
     { name = "pynacl", specifier = "==1.6.2" },
+    { name = "rich", marker = "extra == 'tui'", specifier = "==15.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = "==8.2.8" },
 ]
 provides-extras = ["tui"]
@@ -389,6 +392,7 @@ provides-extras = ["tui"]
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = "==9.1.1" },
+    { name = "rich", specifier = "==15.0.0" },
     { name = "ruff", specifier = "==0.17.1" },
     { name = "shellcheck-py", specifier = "==0.11.0.1" },
     { name = "textual", specifier = "==8.2.8" },

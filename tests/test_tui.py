@@ -114,3 +114,17 @@ def test_a_whole_run_goes_through_every_gate_dialog(make_run, fleet):  # noqa: F
 
     drive(app, scenario)
     assert all(fleet[a].version == TARGET for a in (ADDRESS, ADDRESS2))
+
+
+def test_verified_hosts_are_green_and_failed_ones_red(make_run):  # noqa: F811
+    local = make_run()
+    local.run.hosts[0].state, local.run.hosts[1].state = 'verified', 'failed'
+    app = NetHubTUI(local)
+
+    async def scenario(app, pilot):
+        app.refresh_view()
+        table = app.query_one('DataTable')
+        assert {cell.style for cell in table.get_row_at(0)} == {'bold green'}
+        assert {cell.style for cell in table.get_row_at(1)} == {'bold red'}
+
+    drive(app, scenario)

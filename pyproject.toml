@@ -47,6 +47,8 @@ dependencies = [
 [project.optional-dependencies]
 tui = [
     "textual==8.2.8",
+    # Textual's own renderer; nethub/tui.py styles table cells with it.
+    "rich==15.0.0",
 ]
 
 [project.scripts]
@@ -73,6 +75,7 @@ dev = [
     # shellcheck itself, as a wheel carrying the binary: lints scripts/*.sh.
     "shellcheck-py==0.11.0.1",
     "textual==8.2.8",
+    "rich==15.0.0",
 ]
 
 [tool.pytest.ini_options]

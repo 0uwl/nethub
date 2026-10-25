@@ -4,11 +4,12 @@ A view over `nethub.local_run.LocalRun`, which runs the sibling's own phase
 engine in this process (docs/tui.md). No web app, no sibling, no database:
 the run lives in memory, this process is its dispatcher, and nothing is
 stored unless `--report` asks for a file. A run made here is outside
-NetHub's audit trail, and it says so.
+NetHub's audit trail, and the summary printed at exit says so.
 
-The gates are the web app's: pre-check, then an approval (with the device
-password, collected again each time) before stage, activate and cleanup,
-with retry of failed hosts at each gate. Every address needs a pin the
+The gates are the web app's: pre-check, then an approval before stage,
+activate and cleanup, with retry of failed hosts at each gate. The device
+password is asked for once, with pre-check, and again only after a refusal
+(docs/tui.md [tui-refused-password-is-dropped]). Every address needs a pin the
 operator confirmed in this session or brought with `--pins`; there is no
 trust on first use (docs/tui.md [tui-never-tofu]).
 
@@ -23,6 +24,7 @@ import os
 import sys
 from typing import ClassVar
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -33,6 +35,10 @@ from nethub import flow, targets
 from nethub.devices import connection
 from nethub.local_run import LocalRun, LocalRunError, MemoryLedger, load_hosts
 from nethub.vocab import STATE_BEFORE
+
+#: Row colour by host cursor: green once verified on the target version, red
+#: once failed. Everything in between stays plain.
+HOST_STYLES = {'verified': 'bold green', 'failed': 'bold red'}
 
 
 class ChoiceScreen(ModalScreen):
@@ -122,11 +128,12 @@ class NetHubTUI(App):
         for host in run.hosts:
             pin = ledger.pins.get(host.ansible_host)
             result = last.get(host.hostname)
-            table.add_row(
-                host.hostname, host.ansible_host,
-                pin.fingerprint_sha256 if pin else 'not confirmed', host.state,
-                f"{result['phase']} {result['status']} {result['failure_stage'] or ''}"
-                if result else '')
+            cells = (host.hostname, host.ansible_host,
+                     pin.fingerprint_sha256 if pin else 'not confirmed', host.state,
+                     f"{result['phase']} {result['status']} {result['failure_stage'] or ''}"
+                     if result else '')
+            style = HOST_STYLES.get(host.state, '')
+            table.add_row(*(Text(cell, style=style) for cell in cells))
         table.move_cursor(row=min(row, len(run.hosts) - 1))
         for result in ledger.results[self.logged:]:
             self.say(f"{result['hostname']}: {result['phase']} {result['status']}"

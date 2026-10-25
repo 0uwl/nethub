@@ -58,9 +58,10 @@ is never in a result, the run's repr or the report.
 Pinned by: `tests/test_local_run.py::TestWholeRun::test_no_password_is_kept_in_the_record`, `tests/test_local_run.py::TestOnePassword::test_the_password_is_asked_once`, `tests/test_local_run.py::TestOnePassword::test_close_drops_the_password`, `tests/test_tui.py::test_a_whole_run_goes_through_every_gate_dialog`
 
 **[NOTE]**
-A run made here is outside NetHub's audit trail, and the TUI and its
-summary say so. Writing NetHub's tables from here would be the third
-writer device-layer.md §7 rejects.
+A run made here is outside NetHub's audit trail. The TUI shows no
+standing notice of it; the summary printed at exit says so. Writing
+NetHub's tables from here would be the third writer device-layer.md §7
+rejects.
 
 ### 1.4 [tui-refused-password-is-dropped]
 **[SPEC]**
@@ -118,6 +119,8 @@ nhtui --hosts hosts.txt --image cat9k_lite_iosxe.17.12.08.SPA.bin \
 - Keys: `s` scans the selected host's key, `a` takes the next step
   (pre-check, or the current gate's approve, retry or decline), `x`
   cancels, `q` quits.
+- A host's row turns green once it is `verified` on the target version,
+  and red once it has `failed` (`HOST_STYLES`).
 - The device password is asked for once, with pre-check, and again only
   after a refusal (rule 1.4).
 - The gates and their consequence text match the run page: pre-check,
