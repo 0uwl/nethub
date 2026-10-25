@@ -1,5 +1,5 @@
 # Host keys
-Code: `nethub/upgrade_routes.py` (`hostkeys_bp`), `nethub/upgrades.py` (`check_target`, `queue_scan`, `confirm_scan`, `may_confirm`, `SCAN_CONFIRM_WINDOW`, `confirmed_key`, `delete_pin`), `nethub/cli.py` (`hostkeys`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`), `nethub/devices/phases.py` (`pinned_key`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`, `tests/test_cli.py`
+Code: `nethub/upgrade_routes.py` (`hostkeys_bp`), `nethub/targets.py` (`check_target`), `nethub/upgrades.py` (`queue_scan`, `confirm_scan`, `may_confirm`, `SCAN_CONFIRM_WINDOW`, `confirmed_key`, `delete_pin`), `nethub/cli.py` (`hostkeys`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`, `SqlLedger.pin_for`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`, `tests/test_cli.py`
 
 ---
 
@@ -20,10 +20,10 @@ device-layer.md §1.
 
 ### 1.1 [target-is-an-ip-in-a-cidr]
 **[SPEC]**
-`upgrades.check_target` accepts only an IP literal inside one of the
+`targets.check_target` accepts only an IP literal inside one of the
 `DEVICE_TARGET_CIDRS`. A hostname is refused, never resolved, and an
-empty CIDR list refuses every address. Submitting a run and requesting a
-scan both go through it.
+empty CIDR list refuses every address. Submitting a run, requesting a scan
+and `nhtui` all go through it.
 Pinned by: `tests/test_upgrade_routes.py::TestTargetValidation::test_a_hostname_is_refused_rather_than_resolved`, `tests/test_upgrade_routes.py::TestTargetValidation::test_no_configured_cidr_refuses_everything`, `tests/test_upgrade_routes.py::TestTargetValidation::test_an_address_outside_the_cidr_is_refused`, `tests/test_upgrade_routes.py::TestHostkeyScanDispatch::test_a_hostname_is_refused`
 
 **[NOTE]**
@@ -35,7 +35,7 @@ can change later. An unset security setting is not "allow all".
 **[SPEC]**
 `submit` refuses an address that has no *confirmed* `device_host_keys`
 row (`confirmed_key`). An unconfirmed row counts as absent. At dispatch,
-`phases.pinned_key` checks again and fails that host as `hostkey`.
+`sibling.SqlLedger.pin_for` checks again and fails that host as `hostkey`.
 Pinned by: `tests/test_upgrade_routes.py::TestSubmit::test_an_unconfirmed_address_cannot_be_targeted`, `tests/test_upgrade_routes.py::TestSubmit::test_a_seen_but_unconfirmed_pin_is_still_refused`, `tests/test_phases.py::TestPinnedKey::test_a_seen_but_unconfirmed_key_is_refused`
 
 **[NOTE]**

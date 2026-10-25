@@ -1,5 +1,5 @@
 # Dispatch
-Code: `nethub/sibling.py`, `nethub/devices/phases.py`, `nethub/upgrades.py` (gate side), `nethub/models.py` (vocabularies) · Tests: `tests/test_sibling.py`, `tests/test_phases.py`, `tests/test_upgrade_routes.py`, `tests/test_upgrade_models.py`, `tests/test_end_to_end.py`
+Code: `nethub/sibling.py` (`SqlLedger`), `nethub/devices/phases.py`, `nethub/flow.py`, `nethub/upgrades.py` (gate side), `nethub/targets.py` (`reload_count`), `nethub/vocab.py` (vocabularies) · Tests: `tests/test_sibling.py`, `tests/test_phases.py`, `tests/test_upgrade_routes.py`, `tests/test_upgrade_models.py`, `tests/test_end_to_end.py`
 
 ---
 
@@ -272,7 +272,7 @@ Pinned by: `tests/test_phases.py::TestCanary::test_the_canary_runs_alone_and_the
 ### 3.8 [reload-count-capped-twice]
 **[SPEC]**
 `upgrade_phase_jobs.concurrency` is set only on activate jobs.
-`upgrades.reload_count` validates it at approval (blank = 1; outside
+`targets.reload_count` validates it at approval (blank = 1; outside
 1..`PHASE_CONCURRENCY` is refused), and the sibling caps it again, since
 the setting can be lowered before the job runs.
 Pinned by: `tests/test_phases.py::TestCanary::test_the_chosen_count_is_capped_by_phase_concurrency`, `tests/test_upgrade_routes.py::TestReloadCount::test_the_default_is_one_at_a_time`, `tests/test_upgrade_routes.py::TestReloadCount::test_a_count_outside_one_to_the_cap_is_refused`
@@ -437,7 +437,13 @@ nothing to do. Each tick:
 3. Otherwise takes the next queued job:
    - if it is cancelled or past its deadline, finishes it;
    - otherwise claims it, opens the credential, runs `execute_phase`
-     then `_advance_run`, and chains into verify after activate.
+     with a `SqlLedger`, then `_advance_run`, which writes the decision
+     `flow.next_step` makes, and chains into verify after activate.
+
+`execute_phase` and `flow.next_step` import no database: rows reach them
+as duck-typed objects and every write and pin lookup goes through the
+ledger, so `nhtui` runs the same code over memory (tui.md
+[tui-shares-the-phase-engine]).
 
 ### 5.5 Deadline budgets
 **[SPEC]**
@@ -550,7 +556,7 @@ wave has been measured.
   the capture is discarded: `record()` never stores
   `HostOutcome.config_backup`, so `upgrade_run_hosts.config_backup_path`
   is never set.
-- A request naming a hostname twice is refused (`upgrades.parse_hosts`),
+- A request naming a hostname twice is refused (`targets.parse_hosts`),
   but hostnames are only checked non-blank, with no character set
   enforced. That would matter if config backups were ever written to a
   path built from the hostname.

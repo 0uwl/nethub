@@ -4,16 +4,16 @@
 
 import logging
 
-from flask import Flask, render_template
-
-from .extensions import csrf, db, login_manager, migrate
-
 
 def create_app():
     # Imported here, not at module scope: config.py raises without SECRET_KEY,
-    # and importing nethub.devices shouldn't require Flask's settings.
+    # and importing nethub.devices or nethub.local_run must not load Flask at
+    # all (docs/tui.md [tui-imports-no-flask]).
+    from flask import Flask, render_template
+
     from . import config as web_config
     from . import shared_config
+    from .extensions import csrf, db, login_manager, migrate
 
     app = Flask(__name__)
     app.config.from_object(shared_config)

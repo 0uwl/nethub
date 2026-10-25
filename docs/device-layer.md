@@ -1,5 +1,5 @@
 # Device layer
-Code: `nethub/devices/{connection,transfer,install,facts}.py`, `nethub/upgrade_cli.py`, `scripts/check_device_facts.py` · Tests: `tests/test_connection.py`, `tests/test_transfer.py`, `tests/test_install.py`, `tests/test_facts.py`, `tests/test_upgrade_cli.py`, `tests/captures/`
+Code: `nethub/devices/{connection,transfer,install,facts}.py`, `scripts/check_device_facts.py` · Tests: `tests/test_connection.py`, `tests/test_transfer.py`, `tests/test_install.py`, `tests/test_facts.py`, `tests/test_check_device_facts.py`, `tests/captures/`
 
 ---
 
@@ -12,8 +12,8 @@ Read `[NOTE]` only if additional context is needed.
 (including hardware timings), §7 decisions, §8 pitfalls, §9 known gaps.
 
 `nethub/devices/phases.py`, the per-host driver, is covered in dispatch.md.
-The modules here hold no database and no policy, apart from
-`upgrade_cli`'s optional pin lookup.
+The modules here hold no database and no policy. Running a phase with no
+NetHub server is `nhtui` (tui.md).
 
 ---
 
@@ -293,32 +293,16 @@ Pinned by: `tests/test_facts.py::TestRealCapture::test_parse_version`, `tests/te
 
 ---
 
-## 5. The manual escape hatch (`upgrade_cli.py`)
+## 5. The facts script
 
-### 5.1 [cli-needs-nothing-and-writes-nothing]
+### 5.1 [facts-script-never-tofu]
 **[SPEC]**
-`python -m nethub.upgrade_cli` runs device phases with no Flask app, no
-sibling, no sealed credential and no job rows. It writes nothing to the
-database, and every phase run (not `--scan`) says so. Keep `nethub/devices/` free of
-database dependencies, or this tool breaks.
-Pinned by: `tests/test_upgrade_cli.py::TestItWritesNothing::test_the_cli_imports_no_job_or_run_models`, `tests/test_upgrade_cli.py::TestItWritesNothing::test_it_warns_on_every_invocation`
-
-### 5.2 [cli-never-tofu]
-**[SPEC]**
-- `resolve_pin` uses `--fingerprint` if given, else a confirmed
-  `device_host_keys` row if the database is reachable, else it refuses.
-- An unreachable database is not an error by itself.
-- `scripts/check_device_facts.py` imports the same `resolve_pin` and
-  accepts only an IP literal.
-
-Pinned by: `tests/test_upgrade_cli.py::TestPinResolution::test_no_pin_and_no_fingerprint_refuses_rather_than_trusting`, `tests/test_upgrade_cli.py::TestPinResolution::test_an_unreachable_database_is_not_fatal_by_itself`, `tests/test_upgrade_cli.py::TestPinResolution::test_a_confirmed_row_is_preferred_when_the_database_answers`
-
-### 5.3 [cli-confirms-mutating-phases]
-**[SPEC]**
-`stage`, `activate` and `cleanup` (`MUTATING`) each ask for confirmation;
-`--yes` skips the prompts. `--phases` defaults to `precheck`, so a bare
-invocation changes nothing.
-Pinned by: `tests/test_upgrade_cli.py::TestConfirmations::test_every_device_changing_phase_is_confirmed`, `tests/test_upgrade_cli.py::TestConfirmations::test_declining_stops_before_the_phase_runs`, `tests/test_upgrade_cli.py::TestConfirmations::test_yes_skips_the_prompt`
+`scripts/check_device_facts.py` takes its pin from `--fingerprint` if
+given, else from a confirmed `device_host_keys` row if NetHub's database
+is reachable, else it refuses; an unreachable database is not an error by
+itself. It accepts only an IP literal, and `--scan` prints a fingerprint
+without trusting it.
+Pinned by: `tests/test_check_device_facts.py::TestPinResolution::test_no_pin_and_no_fingerprint_refuses_rather_than_trusting`, `tests/test_check_device_facts.py::TestPinResolution::test_an_unreachable_database_is_not_fatal_by_itself`, `tests/test_check_device_facts.py::TestPinResolution::test_a_confirmed_row_is_preferred_when_the_database_answers`
 
 ---
 
@@ -363,16 +347,6 @@ The first captures the three outputs to a directory and reports what
 parsed. The second re-parses a capture offline. To validate a new IOS-XE
 release, capture it, add the capture to `tests/captures/`, and replay it.
 
-### 6.4 The escape hatch
-**[SPEC]**
-```
-python -m nethub.upgrade_cli --scan <host>
-python -m nethub.upgrade_cli --host <host> --user <name> --fingerprint "<type> SHA256:..." \
-    --image <path> --sha512 <hex> --version <v> --phases all
-```
-
----
-
 ## 7. Decisions
 
 **[NOTE]**
@@ -402,9 +376,9 @@ python -m nethub.upgrade_cli --host <host> --user <name> --fingerprint "<type> S
   server.
 - **Parsing is separate from connecting**, so real output can be
   replayed offline (§6.3).
-- **`upgrade_cli` writes no audit trail.** A third writer would put
-  rows in the database that no approval accounts for, which is worse
-  than an honest gap.
+- **`nhtui` writes no audit trail.** A third writer would put rows in
+  the database that no approval accounts for, which is worse than an
+  honest gap (tui.md [tui-stores-nothing]).
 
 ---
 
@@ -459,7 +433,7 @@ python -m nethub.upgrade_cli --host <host> --user <name> --fingerprint "<type> S
 - The second SSH session per push is an extra AAA login. A per-user
   session limit, or different command authorisation for exec and
   transfer sessions, has not been tested.
-- `upgrade_cli`'s `--fingerprint` with no key type assumes `ssh-rsa`.
+- `check_device_facts.py`'s `--fingerprint` with no key type assumes `ssh-rsa`.
 - Weak or missing pins:
   - 2.7 and 4.4 have no tests.
   - 1.6: nothing tests that a scan stores nothing.

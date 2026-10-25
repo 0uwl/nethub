@@ -11,8 +11,8 @@ Read `[NOTE]` only if additional context is needed.
 §1 holds the rules, each H3 heading being a rule's slug. §2 lists the
 commands, §3 decisions, §4 known gaps.
 
-This is the CLI for when NetHub is **up**. `upgrade_cli`, for when it is
-down, is in device-layer.md §5.
+This is the CLI for when NetHub is **up**. `nhtui`, for when there is no
+NetHub server, is in tui.md.
 
 ---
 
@@ -92,9 +92,8 @@ migrates at startup as it does for `create-admin`.
 ## 3. Decisions
 
 **[NOTE]**
-- **A Flask command group, not a growth of `upgrade_cli`.** A writing
-  `upgrade_cli` would be the third writer that device-layer.md §7
-  rejects. Reopen it if the CLI ever needs to work with the web process
+- **A Flask command group, not a growth of `nhtui`.** A writing `nhtui`
+  would be the third writer that device-layer.md §7 rejects. Reopen it if the CLI ever needs to work with the web process
   down.
 - **No `/settings` commands.** A shell user must not be able to turn off
   a two-person rule and then act alone.

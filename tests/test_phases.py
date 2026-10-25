@@ -26,6 +26,7 @@ from nethub.models import (
     UpgradeRunHost,
     User,
 )
+from nethub.sibling import SqlLedger
 
 NOW = datetime(2026, 9, 9, tzinfo=UTC)
 #: Captured before the autouse fixture below replaces it, for the tests of
@@ -33,6 +34,10 @@ NOW = datetime(2026, 9, 9, tzinfo=UTC)
 REAL_CHECK_SOURCE = phases.check_source
 DIGEST = "a" * 128
 PASSWORD = "sup3rs3cret"
+
+
+def execute(job, ctx, **kwargs):
+    return phases.execute_phase(job, ctx, ledger=SqlLedger(), **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -197,14 +202,14 @@ class TestPinnedKey:
     def test_a_confirmed_row_is_used(self, app, run):
         with app.app_context():
             host = UpgradeRunHost.query.filter_by(hostname="sw01").one()
-            assert phases.pinned_key(host).fingerprint_sha256 == "SHA256:sw01"
+            assert SqlLedger().pin_for(host.ansible_host).fingerprint_sha256 == "SHA256:sw01"
 
     def test_an_unknown_address_is_refused(self, app, run):
         with app.app_context():
             host = UpgradeRunHost.query.filter_by(hostname="sw01").one()
             host.ansible_host = "198.51.100.7"
             with pytest.raises(phases.UnconfirmedHost, match="no confirmed host key"):
-                phases.pinned_key(host)
+                SqlLedger().pin_for(host.ansible_host)
 
     def test_a_seen_but_unconfirmed_key_is_refused(self, app, run):
         """Seeing a key is not accepting it."""
@@ -214,7 +219,7 @@ class TestPinnedKey:
             db.session.commit()
             host = UpgradeRunHost.query.filter_by(hostname="sw01").one()
             with pytest.raises(phases.UnconfirmedHost, match="nobody has"):
-                phases.pinned_key(host)
+                SqlLedger().pin_for(host.ansible_host)
 
 
 class TestExecutePhase:
@@ -226,7 +231,7 @@ class TestExecutePhase:
                 lambda conn, host, ctx: phases.HostOutcome(
                     host.hostname, "image_copied", scp_restore_confirmed=True),
             )
-            assert phases.execute_phase(job, ctx_returning(None)).status == "succeeded"
+            assert execute(job, ctx_returning(None)).status == "succeeded"
 
             rows = UpgradeHostPhaseResult.query.all()
             assert {r.hostname for r in rows} == {"sw01", "sw02"}
@@ -242,7 +247,7 @@ class TestExecutePhase:
         with app.app_context():
             job = job_for(run)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(job, ctx_returning(None)).status == "partial"
+            assert execute(job, ctx_returning(None)).status == "partial"
 
             assert UpgradeHostPhaseResult.query.count() == 2, "both hosts recorded"
             sw01 = UpgradeRunHost.query.filter_by(hostname="sw01").one()
@@ -260,7 +265,7 @@ class TestExecutePhase:
                 phases.PHASE_RUNNERS, "stage",
                 lambda conn, host, ctx: (_ for _ in ()).throw(OSError("boom")))
             ctx = ctx_returning(None)
-            phases.execute_phase(job, ctx)
+            execute(job, ctx)
             assert all(c.disconnected for c in ctx.conns)
 
     def test_cancel_is_honoured_between_hosts(self, app, run, monkeypatch):
@@ -274,7 +279,7 @@ class TestExecutePhase:
         with app.app_context():
             job = job_for(run)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(job, ctx_returning(None)).status == "cancelled"
+            assert execute(job, ctx_returning(None)).status == "cancelled"
             assert seen == ["sw01"], "sw02 was never started"
             assert UpgradeHostPhaseResult.query.count() == 1
 
@@ -288,7 +293,7 @@ class TestExecutePhase:
                 return phases.HostOutcome(host.hostname, "image_copied")
 
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(
+            assert execute(
                 job, ctx_returning(None), now=lambda: clock["t"]).status == "timed_out"
             assert UpgradeHostPhaseResult.query.count() == 1, "sw02 never started"
 
@@ -304,7 +309,7 @@ class TestExecutePhase:
                 phases.PHASE_RUNNERS, "activate",
                 lambda conn, host, ctx: seen.append(host.hostname) or
                 phases.HostOutcome(host.hostname, "activated"))
-            phases.execute_phase(job, ctx_returning(None))
+            execute(job, ctx_returning(None))
             assert seen == ["sw02"]
 
     def test_the_credential_reaches_no_row(self, app, run, monkeypatch):
@@ -314,7 +319,7 @@ class TestExecutePhase:
                 phases.PHASE_RUNNERS, "stage",
                 lambda conn, host, ctx: (_ for _ in ()).throw(
                     RuntimeError(f"auth failed with {PASSWORD}")))
-            phases.execute_phase(job, ctx_returning(None))
+            execute(job, ctx_returning(None))
             blob = " ".join(
                 str(v) for r in UpgradeHostPhaseResult.query.all()
                 for v in (r.status, r.failure_stage, r.error_summary)
@@ -394,7 +399,7 @@ class TestParallelHosts:
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", tracker)
             started = time.monotonic()
-            status = phases.execute_phase(job, ctx_returning(None), concurrency=4).status
+            status = execute(job, ctx_returning(None), concurrency=4).status
             elapsed = time.monotonic() - started
 
             assert status == "succeeded"
@@ -413,7 +418,7 @@ class TestParallelHosts:
             job = job_for(fleet, phase="activate")
             monkeypatch.setitem(phases.PHASE_RUNNERS, "activate", tracker)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "verify", verified)
-            assert phases.execute_phase(job, ctx_returning(None), concurrency=4).status == "succeeded"
+            assert execute(job, ctx_returning(None), concurrency=4).status == "succeeded"
         assert tracker.most == 1
         assert len(tracker.seen) == 8
 
@@ -436,7 +441,7 @@ class TestParallelHosts:
         with app.app_context():
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(job, ctx_returning(None), concurrency=2).status == "cancelled"
+            assert execute(job, ctx_returning(None), concurrency=2).status == "cancelled"
             assert sorted(seen) == ["sw01", "sw02"], "nothing started after the cancel"
             rows = UpgradeHostPhaseResult.query.all()
             assert sorted(r.hostname for r in rows) == ["sw01", "sw02"]
@@ -473,7 +478,7 @@ class TestParallelHosts:
                     release.set()
 
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", runner)
-            assert phases.execute_phase(job, ctx_returning(None), now=now,
+            assert execute(job, ctx_returning(None), now=now,
                                         tick_interval=0.01, on_tick=on_tick).status == "succeeded"
         assert len(beats) >= 3
         assert beats[0] < beats[1] < beats[2], "written, committed, and moving"
@@ -497,7 +502,7 @@ class TestParallelHosts:
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", Tracker())
             event.listen(db.engine, "before_cursor_execute", seen)
             try:
-                assert phases.execute_phase(job, ctx, concurrency=4).status == "succeeded"
+                assert execute(job, ctx, concurrency=4).status == "succeeded"
             finally:
                 event.remove(db.engine, "before_cursor_execute", seen)
         assert threads == {threading.current_thread().name}
@@ -512,7 +517,7 @@ class TestParallelHosts:
             db.session.commit()
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", tracker)
-            assert phases.execute_phase(job, ctx_returning(None), concurrency=4).status == "partial"
+            assert execute(job, ctx_returning(None), concurrency=4).status == "partial"
             sw03 = UpgradeRunHost.query.filter_by(hostname="sw03").one()
             assert sw03.state == "failed"
             row = UpgradeHostPhaseResult.query.filter_by(hostname="sw03").one()
@@ -529,7 +534,7 @@ class TestParallelHosts:
                             lambda address, user, password, pin: calls.append((address, pin)))
         with app.app_context():
             host = UpgradeRunHost.query.filter_by(hostname="sw01").one()
-            target = phases.HostTarget.of(host)
+            target = phases.HostTarget.of(host, SqlLedger())
         phases.default_connect(target, "jsmith", PASSWORD)
         assert calls == [("192.0.2.11", connection.HostKey("ssh-rsa", "SHA256:sw01"))]
 
@@ -552,7 +557,7 @@ class TestLoginGate:
         with app.app_context():
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", Tracker())
-            result = phases.execute_phase(job, self.ctx(connect), concurrency=4)
+            result = execute(job, self.ctx(connect), concurrency=4)
             assert (result.status, result.stopped_by) == ("failed", "credential")
             assert len(logins) == 1, logins
             rows = UpgradeHostPhaseResult.query.all()
@@ -575,7 +580,7 @@ class TestLoginGate:
 
         with app.app_context():
             job = job_for(fleet, phase="precheck")
-            result = phases.execute_phase(job, self.ctx(connect), concurrency=4)
+            result = execute(job, self.ctx(connect), concurrency=4)
             assert (result.status, result.stopped_by) == ("failed", "credential")
             assert UpgradeRunHost.query.filter_by(state="failed").count() == 8
 
@@ -593,7 +598,7 @@ class TestLoginGate:
         with app.app_context():
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", tracker)
-            assert phases.execute_phase(job, self.ctx(connect), concurrency=4).status == "partial"
+            assert execute(job, self.ctx(connect), concurrency=4).status == "partial"
             assert UpgradeRunHost.query.filter_by(state="staged").count() == 7
         assert len(tracker.seen) == 7
 
@@ -676,7 +681,7 @@ class TestCanary:
         timeline = Timeline().install(monkeypatch)
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=3)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            result = execute(job, ctx_returning(None), concurrency=4)
             assert (result.status, result.stopped_by) == ("succeeded", None)
             assert set(states().values()) == {"activated"}
             canary = db.session.get(UpgradeRunHost, (fleet, "sw01"))
@@ -691,7 +696,7 @@ class TestCanary:
         timeline = Timeline().install(monkeypatch)
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=8)
-            phases.execute_phase(job, ctx_returning(None), concurrency=2)
+            execute(job, ctx_returning(None), concurrency=2)
         assert timeline.most_after_canary == 2
 
     @pytest.mark.parametrize("fail,check_fails,stage", [
@@ -708,7 +713,7 @@ class TestCanary:
         timeline = Timeline(seconds=0, fail=fail, check_fails=check_fails).install(monkeypatch)
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=4)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            result = execute(job, ctx_returning(None), concurrency=4)
             assert (result.status, result.stopped_by) == ("failed", stage)
             assert timeline.started() == ["sw01"], "nothing else was reloaded"
             now = states()
@@ -730,7 +735,7 @@ class TestCanary:
         }).install(monkeypatch)
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=2)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            result = execute(job, ctx_returning(None), concurrency=4)
             assert (result.status, result.stopped_by) == ("partial", None)
             assert len(timeline.started()) == 8
             now = states()
@@ -744,7 +749,7 @@ class TestCanary:
             for host in job.run.hosts[1:]:
                 host.state = "verified"
             db.session.commit()
-            assert phases.execute_phase(job, ctx_returning(None)).status == "succeeded"
+            assert execute(job, ctx_returning(None)).status == "succeeded"
         assert timeline.events == [("start", "sw01"), ("end", "sw01")]
 
     def test_a_retried_activate_uses_a_canary_and_fails_what_it_did_not_reach(
@@ -764,7 +769,7 @@ class TestCanary:
                 else:
                     host.state = "verified"
             db.session.commit()
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            result = execute(job, ctx_returning(None), concurrency=4)
             assert (result.status, result.stopped_by) == ("failed", "reload")
         assert timeline.started() == ["sw02"], "sw02 is the first host the retry reset"
         with app.app_context():
@@ -788,7 +793,7 @@ class TestWhatStopsAWave:
         with app.app_context():
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", stage)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=1)
+            result = execute(job, ctx_returning(None), concurrency=1)
             assert (result.status, result.stopped_by) == ("partial", "internal")
             assert attempted == ["sw01", "sw02"]
             now = states()
@@ -818,7 +823,7 @@ class TestWhatStopsAWave:
         failing = next(iter(fail or check_fails))
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=1)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=4)
+            result = execute(job, ctx_returning(None), concurrency=4)
             assert result.stopped_by == stage
             now = states()
             assert now.pop(failing) == "failed"
@@ -831,7 +836,7 @@ class TestWhatStopsAWave:
                                     status="running", concurrency=4)
             db.session.add(again)
             db.session.commit()
-            phases.execute_phase(again, ctx_returning(None), concurrency=4)
+            execute(again, ctx_returning(None), concurrency=4)
             assert failing not in timeline.started()
             assert timeline.started(), "the rest were activated"
 
@@ -848,7 +853,7 @@ class TestWhatStopsAWave:
                                   search_dir="/images", connect=refusing)
         with app.app_context():
             job = job_for(fleet, phase="activate", concurrency=2)
-            result = phases.execute_phase(job, ctx, concurrency=4)
+            result = execute(job, ctx, concurrency=4)
             assert result.stopped_by == "credential"
             assert set(states().values()) == {"staged"}
         assert timeline.started() == []
@@ -862,7 +867,7 @@ class TestWhatStopsAWave:
         with app.app_context():
             job = job_for(fleet)
             monkeypatch.setitem(phases.PHASE_RUNNERS, "stage", stage)
-            result = phases.execute_phase(job, ctx_returning(None), concurrency=2)
+            result = execute(job, ctx_returning(None), concurrency=2)
             assert (result.status, result.stopped_by) == ("partial", None)
             now = states()
             assert now.pop("sw02") == "failed"
@@ -911,7 +916,7 @@ class TestSourceCheck:
             job = job_for(fleet)
             ctx = phases.PhaseContext(device_username="jsmith", device_password=PASSWORD,
                                       search_dir=str(tmp_path), connect=connect)
-            result = phases.execute_phase(job, ctx, concurrency=4)
+            result = execute(job, ctx, concurrency=4)
             assert (result.status, result.stopped_by) == ("failed", "store")
             assert logins == [], "no device was contacted"
             rows = UpgradeHostPhaseResult.query.all()

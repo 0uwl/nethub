@@ -1,9 +1,14 @@
 """Running one phase of an upgrade across a run's hosts, and recording it.
 
-This is the layer between the device modules and the database. It owns the
-per-host loop, the exception-to-`failure_stage` mapping, and the rows:
-one `upgrade_host_phase_results` per host per execution, plus the
-`upgrade_run_hosts.state` cursor and the phase job's terminal status.
+This is the layer between the device modules and whatever keeps the record.
+It owns the per-host loop, the exception-to-`failure_stage` mapping, and what
+is recorded: one result per host per execution, plus each host's `state`
+cursor and the job's terminal status.
+
+It imports no database. The job, run and host it is handed are duck-typed --
+ORM rows from the sibling, dataclasses from `nethub.local_run` -- and every
+write and pin lookup goes through a `Ledger` (docs/tui.md
+[tui-shares-the-phase-engine]). `sibling.SqlLedger` is the database one.
 
 It does **not** own dispatch. The sibling claims a `queued` job, sets it
 `running`, and calls `execute_phase`; the startup sweep and the queue are the
@@ -31,20 +36,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 import paramiko
 from netmiko.exceptions import NetmikoBaseException
 
 from nethub.devices import connection, facts, install, transfer
-from nethub.extensions import db
-from nethub.models import (
-    APPROVABLE,
-    STATE_BEFORE,
-    DeviceHostKey,
-    UpgradeHostPhaseResult,
-    UpgradePhaseJob,
-    UpgradeRunHost,
-)
+from nethub.vocab import APPROVABLE, STATE_BEFORE
 
 #: Per-host cursor value after a phase succeeds. Cleanup does not advance it:
 #: a cleaned host is still `verified` (this column is a cursor, and
@@ -129,6 +127,19 @@ class PhaseResult:
     stopped_by: str | None = None
 
 
+class Ledger(Protocol):
+    """Where `execute_phase` records, and where it looks up pins."""
+
+    def add_result(self, **fields) -> None:
+        """One `upgrade_host_phase_results` row's worth of fields."""
+
+    def commit(self) -> None:
+        """Make what was recorded so far durable (and visible to cancel)."""
+
+    def pin_for(self, address: str) -> connection.HostKey:
+        """The confirmed pin for `address`, or raise `UnconfirmedHost`."""
+
+
 @dataclass(frozen=True)
 class _Stop:
     stage: str
@@ -159,7 +170,7 @@ class HostTarget:
     host_key: connection.HostKey
 
     @classmethod
-    def of(cls, host: UpgradeRunHost) -> HostTarget:
+    def of(cls, host, ledger: Ledger) -> HostTarget:
         """Main thread only. Raises `UnconfirmedHost` if the address has no
         confirmed pin."""
         return cls(
@@ -170,7 +181,7 @@ class HostTarget:
             file_size=host.file_size,
             version=host.version,
             flash_dir=host.flash_dir,
-            host_key=pinned_key(host),
+            host_key=ledger.pin_for(host.ansible_host),
         )
 
 
@@ -336,27 +347,6 @@ def _summarise(exc: BaseException) -> str:
     if text is None:
         text = f"unexpected {type(exc).__name__}"
     return " ".join(text.split())[:500]
-
-
-def pinned_key(host: UpgradeRunHost) -> connection.HostKey:
-    """The confirmed pin for this host's address, or refuse.
-
-    An address with no already-confirmed row cannot be named by a run at all,
-    so an unconfirmed row is treated exactly like a missing one -- seeing a key
-    is not accepting it.
-    """
-    row = DeviceHostKey.query.filter_by(ansible_host=host.ansible_host).first()
-    if row is None:
-        raise UnconfirmedHost(
-            f"{host.ansible_host} has no confirmed host key; an admin must "
-            f"confirm the fingerprint before a run may target it"
-        )
-    if not row.is_confirmed:
-        raise UnconfirmedHost(
-            f"{host.ansible_host} has a host key on file that nobody has "
-            f"confirmed; seeing a key is not accepting it"
-        )
-    return connection.HostKey(row.key_type, row.fingerprint_sha256)
 
 
 def default_connect(host: HostTarget, username: str, password: str):
@@ -553,9 +543,9 @@ def _not_attempted_outcome(hostname: str, reason: str, stage: str) -> HostOutcom
     )
 
 
-def _result_row(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
+def _result_row(ledger: Ledger, host, job, outcome: HostOutcome,
                 started_at: datetime) -> None:
-    db.session.add(UpgradeHostPhaseResult(
+    ledger.add_result(
         run_id=job.run_id,
         hostname=host.hostname,
         phase=job.phase,
@@ -566,17 +556,16 @@ def _result_row(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome
         scp_restore_confirmed=outcome.scp_restore_confirmed,
         started_at=started_at,
         finished_at=_utcnow(),
-    ))
+    )
 
 
-def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
-           started_at: datetime) -> None:
+def record(ledger: Ledger, host, job, outcome: HostOutcome, started_at: datetime) -> None:
     """Write the result row and advance the host cursor.
 
     The result row is the record of what happened; `UpgradeRunHost.state` is a
     cursor for the dashboard's default view and is derived from it.
     """
-    _result_row(host, job, outcome, started_at)
+    _result_row(ledger, host, job, outcome, started_at)
     host.last_phase = job.phase
     host.state = _STATE_AFTER[job.phase] if outcome.ok else 'failed'
     # A host that passes loses the message an earlier stop or failure left:
@@ -588,7 +577,7 @@ def record(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
         host.reported_version_post = outcome.version_post
 
 
-def record_kept(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome,
+def record_kept(ledger: Ledger, host, job, outcome: HostOutcome,
                 started_at: datetime) -> None:
     """Write the result row and leave the cursor where it was.
 
@@ -599,11 +588,11 @@ def record_kept(host: UpgradeRunHost, job: UpgradePhaseJob, outcome: HostOutcome
     its login (`NOT_REPEATABLE`), which `execute_phase` records as failed. The
     message stays on the host so the run page says why it did not move.
     """
-    _result_row(host, job, outcome, started_at)
+    _result_row(ledger, host, job, outcome, started_at)
     host.error_summary = outcome.error_summary
 
 
-def eligible_hosts(job: UpgradePhaseJob) -> list[UpgradeRunHost]:
+def eligible_hosts(job) -> list:
     """The hosts `job`'s phase runs on, in request order: those whose cursor
     sits just before it.
 
@@ -616,7 +605,7 @@ def eligible_hosts(job: UpgradePhaseJob) -> list[UpgradeRunHost]:
     return [h for h in job.run.hosts if h.state == before]
 
 
-def reset_for_retry(job: UpgradePhaseJob) -> None:
+def reset_for_retry(job) -> None:
     """Put the hosts that failed this phase back to where it starts.
 
     A retry names a phase; this is what makes it run on the hosts that failed
@@ -631,7 +620,7 @@ def reset_for_retry(job: UpgradePhaseJob) -> None:
             host.error_summary = None
 
 
-def check_source(hosts: list[UpgradeRunHost], search_dir: str) -> str | None:
+def check_source(hosts: list, search_dir: str) -> str | None:
     """Is each image the stage is about to push in the store, unaltered?
 
     Returns why not, or None. Hashes the file under `search_dir` against the
@@ -666,7 +655,7 @@ def _sha512_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _stop_reason(job: UpgradePhaseJob, now: Callable[[], datetime]) -> str | None:
+def _stop_reason(job, now: Callable[[], datetime]) -> str | None:
     """Why no further host may start, or None. Main thread only: it reads the
     run, and it is what Flask's cancel reaches through."""
     if job.run.cancel_requested_at is not None:
@@ -677,7 +666,7 @@ def _stop_reason(job: UpgradePhaseJob, now: Callable[[], datetime]) -> str | Non
     return None
 
 
-def _stop_for(outcome: HostOutcome, host: UpgradeRunHost, gate: LoginGate,
+def _stop_for(outcome: HostOutcome, host, gate: LoginGate,
               canary: bool) -> _Stop | None:
     """Does this outcome stop the wave? Decision 13: a NetHub-side fault does,
     and so does a canary that failed for any reason."""
@@ -692,8 +681,9 @@ def _stop_for(outcome: HostOutcome, host: UpgradeRunHost, gate: LoginGate,
     return None
 
 
-def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
+def execute_phase(job, ctx: PhaseContext,
                   now: Callable[[], datetime] = _utcnow, *,
+                  ledger: Ledger,
                   concurrency: int = 1,
                   tick_interval: float = HEARTBEAT_INTERVAL,
                   on_tick: Callable[[], None] | None = None) -> PhaseResult:
@@ -757,7 +747,9 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
     running: dict = {}
     stopped = None
     passed = 0
-    failed: list[UpgradeRunHost] = []
+    failed: list = []
+    #: The `failure_stage` each failed host was recorded with.
+    failed_stage: dict = {}
 
     def settle(host, outcome, started):
         nonlocal stop, canary, passed
@@ -771,13 +763,14 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
             or (outcome.failure_stage in STOPPING_STAGES
                 and not (outcome.ran and job.phase in NOT_REPEATABLE)))
         if kept:
-            record_kept(host, job, outcome, started)
+            record_kept(ledger, host, job, outcome, started)
             return
-        record(host, job, outcome, started)
+        record(ledger, host, job, outcome, started)
         if outcome.ok:
             passed += 1
         else:
             failed.append(host)
+            failed_stage[host.hostname] = outcome.failure_stage
 
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix=f'nethub-{job.phase}') as pool:
@@ -791,10 +784,10 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
                 host = waiting.pop(0)
                 started = now()
                 try:
-                    target = HostTarget.of(host)
+                    target = HostTarget.of(host, ledger)
                 except UnconfirmedHost as exc:
                     settle(host, _failed_outcome(host.hostname, exc), started)
-                    db.session.commit()
+                    ledger.commit()
                     continue
                 future = pool.submit(run_host, target, job.phase, ctx, gate,
                                      canary=host is canary)
@@ -807,7 +800,7 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
                 host, started = running.pop(future)
                 settle(host, future.result(), started)
             job.heartbeat_at = now()
-            db.session.commit()
+            ledger.commit()
             if on_tick is not None:
                 on_tick()
             if stopped is not None and not running:
@@ -817,11 +810,11 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
         for host in waiting:
             outcome = _not_attempted_outcome(host.hostname, stop.reason, stop.stage)
             if keep_cursor:
-                record_kept(host, job, outcome, now())
+                record_kept(ledger, host, job, outcome, now())
             else:
-                record(host, job, outcome, now())
+                record(ledger, host, job, outcome, now())
                 failed.append(host)
-        db.session.commit()
+        ledger.commit()
         status = 'partial' if passed else 'failed'
         job.failure_stage = stop.stage
         job.error_summary = f"stopped: {stop.reason}"[:500]
@@ -831,17 +824,10 @@ def execute_phase(job: UpgradePhaseJob, ctx: PhaseContext,
         status = 'succeeded'
     else:
         status = 'partial' if passed else 'failed'
-        job.failure_stage = _last_failure_stage(job, failed[0].hostname)
+        job.failure_stage = failed_stage.get(failed[0].hostname)
         job.error_summary = failed[0].error_summary
 
     job.status = status
     job.finished_at = now()
-    db.session.commit()
+    ledger.commit()
     return PhaseResult(status, stop.stage if stop is not None else None)
-
-
-def _last_failure_stage(job: UpgradePhaseJob, hostname: str) -> str | None:
-    row = UpgradeHostPhaseResult.query.filter_by(
-        run_id=job.run_id, hostname=hostname, phase=job.phase, attempt=job.attempt
-    ).first()
-    return row.failure_stage if row else None

@@ -3,8 +3,8 @@
 A second front end on the same service layer the routes call
 (docs/cli.md [cli-is-a-flask-front-end]): it writes what a route would
 write and nothing else, and does no device I/O -- a scan is a `queued` row
-for the sibling, exactly as from the browser. Not `upgrade_cli`, which is
-for when NetHub is down and writes nothing.
+for the sibling, exactly as from the browser. Not `nhtui`, which is for
+when there is no NetHub server and writes nothing.
 
 Every command that writes takes `--as <username>` and prompts for that
 user's NetHub password, checked as `/login` checks it

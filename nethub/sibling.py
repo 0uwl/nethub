@@ -23,30 +23,21 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_
 
-from nethub import shared_config
+from nethub import flow, shared_config
 from nethub.devices import connection, install, phases
 from nethub.extensions import db
+from nethub.flow import NEXT_PHASE
 from nethub.models import (
     APPROVABLE,
     STATE_BEFORE,
+    DeviceHostKey,
     HostKeyScan,
+    UpgradeHostPhaseResult,
     UpgradePhaseJob,
     UpgradeRun,
     due_at,
 )
 from nethub.sealed_credentials import CredentialError, open_sealed
-
-#: What runs next once a phase succeeds. `None` means a gate: the run parks at
-#: `awaiting_approval` until a human approves the next phase. `verify` follows
-#: `activate` with no gate -- it is
-#: read-only and runs on completion, on activate's credential (`run_once`).
-NEXT_PHASE = {
-    'precheck': ('stage', True),
-    'stage': ('activate', True),
-    'activate': ('verify', False),
-    'verify': ('cleanup', True),
-    'cleanup': (None, False),
-}
 
 DEFAULT_GATE_TTL = timedelta(days=7)
 
@@ -69,6 +60,34 @@ def _aware(value):
     if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+class SqlLedger:
+    """`phases.Ledger` over the database: result rows, commits, and the
+    confirmed pins in `device_host_keys` (docs/host-keys.md
+    [no-confirmed-pin-no-run])."""
+
+    def add_result(self, **fields) -> None:
+        db.session.add(UpgradeHostPhaseResult(**fields))
+
+    def commit(self) -> None:
+        db.session.commit()
+
+    def pin_for(self, address: str) -> connection.HostKey:
+        """An unconfirmed row is treated exactly like a missing one -- seeing
+        a key is not accepting it."""
+        row = DeviceHostKey.query.filter_by(ansible_host=address).first()
+        if row is None:
+            raise phases.UnconfirmedHost(
+                f"{address} has no confirmed host key; an admin must "
+                f"confirm the fingerprint before a run may target it"
+            )
+        if not row.is_confirmed:
+            raise phases.UnconfirmedHost(
+                f"{address} has a host key on file that nobody has "
+                f"confirmed; seeing a key is not accepting it"
+            )
+        return connection.HostKey(row.key_type, row.fingerprint_sha256)
 
 
 @dataclass
@@ -515,7 +534,8 @@ class Sibling:
         try:
             while True:
                 result = phases.execute_phase(
-                    job, ctx, now=self.now, concurrency=self.phase_concurrency,
+                    job, ctx, now=self.now, ledger=SqlLedger(),
+                    concurrency=self.phase_concurrency,
                     tick_interval=self.heartbeat_interval, on_tick=self._between_hosts)
                 following = self._advance_run(job, result)
                 db.session.commit()
@@ -587,57 +607,27 @@ class Sibling:
         Returns the job queued for a phase with no gate, which the caller runs
         on the same credential (see `run_once`); None otherwise.
 
-        A phase with a gate of its own that stopped on its first attempt goes
-        back to that gate: a refused password, a
-        fault in NetHub's code, a failed canary or a bad image in the store
-        left the hosts it did not reach where they were, so approving the gate
-        again runs them. That is what keeps a mistyped password from failing
-        the run. Hosts that activated before an activate stopped wait for the
-        `verify` that follows the next activate. It goes back only while some
-        host is still eligible for the phase: an activate host that failed
-        after its login is marked failed rather than kept (it may have
-        reloaded), and a gate with nobody left to run on is no gate.
+        The decision is `flow.next_step`, shared with `nethub.local_run`; this
+        writes it to the rows.
 
         Parking goes through `_park`, so a cancel requested while the phase
         ran ends the run instead of putting it back in front of approvers.
-
-        A `partial` phase moves the run on with the hosts that passed. So does
-        a `failed` one while hosts that passed earlier phases
-        are still in the run: that is a retry, or a re-approved abandoned
-        phase, that got nowhere, and the run goes back to the gate it was at
-        with those hosts intact. On a first attempt `failed` means every host
-        in the run has failed, and the run fails.
         """
         run = job.run
-        status = result.status
-        if status == 'cancelled':
+        step, following = flow.next_step(run, job, result)
+        if step == 'cancelled':
             run.state, run.finished_at = 'cancelled', self.now()
             return None
-        if (result.stopped_by is not None and job.phase in APPROVABLE
-                and not job.is_retry
-                and any(h.state == STATE_BEFORE[job.phase] for h in run.hosts)):
-            self._park(run, job.phase)
-            return None
-        carries_on = status in ('succeeded', 'partial') or (
-            status == 'failed' and any(h.state not in ('failed', 'skipped') for h in run.hosts)
-        )
-        if not carries_on:
+        if step == 'failed':
             self._fail_run(run)
             return None
-
-        following, gated = NEXT_PHASE[job.phase]
-        while following is not None and not gated and not any(
-                h.state == STATE_BEFORE[following] for h in run.hosts):
-            # Nothing to run it on: a retried activate that activated nothing
-            # has nothing for verify to check. Go to where verify would lead.
-            following, gated = NEXT_PHASE[following]
-        if following is None:
+        if step == 'completed':
             run.state = 'completed'
             run.awaiting_phase = None
             run.gate_expires_at = None
             run.finished_at = self.now()
             return None
-        if gated:
+        if step == 'gate':
             # An approval is a row, so the run parks here until a human writes
             # one. `awaiting_phase` says which gate -- inferring it from the
             # highest phase row present cannot tell "awaiting cleanup" from

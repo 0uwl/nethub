@@ -22,7 +22,7 @@ that apply.
 | How the pieces fit, which process does what, the module map | [architecture.md](architecture.md) |
 | The sibling, job/run/host state, phases, retry, canary, cancel, scheduling | [dispatch.md](dispatch.md) |
 | The device password: sealing, opening, `error_summary`, privilege 15 | [credentials.md](credentials.md) |
-| `nethub/devices/`: Netmiko, SCP push, install/reload, facts, `upgrade_cli` | [device-layer.md](device-layer.md) |
+| `nethub/devices/`: Netmiko, SCP push, install/reload, facts, `check_device_facts.py` | [device-layer.md](device-layer.md) |
 | Host-key pins, scans, confirm/delete, target address checks | [host-keys.md](host-keys.md) |
 | Upload/ingest, the artifact store, `check-store`, SHA-512 | [artifacts.md](artifacts.md) |
 | Login, sessions, users, roles, two-person rules, `/settings` | [auth-and-roles.md](auth-and-roles.md) |
@@ -31,6 +31,7 @@ that apply.
 | Templates, CSP, confirmation boxes, worker status | [frontend.md](frontend.md) |
 | Fixtures, captures, the end-to-end test | [testing.md](testing.md) |
 | The `artifacts` and `hostkeys` Flask CLI groups | [cli.md](cli.md) |
+| `nhtui`: `tui.py`, `local_run.py`, the standalone upgrade driver | [tui.md](tui.md) |
 | Anything not built (day-0, OIDC, retention), open questions, rejected ideas | [future.md](future.md) |
 
 ---

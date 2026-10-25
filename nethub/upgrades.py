@@ -15,7 +15,6 @@ reads the device username server-side. `platform` and `flash_dir` default
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -24,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from . import artifacts as artifact_store
 from . import settings
 from .extensions import db
+from .flow import retryable_phases
 from .models import (
     APPROVABLE,
     RETRYABLE_AT,
@@ -35,6 +35,7 @@ from .models import (
     UpgradeRunHost,
 )
 from .sealed_credentials import CredentialError, check_credential, seal
+from .targets import RequestError, check_target, parse_hosts, reload_count
 
 #: Wall-clock budget per phase, as (fixed seconds, seconds per host).
 #:
@@ -156,10 +157,6 @@ def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
 __all__ = ['APPROVABLE']
 
 
-class RequestError(Exception):
-    """The submitted request cannot be compiled into a run."""
-
-
 def _aware(value):
     """SQLite hands back naive datetimes for values written aware; the same
     helper as `phases._aware`, kept here so this module needs no device
@@ -171,56 +168,6 @@ def _aware(value):
 
 def _utcnow():
     return datetime.now(UTC)
-
-
-def parse_hosts(raw: str) -> list[tuple[str, str]]:
-    """`hostname, address` per line. A closed shape, not an inventory."""
-    hosts = []
-    seen = set()
-    for number, line in enumerate(raw.splitlines(), start=1):
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        parts = [p.strip() for p in line.replace('\t', ',').split(',') if p.strip()]
-        if len(parts) != 2:
-            raise RequestError(f'Line {number}: expected "hostname, address".')
-        hostname, address = parts
-        if hostname in seen:
-            # PRIMARY KEY (run_id, hostname) would refuse this anyway; saying so
-            # here names the line instead of surfacing an IntegrityError.
-            raise RequestError(f'Line {number}: "{hostname}" is named twice.')
-        seen.add(hostname)
-        hosts.append((hostname, address))
-    if not hosts:
-        raise RequestError('No hosts given.')
-    return hosts
-
-
-def check_target(address: str, cidrs) -> str:
-    """An address must be a literal inside a configured CIDR.
-
-    A hostname is refused rather than resolved: the CIDR check and the eventual
-    connection would resolve it at different times, and `device_host_keys`
-    would end up keyed on a string whose meaning can change afterwards.
-    """
-    if not cidrs:
-        raise RequestError(
-            'No DEVICE_TARGET_CIDRS configured, so no address can be accepted. '
-            'Set it before submitting a run.'
-        )
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        raise RequestError(
-            f'"{address}" is not an IP literal. Targets are addresses, not names.'
-        ) from None
-    for cidr in cidrs:
-        try:
-            if ip in ipaddress.ip_network(cidr, strict=False):
-                return str(ip)
-        except ValueError:
-            raise RequestError(f'Configured target CIDR "{cidr}" is not valid.') from None
-    raise RequestError(f'{address} is outside the configured target CIDRs.')
 
 
 def confirmed_key(address: str) -> DeviceHostKey:
@@ -517,23 +464,6 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
     return run, job
 
 
-def reload_count(raw, cap):
-    """The approver's "reload N devices at a time after the first", or refuse
-    it. Blank means the default, 1. `cap` is the deployment's
-    `PHASE_CONCURRENCY`; the sibling caps it again, since the setting can be
-    lowered before the job runs."""
-    text = '' if raw is None else str(raw).strip()
-    if not text:
-        return 1
-    try:
-        count = int(text)
-    except ValueError:
-        count = 0
-    if count < 1 or count > cap:
-        raise RequestError(f'Reload count must be a whole number from 1 to {cap}.')
-    return count
-
-
 def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
             start_at=None):
     """Write the phase job a gate is waiting for.
@@ -574,21 +504,6 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
                             not_before=start_time(start_at,
                                                   gate_expires_at=run.gate_expires_at),
                             concurrency=_concurrency_for(phase, concurrency, cap))
-
-
-def retryable_phases(run):
-    """What a retry may name at the run's current gate, with the hosts it would
-    run on: `[(phase, [hostname, ...]), ...]`, phases with no failed host left
-    out."""
-    if run.state != 'awaiting_approval':
-        return []
-    out = []
-    for phase in RETRYABLE_AT.get(run.awaiting_phase, ()):
-        failed = [h.hostname for h in run.hosts
-                  if h.state == 'failed' and h.last_phase == phase]
-        if failed:
-            out.append((phase, failed))
-    return out
 
 
 def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,
