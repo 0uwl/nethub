@@ -132,7 +132,6 @@ Pinned by: none
 | `worker_status.py` | stalled / no-worker / queue depth (read-only) | frontend.md |
 | `devices/phases.py` | per-host driver, `LoginGate`, canary, failure mapping, `Ledger` | dispatch.md |
 | `devices/{connection,transfer,install,facts}.py` | Netmiko, SCP push, install/reload, parsing | device-layer.md |
-| `cli.py` | `artifacts` and `hostkeys` command groups over the service layer | cli.md |
 | `local_run.py`, `tui.py` | `nhtui`: one run in memory, this process the dispatcher | tui.md |
 | `gunicorn.conf.py` | 1 worker, gthread × 4, no control socket | deployment.md |
 

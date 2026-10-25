@@ -1,5 +1,5 @@
 # Host keys
-Code: `nethub/upgrade_routes.py` (`hostkeys_bp`), `nethub/targets.py` (`check_target`), `nethub/upgrades.py` (`queue_scan`, `confirm_scan`, `may_confirm`, `SCAN_CONFIRM_WINDOW`, `confirmed_key`, `delete_pin`), `nethub/cli.py` (`hostkeys`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`, `SqlLedger.pin_for`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`, `tests/test_cli.py`
+Code: `nethub/upgrade_routes.py` (`hostkeys_bp`), `nethub/targets.py` (`check_target`), `nethub/upgrades.py` (`queue_scan`, `confirm_scan`, `may_confirm`, `SCAN_CONFIRM_WINDOW`, `confirmed_key`, `delete_pin`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`, `SqlLedger.pin_for`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`
 
 ---
 
@@ -61,12 +61,11 @@ a fresh first-contact prompt just by offering an unpinned algorithm.
 
 ### 2.1 [scan-is-dispatched]
 **[SPEC]**
-`POST /hostkeys/scan` and `flask hostkeys scan` both call
-`upgrades.queue_scan`, which checks the address (rule 1.1) and inserts a
-`queued` `host_key_scans` row; Flask never opens the connection. The
-sibling claims and runs the scan with the same conditional claim and
-sweep as phase jobs.
-Pinned by: `tests/test_upgrade_routes.py::TestHostkeyScanDispatch::test_a_valid_address_queues_a_scan_without_blocking`, `tests/test_cli.py::TestFrontEnd::test_a_scan_is_queued_and_opens_no_session`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_only_one_sibling_wins_a_scan`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_a_stale_running_scan_is_abandoned_by_sweep`
+`POST /hostkeys/scan` calls `upgrades.queue_scan`, which checks the
+address (rule 1.1) and inserts a `queued` `host_key_scans` row; Flask
+never opens the connection. The sibling claims and runs the scan with the
+same conditional claim and sweep as phase jobs.
+Pinned by: `tests/test_upgrade_routes.py::TestHostkeyScanDispatch::test_a_valid_address_queues_a_scan_without_blocking`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_only_one_sibling_wins_a_scan`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_a_stale_running_scan_is_abandoned_by_sweep`
 
 ### 2.2 [confirm-reads-the-scan-row]
 **[SPEC]**

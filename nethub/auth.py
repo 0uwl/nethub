@@ -51,13 +51,12 @@ def _password_too_short(password):
 
 
 def authenticate(username, password, *, source):
-    """The user these credentials name, or None. `/login` and the CLI's `--as`
-    both go through here (docs/auth-and-roles.md [login-always-pays-for-a-hash]).
+    """The user these credentials name, or None. `/login` goes through here (docs/auth-and-roles.md [login-always-pays-for-a-hash]).
 
     Always pays for exactly one password verification, whatever happens
     next -- see `_ABSENT_USER_HASH`. A locked account is verified too, so
     "locked" and "wrong password" cost the same. `source` is only for the
-    log line: a remote address, or `cli`.
+    log line: the remote address.
     """
     user = User.query.filter_by(username=username).first()
     if user is None:

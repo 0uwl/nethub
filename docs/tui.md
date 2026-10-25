@@ -12,9 +12,8 @@ Read `[NOTE]` only if additional context is needed.
 works, §3 decisions, §4 known gaps.
 
 `nhtui` is a standalone upgrade driver: one run, in the foreground, from a
-terminal, with no web app, no sibling and no database. It is not the
-`flask artifacts|hostkeys` CLI (cli.md), which is a front end on a running
-NetHub.
+terminal, with no web app, no sibling and no database. It is NetHub's only
+command-line front end; on a running NetHub, use the web app.
 
 ---
 

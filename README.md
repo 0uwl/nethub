@@ -222,37 +222,6 @@ Once you're logged in:
    Each phase on a run page shows the device username it ran under: the
    approver's, which with the run rule on is never the submitter's.
 
-### From the terminal
-The artifact and host-key pages can also be used from a shell where the web
-process runs. For a Quadlet deployment, prefix each command with
-`podman exec -it nethub`, or enter the container's shell with
-`podman exec -it nethub bash` before continuing. These commands go through
-the same checks as the web pages, two-person rules included, and a scan is
-still queued for the sibling to run.
-
-```bash
-flask --app nethub artifacts list [--state staged]
-flask --app nethub artifacts add image.bin --bundle iosxe-17-12-06 \
-    --version 17.12.06 --sha512 <hex> --as jsmith
-flask --app nethub artifacts publish <id> --as jsmith
-flask --app nethub artifacts delete <id> --as jsmith      # withdraws a staged upload
-
-flask --app nethub hostkeys scan 192.0.2.10 --as jsmith --wait 60
-flask --app nethub hostkeys show-scan <scan-id>
-flask --app nethub hostkeys confirm <scan-id> --fingerprint "ssh-rsa SHA256:..." --as jsmith
-flask --app nethub hostkeys list
-flask --app nethub hostkeys history 192.0.2.10
-flask --app nethub hostkeys delete 192.0.2.10 --as jsmith
-```
-
-- Every command that changes something takes `--as <username>` and asks
-  for that user's **NetHub** password, so the records name who acted.
-  Reading commands need no login.
-- To confirm a host key, type its fingerprint back in. It must match the
-  scan, so compare it against the device first.
-- Deletes ask before they act; `--yes` skips the question.
-- Runs and users are managed only in the browser for now.
-
 ## Upgrading NetHub
 
 > NOTE: Only upgrade while no upgrade phase is running.
