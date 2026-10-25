@@ -21,7 +21,8 @@ and runs is in artifacts.md, host-keys.md and dispatch.md.
 
 ### 1.1 [login-always-pays-for-a-hash]
 **[SPEC]**
-`login()` verifies a password on every attempt. An unknown username is
+`authenticate()`, behind `login()`, verifies a password on every
+attempt. An unknown username is
 checked against `_ABSENT_USER_HASH`, made with the same
 `generate_password_hash`, so it has the same KDF cost. Don't add an early
 return for a missing user, and don't swap in a cheaper hash.

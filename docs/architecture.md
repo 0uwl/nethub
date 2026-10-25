@@ -41,8 +41,9 @@ decisions. Each topic file holds the detail.
   public key, and the sibling needs the private key and
   `NETHUB_SEARCH_DIR`.
 - Without the sibling, queued work sits forever.
-- `upgrade_cli.py` is the one other path that opens device sessions. It
-  bypasses both processes and writes no rows.
+- `nhtui` (`tui.py` over `local_run.py`; tui.md) is the one other path
+  that runs phases. It bypasses both processes, runs the sibling's phase
+  engine in its own process over memory, and writes no rows.
 - Device addresses are stored in columns named `ansible_host`, a name
   kept from the Ansible era.
 
@@ -81,7 +82,7 @@ Pinned by: `tests/test_artifacts.py::TestDelete::test_a_finished_run_keeps_its_s
 ### 2.4 [request-is-a-closed-document]
 **[SPEC]**
 A request is a fixed set of fields: hosts (`hostname, address` per line)
-and one bundle key, parsed by `upgrades.parse_hosts` and `submit`.
+and one bundle key, parsed by `targets.parse_hosts` and `submit`.
 There is no user-supplied inventory, template, playbook, filename, digest,
 username or connection setting. The table in `nethub/upgrades.py`'s
 docstring is wider than what the route accepts: `submit()` takes
@@ -114,7 +115,10 @@ Pinned by: none
 | `shared_config.py` / `config.py` | settings for both processes (database, `ARTIFACT_STORE`, public key, `DEVICE_TARGET_CIDRS`, `PHASE_CONCURRENCY`) / web-only settings (`SECRET_KEY`, cookies, upload cap) | deployment.md |
 | `credentials.py` | read a systemd credential by name | deployment.md |
 | `extensions.py` | `db`, `login_manager`, `csrf`, `migrate`; SQLite pragmas | schema.md |
-| `models.py` | every table, the vocabularies, triggers, `load_user` | schema.md |
+| `models.py` | every table, triggers, `load_user` | schema.md |
+| `vocab.py` | phases, states, statuses, failure stages (models re-exports them) | dispatch.md |
+| `targets.py` | `parse_hosts`, `check_target`, `reload_count` | host-keys.md, dispatch.md |
+| `flow.py` | `next_step`, `retryable_phases`: the run state machine's decisions | dispatch.md |
 | `schema.py`, `migrations/` | startup migration, adoption, the sibling's wait | schema.md |
 | `auth.py` | login, users, own password, `create-admin` | auth-and-roles.md |
 | `settings.py` | two-person rules (`applies`, `second_person_delete`), `/settings` | auth-and-roles.md |
@@ -124,16 +128,17 @@ Pinned by: none
 | `upgrades.py` | submit, approve, retry, cancel, target and schedule checks, deadlines, sealing | dispatch.md, host-keys.md |
 | `upgrade_routes.py` | `/upgrades*`, `/hostkeys*`, `/profile` | dispatch.md, host-keys.md |
 | `sealed_credentials.py` | seal, open, keygen | credentials.md |
-| `sibling.py` | the dispatch loop, claim, sweep, run state machine | dispatch.md |
+| `sibling.py` | the dispatch loop, claim, sweep, `SqlLedger`, writing run state | dispatch.md |
 | `worker_status.py` | stalled / no-worker / queue depth (read-only) | frontend.md |
-| `devices/phases.py` | per-host driver, `LoginGate`, canary, failure mapping, rows | dispatch.md |
+| `devices/phases.py` | per-host driver, `LoginGate`, canary, failure mapping, `Ledger` | dispatch.md |
 | `devices/{connection,transfer,install,facts}.py` | Netmiko, SCP push, install/reload, parsing | device-layer.md |
-| `upgrade_cli.py` | manual escape hatch | device-layer.md |
+| `local_run.py`, `tui.py` | `nhtui`: one run in memory, this process the dispatcher | tui.md |
 | `gunicorn.conf.py` | 1 worker, gthread × 4, no control socket | deployment.md |
 
 Scripts: `scripts/check_device_facts.py` (capture and replay device
 output), `scripts/smoke_test.sh` (container smoke test),
-`scripts/trivy_report.sh` (CI scan summary).
+`scripts/trivy_report.sh` (CI scan summary), `scripts/fake_nhtui.py`
+(`nhtui` against fake switches).
 
 ---
 

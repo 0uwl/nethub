@@ -139,10 +139,11 @@ Pinned by: `tests/test_roles.py::TestRoles::test_an_operator_is_refused_every_ad
 | `test_sibling.py`, `test_phases.py` | dispatch.md |
 | `test_upgrade_routes.py`, `test_upgrade_models.py` | gates, submit, host-key routes, constraints |
 | `test_sealed_credentials.py` | credentials.md |
-| `test_connection.py`, `test_transfer.py`, `test_install.py`, `test_facts.py`, `test_upgrade_cli.py` | device-layer.md |
+| `test_connection.py`, `test_transfer.py`, `test_install.py`, `test_facts.py`, `test_check_device_facts.py` | device-layer.md |
 | `test_artifacts.py`, `test_errors.py` | artifacts.md |
 | `test_auth.py`, `test_user_management.py`, `test_roles.py`, `test_bootstrap.py`, `test_config.py`, `test_models.py`, `test_credentials.py` | auth-and-roles.md, deployment.md |
 | `test_schema.py` | schema.md |
+| `test_local_run.py`, `test_tui.py` | tui.md |
 | `test_templates.py`, `test_frontend.py` | frontend.md |
 | `test_end_to_end.py` | whole runs |
 | `test_docs.py` | the docs' cited tests and slugs exist |

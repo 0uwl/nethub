@@ -188,9 +188,9 @@ Pinned by: none
 
 ### 2.5 [env-password-warns]
 **[SPEC]**
-`upgrade_cli.py` and `scripts/check_device_facts.py` accept
-`NETHUB_DEVICE_PASSWORD` for scripted use. Both print a warning when they
-do, and otherwise prompt for the password.
+`scripts/check_device_facts.py` accepts `NETHUB_DEVICE_PASSWORD` for
+scripted use. It prints a warning when it does, and otherwise prompts for
+the password. `nhtui` never reads it.
 Pinned by: none
 
 ---
@@ -325,7 +325,7 @@ approval adds no entry; it only delays when that one is used.
 - The process does not set `PR_SET_DUMPABLE` to 0, so same-uid `ptrace`
   and `/proc/<pid>/mem` are not denied. `LimitCORE=0` in both Quadlet
   units stops core dumps there, but neither protection covers a bare
-  `flask run` or `upgrade_cli.py`.
+  `flask run` or `nhtui`.
 - A Python `str` cannot be wiped. Overwriting `ctx.device_password`
   drops a reference; the bytes, and the form parser's copies, stay in
   the heap until reused. The heap can be swapped out unless swap is

@@ -265,25 +265,37 @@ the first start of a version that has them, including repairing the columns
 earlier versions could not add or remove. If it differs in any other way,
 NetHub refuses to start and lists the differences.
 
-## Upgrading a device with NetHub CLI
+## Upgrading a fleet with nhtui
 
-`nethub/upgrade_cli.py` is a deliberate escape hatch: the Ansible
-playbooks it replaced were standalone, so an operator could run them by
-hand against a fleet with nothing else up. It needs no Flask app, no
-sibling, and no database.
+`nhtui` is a terminal UI that upgrades a set of switches with no NetHub
+server at all: no containers, no web app, no database. It runs the same
+phase engine as the dispatcher, with the same gates, canary and retries,
+so it works over SSH on any host that can reach the devices. Install it
+without the containers:
 
 ```bash
-python -m nethub.upgrade_cli --scan 192.0.2.10      # print the host key fingerprint
+uv tool install 'nethub[tui] @ git+https://github.com/0uwl/nethub@<tag>'
 
-python -m nethub.upgrade_cli --host 192.0.2.10 --user jsmith \
-    --fingerprint "ssh-rsa SHA256:..." \
-    --image /path/to/image.bin --sha512 <hex> \
-    --version 17.12.06 --phases all
+nhtui --hosts hosts.txt --image /path/to/image.bin --sha512 <hex> \
+    --version 17.12.08 --cidr 10.0.0.0/8 --user jsmith
 ```
 
-A manual run is absent from the audit trail. The CLI command still requires a confirmed
-host key, `--fingerprint` is required. A bare invocation runs
-`precheck` only, and every phase which changes the device prompts for confirmation.
+- `hosts.txt` has one `hostname, address` per line, and the first host is
+  the canary.
+- Press `s` to scan each host's key and confirm it against the device, or
+  bring the keys you've already checked with `--pins` (one
+  `address key-type SHA256:...` per line).
+- Press `a` for the next step: pre-check first, then each gate's approve,
+  retry or decline. The device password is asked for once, at pre-check,
+  and again only if a switch refuses it.
+- Press `x` to cancel and `q` to quit. You can't quit while a phase is
+  running.
+
+The `nhtui` process does all the device work itself, so run it inside
+`tmux` or `screen`: if your SSH session drops during a reload, the run
+stops. Nothing is stored, and the run isn't in NetHub's audit trail.
+`--report run.json` saves the results when you quit. See
+[docs/tui.md](docs/tui.md).
 
 ## AI usage
 

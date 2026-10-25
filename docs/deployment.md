@@ -272,13 +272,13 @@ unpin.
 | `NETHUB_CREDENTIAL_PUBLIC_KEY` | both | none, required | base64; web refuses to start without it |
 | `NETHUB_CREDENTIAL_KEY_FILE` | sibling | none | private key file; credential `credential_private_key` wins |
 | `PHASE_CONCURRENCY` | both | `4` (also when blank) | otherwise a whole number ≥1, or the process refuses to start; set the same in both units |
-| `DEVICE_TARGET_CIDRS` | web (the sibling unit leaves it unset on purpose) | empty, so every target is refused | comma-separated |
+| `DEVICE_TARGET_CIDRS` | web, `nhtui` (the sibling unit leaves it unset on purpose) | empty, so every target is refused | comma-separated |
 | `SESSION_COOKIE_INSECURE` | web | unset (cookie `Secure`) | `1` for local HTTP only |
 | `NETHUB_PORT` | gunicorn | `8080` | match `PublishPort=` |
 | `ADMIN_USERNAME` | web | none | first boot only; no default name |
 | `ADMIN_PASSWORD` | web | random, printed | first boot only; credential `admin_password` wins |
 | `DEBUG` | web (Flask) | off | `1` enables; local dev only (credentials.md [debug-off]) |
-| `NETHUB_DEVICE_PASSWORD` | `upgrade_cli`, `check_device_facts` | none | warns when used |
+| `NETHUB_DEVICE_PASSWORD` | `check_device_facts` | none | warns when used |
 
 `MAX_CONTENT_LENGTH` is a constant in `config.py` (1500 MiB); it is
 **not** read from the environment.
@@ -292,7 +292,12 @@ scripts/smoke_test.sh [image]          # ENGINE=docker if no podman; SMOKE_PORT,
 python -m nethub.sealed_credentials keygen --out <file>
 uv sync                                # local venv at CI's versions
 uv lock                                # after editing pyproject.toml
+uv tool install 'nethub[tui] @ git+https://github.com/0uwl/nethub@<tag>'   # nhtui, no containers (tui.md)
 ```
+
+The image never builds the package: the Containerfile exports the lock
+with `--no-emit-project` and no extras, so the build backend and the `tui`
+extra (Textual) exist only for `nhtui`.
 
 ### 5.3 Upgrading NetHub
 **[SPEC]**

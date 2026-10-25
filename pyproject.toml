@@ -3,8 +3,14 @@
 # then run `uv lock`. CI runs `uv lock --check` and fails when uv.lock no
 # longer matches, so an edit here without a regenerated lock does not merge.
 #
-# NetHub is an application, not a library: there is no [build-system], so uv
-# installs only the dependencies and never builds or installs NetHub itself.
+# NetHub is an application, not a library. The container image never builds
+# it (the Containerfile exports the lock with --no-emit-project and copies the
+# source in); the [build-system] below exists for `nhtui`, the standalone
+# upgrade driver, which is installed with `uv tool install` (docs/tui.md).
+[build-system]
+requires = ["uv_build==0.13.0"]
+build-backend = "uv_build"
+
 [project]
 name = "nethub"
 version = "0"
@@ -35,6 +41,19 @@ dependencies = [
     "ntc-templates==9.3.0",
 ]
 
+# `nhtui` only, so the container image does not ship it: install with
+# `uv tool install 'nethub[tui] @ git+...'`. Also in the dev group, so the
+# tests of nethub/tui.py run under a plain `uv sync`.
+[project.optional-dependencies]
+tui = [
+    "textual==8.2.8",
+    # Textual's own renderer; nethub/tui.py styles table cells with it.
+    "rich==15.0.0",
+]
+
+[project.scripts]
+nhtui = "nethub.tui:main"
+
 # Test and lint tools. uv installs this group by default (`uv sync`) and the
 # image never does: the Containerfile exports the lock with --no-dev. One
 # lock resolves both sets together, so the tests run against exactly the
@@ -55,6 +74,8 @@ dev = [
     "zizmor==1.31.1",
     # shellcheck itself, as a wheel carrying the binary: lints scripts/*.sh.
     "shellcheck-py==0.11.0.1",
+    "textual==8.2.8",
+    "rich==15.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -62,6 +83,10 @@ dev = [
 # so `import nethub` fails without this -- see README.md's documented
 # `pytest` command.
 pythonpath = ["."]
+
+[tool.uv.build-backend]
+# The package sits at the repo root, not under src/.
+module-root = ""
 
 [tool.ruff]
 line-length = 100

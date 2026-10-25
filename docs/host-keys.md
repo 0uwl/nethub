@@ -1,5 +1,5 @@
 # Host keys
-Code: `nethub/upgrade_routes.py` (`hostkeys_bp`, `may_confirm`, `SCAN_CONFIRM_WINDOW`), `nethub/upgrades.py` (`check_target`, `confirmed_key`, `delete_pin`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`), `nethub/devices/phases.py` (`pinned_key`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`
+Code: `nethub/upgrade_routes.py` (`hostkeys_bp`), `nethub/targets.py` (`check_target`), `nethub/upgrades.py` (`queue_scan`, `confirm_scan`, `may_confirm`, `SCAN_CONFIRM_WINDOW`, `confirmed_key`, `delete_pin`), `nethub/settings.py` (`second_person_delete`), `nethub/models.py` (`DeviceHostKey`, `HostKeyScan`, `DeviceHostKeyAudit`), `nethub/sibling.py` (`run_scan_once`, `SqlLedger.pin_for`) · Tests: `tests/test_upgrade_routes.py`, `tests/test_roles.py`, `tests/test_upgrade_models.py`, `tests/test_sibling.py`, `tests/test_templates.py`
 
 ---
 
@@ -20,10 +20,10 @@ device-layer.md §1.
 
 ### 1.1 [target-is-an-ip-in-a-cidr]
 **[SPEC]**
-`upgrades.check_target` accepts only an IP literal inside one of the
+`targets.check_target` accepts only an IP literal inside one of the
 `DEVICE_TARGET_CIDRS`. A hostname is refused, never resolved, and an
-empty CIDR list refuses every address. Submitting a run and requesting a
-scan both go through it.
+empty CIDR list refuses every address. Submitting a run, requesting a scan
+and `nhtui` all go through it.
 Pinned by: `tests/test_upgrade_routes.py::TestTargetValidation::test_a_hostname_is_refused_rather_than_resolved`, `tests/test_upgrade_routes.py::TestTargetValidation::test_no_configured_cidr_refuses_everything`, `tests/test_upgrade_routes.py::TestTargetValidation::test_an_address_outside_the_cidr_is_refused`, `tests/test_upgrade_routes.py::TestHostkeyScanDispatch::test_a_hostname_is_refused`
 
 **[NOTE]**
@@ -35,7 +35,7 @@ can change later. An unset security setting is not "allow all".
 **[SPEC]**
 `submit` refuses an address that has no *confirmed* `device_host_keys`
 row (`confirmed_key`). An unconfirmed row counts as absent. At dispatch,
-`phases.pinned_key` checks again and fails that host as `hostkey`.
+`sibling.SqlLedger.pin_for` checks again and fails that host as `hostkey`.
 Pinned by: `tests/test_upgrade_routes.py::TestSubmit::test_an_unconfirmed_address_cannot_be_targeted`, `tests/test_upgrade_routes.py::TestSubmit::test_a_seen_but_unconfirmed_pin_is_still_refused`, `tests/test_phases.py::TestPinnedKey::test_a_seen_but_unconfirmed_key_is_refused`
 
 **[NOTE]**
@@ -61,16 +61,17 @@ a fresh first-contact prompt just by offering an unpinned algorithm.
 
 ### 2.1 [scan-is-dispatched]
 **[SPEC]**
-`POST /hostkeys/scan` checks the address (rule 1.1) and inserts a
-`queued` `host_key_scans` row; Flask never opens the connection. The
-sibling claims and runs the scan with the same conditional claim and
-sweep as phase jobs.
+`POST /hostkeys/scan` calls `upgrades.queue_scan`, which checks the
+address (rule 1.1) and inserts a `queued` `host_key_scans` row; Flask
+never opens the connection. The sibling claims and runs the scan with the
+same conditional claim and sweep as phase jobs.
 Pinned by: `tests/test_upgrade_routes.py::TestHostkeyScanDispatch::test_a_valid_address_queues_a_scan_without_blocking`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_only_one_sibling_wins_a_scan`, `tests/test_sibling.py::TestHostKeyScanDispatch::test_a_stale_running_scan_is_abandoned_by_sweep`
 
 ### 2.2 [confirm-reads-the-scan-row]
 **[SPEC]**
-`POST /hostkeys/confirm` takes only `scan_id`. The address, key type and
-fingerprint come from that scan row, never from the request body.
+`POST /hostkeys/confirm` takes only `scan_id`, and `upgrades.confirm_scan`
+takes the address, key type and fingerprint from that scan row, never
+from the request body.
 Pinned by: `tests/test_upgrade_routes.py::TestConfirmHostkeyBinding::test_confirm_ignores_extra_fields_in_the_post_body`, `tests/test_upgrade_routes.py::TestConfirmHostkeyBinding::test_confirming_a_succeeded_scan_pins_the_address`
 
 ### 2.3 [confirm-refusals]

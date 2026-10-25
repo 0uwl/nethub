@@ -15,7 +15,6 @@ reads the device username server-side. `platform` and `flash_dir` default
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -24,16 +23,19 @@ from sqlalchemy.exc import IntegrityError
 from . import artifacts as artifact_store
 from . import settings
 from .extensions import db
+from .flow import retryable_phases
 from .models import (
     APPROVABLE,
     RETRYABLE_AT,
     DeviceHostKey,
     DeviceHostKeyAudit,
+    HostKeyScan,
     UpgradePhaseJob,
     UpgradeRun,
     UpgradeRunHost,
 )
 from .sealed_credentials import CredentialError, check_credential, seal
+from .targets import RequestError, check_target, parse_hosts, reload_count
 
 #: Wall-clock budget per phase, as (fixed seconds, seconds per host).
 #:
@@ -155,10 +157,6 @@ def phase_deadline(phase, *, hosts, image_bytes=0, now=None):
 __all__ = ['APPROVABLE']
 
 
-class RequestError(Exception):
-    """The submitted request cannot be compiled into a run."""
-
-
 def _aware(value):
     """SQLite hands back naive datetimes for values written aware; the same
     helper as `phases._aware`, kept here so this module needs no device
@@ -170,56 +168,6 @@ def _aware(value):
 
 def _utcnow():
     return datetime.now(UTC)
-
-
-def parse_hosts(raw: str) -> list[tuple[str, str]]:
-    """`hostname, address` per line. A closed shape, not an inventory."""
-    hosts = []
-    seen = set()
-    for number, line in enumerate(raw.splitlines(), start=1):
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        parts = [p.strip() for p in line.replace('\t', ',').split(',') if p.strip()]
-        if len(parts) != 2:
-            raise RequestError(f'Line {number}: expected "hostname, address".')
-        hostname, address = parts
-        if hostname in seen:
-            # PRIMARY KEY (run_id, hostname) would refuse this anyway; saying so
-            # here names the line instead of surfacing an IntegrityError.
-            raise RequestError(f'Line {number}: "{hostname}" is named twice.')
-        seen.add(hostname)
-        hosts.append((hostname, address))
-    if not hosts:
-        raise RequestError('No hosts given.')
-    return hosts
-
-
-def check_target(address: str, cidrs) -> str:
-    """An address must be a literal inside a configured CIDR.
-
-    A hostname is refused rather than resolved: the CIDR check and the eventual
-    connection would resolve it at different times, and `device_host_keys`
-    would end up keyed on a string whose meaning can change afterwards.
-    """
-    if not cidrs:
-        raise RequestError(
-            'No DEVICE_TARGET_CIDRS configured, so no address can be accepted. '
-            'Set it before submitting a run.'
-        )
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        raise RequestError(
-            f'"{address}" is not an IP literal. Targets are addresses, not names.'
-        ) from None
-    for cidr in cidrs:
-        try:
-            if ip in ipaddress.ip_network(cidr, strict=False):
-                return str(ip)
-        except ValueError:
-            raise RequestError(f'Configured target CIDR "{cidr}" is not valid.') from None
-    raise RequestError(f'{address} is outside the configured target CIDRs.')
 
 
 def confirmed_key(address: str) -> DeviceHostKey:
@@ -264,6 +212,107 @@ def delete_pin(row: DeviceHostKey, user) -> bool:
     db.session.delete(row)
     db.session.commit()
     return True
+
+
+#: How long a succeeded scan stays confirmable. Not strictly
+#: required by the design, but cheap: without it a HostKeyScan row would stay
+#: "confirmable" forever, and a scan from days ago backing a confirmation of a
+#: device that has since changed hands on that address is exactly the kind of
+#: staleness a fresh scan is supposed to rule out.
+SCAN_CONFIRM_WINDOW = timedelta(minutes=15)
+
+
+class ConfirmRefused(RequestError):
+    """`confirm_scan` said no. `back_to` is where the web flow sends the
+    person next: `scan` (scan again), `result` (the scan's page) or `list`."""
+
+    def __init__(self, message, back_to='scan'):
+        super().__init__(message)
+        self.back_to = back_to
+
+
+def may_confirm(scan, user):
+    """Whether `user` may confirm a pin from `scan`.
+
+    With the two-person rule for host keys off, only whoever requested the
+    scan confirms it. With it on, the confirmer must be
+    someone else, except that an admin may confirm any scan,
+    their own included: admins are exempt, and the audit row records the
+    role they acted in.
+    """
+    own = scan.requested_by == user.id
+    if settings.enabled('two_person_hostkeys'):
+        return not own or user.is_admin
+    return own
+
+
+def confirm_by(scan):
+    """The moment `scan` stops being confirmable (`SCAN_CONFIRM_WINDOW`)."""
+    return _aware(scan.finished_at) + SCAN_CONFIRM_WINDOW
+
+
+def queue_scan(address, *, user, cidrs) -> HostKeyScan:
+    """Queue a host-key scan for the sibling. Scanning is device I/O, so
+    Flask only writes the row (docs/architecture.md [no-device-io-in-flask]).
+    `check_target` applies the same CIDR check as submit: a rejected address
+    never becomes a row, and never reaches the sibling at all."""
+    address = check_target(address, cidrs)
+    scan = HostKeyScan(ansible_host=address, requested_by=user.id)
+    db.session.add(scan)
+    db.session.commit()
+    return scan
+
+
+def confirm_scan(scan, user) -> DeviceHostKey:
+    """Confirm a pin from a scan NetHub itself performed.
+
+    The key type, fingerprint and address all come from the `HostKeyScan`
+    row, never from the caller. Who may confirm which scan is `may_confirm`;
+    the rule is read now, so turning it off releases a scan waiting for a
+    second person.
+    """
+    if scan is None or scan.status != 'succeeded':
+        raise ConfirmRefused('No matching scan to confirm. Scan the address again.')
+    if not may_confirm(scan, user):
+        if scan.requested_by == user.id:
+            raise ConfirmRefused('The two-person rule for host keys is on: someone other '
+                                 'than whoever requested the scan has to confirm it.',
+                                 back_to='result')
+        raise ConfirmRefused('No matching scan to confirm. Scan the address again.')
+    if scan.consumed_at is not None:
+        # A succeeded scan confirms at most once. Without this, one scan
+        # could back two different confirmations later.
+        raise ConfirmRefused('That scan has already been used to confirm a pin. '
+                             'Scan the address again.')
+    if _utcnow() - _aware(scan.finished_at) > SCAN_CONFIRM_WINDOW:
+        raise ConfirmRefused('That scan is too old to confirm. Scan the address again.')
+
+    address, key_type, fingerprint = scan.ansible_host, scan.key_type, scan.fingerprint_sha256
+    row = DeviceHostKey.query.filter_by(ansible_host=address).first()
+    if row is None:
+        row = DeviceHostKey(ansible_host=address, key_type=key_type,
+                            fingerprint_sha256=fingerprint)
+        db.session.add(row)
+    elif row.is_confirmed and (row.key_type, row.fingerprint_sha256) != (key_type, fingerprint):
+        # Re-accepting a *changed* key is the one thing this must not make
+        # casual: it is indistinguishable from the attack the pin exists to
+        # catch. Deleting the row is deliberate friction.
+        raise ConfirmRefused(f'{address} is already pinned to a different key. Remove the '
+                             f'existing pin first if the device genuinely changed.',
+                             back_to='list')
+    else:
+        row.key_type, row.fingerprint_sha256 = key_type, fingerprint
+
+    row.confirmed_by = user.id
+    row.confirmed_at = _utcnow()
+    scan.consumed_at = _utcnow()
+    db.session.add(DeviceHostKeyAudit(
+        ansible_host=address, action='confirmed', key_type=key_type,
+        fingerprint_sha256=fingerprint, actor_id=user.id,
+        requested_by=scan.requested_by, actor_role=user.role,
+    ))
+    db.session.commit()
+    return row
 
 
 def resolve_bundle(bundle: str, platform: str = 'iosxe'):
@@ -415,23 +464,6 @@ def submit(*, user, bundle, hosts_raw, cidrs, password, public_key,
     return run, job
 
 
-def reload_count(raw, cap):
-    """The approver's "reload N devices at a time after the first", or refuse
-    it. Blank means the default, 1. `cap` is the deployment's
-    `PHASE_CONCURRENCY`; the sibling caps it again, since the setting can be
-    lowered before the job runs."""
-    text = '' if raw is None else str(raw).strip()
-    if not text:
-        return 1
-    try:
-        count = int(text)
-    except ValueError:
-        count = 0
-    if count < 1 or count > cap:
-        raise RequestError(f'Reload count must be a whole number from 1 to {cap}.')
-    return count
-
-
 def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
             start_at=None):
     """Write the phase job a gate is waiting for.
@@ -472,21 +504,6 @@ def approve(*, run, phase, user, password, public_key, concurrency=None, cap=1,
                             not_before=start_time(start_at,
                                                   gate_expires_at=run.gate_expires_at),
                             concurrency=_concurrency_for(phase, concurrency, cap))
-
-
-def retryable_phases(run):
-    """What a retry may name at the run's current gate, with the hosts it would
-    run on: `[(phase, [hostname, ...]), ...]`, phases with no failed host left
-    out."""
-    if run.state != 'awaiting_approval':
-        return []
-    out = []
-    for phase in RETRYABLE_AT.get(run.awaiting_phase, ()):
-        failed = [h.hostname for h in run.hosts
-                  if h.state == 'failed' and h.last_phase == phase]
-        if failed:
-            out.append((phase, failed))
-    return out
 
 
 def retry(*, run, phase, user, password, public_key, concurrency=None, cap=1,

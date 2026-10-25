@@ -18,6 +18,8 @@ which routes a task to its topic file. Each topic file follows HADS:
   - the artifact store and host-key pinning;
   - the day-2 upgrade path: pre-check → stage → activate (with a canary)
     → verify → cleanup, with gates, retries and scheduled approvals.
+  - `nhtui`, a standalone Textual TUI that runs the same phase engine in
+    its own process, with no web app, sibling or database.
 - **Validated** on a Catalyst 9200CX running IOS-XE 17.12.06, including
   full upgrade round trips.
 - **Not built:** day-0 provisioning, OIDC, server-side sessions,
@@ -31,7 +33,7 @@ which routes a task to its topic file. Each topic file follows HADS:
 | anything, for the first time | [architecture.md](docs/architecture.md) |
 | `sibling.py`, `devices/phases.py`, gates, retry, cancel, scheduling | [dispatch.md](docs/dispatch.md) |
 | the device password, `sealed_credentials.py`, `error_summary` | [credentials.md](docs/credentials.md) |
-| `devices/{connection,transfer,install,facts}.py`, `upgrade_cli.py` | [device-layer.md](docs/device-layer.md) |
+| `devices/{connection,transfer,install,facts}.py`, `check_device_facts.py` | [device-layer.md](docs/device-layer.md) |
 | `/hostkeys`, pins, scans, target addresses | [host-keys.md](docs/host-keys.md) |
 | `artifacts.py`, uploads, `check-store` | [artifacts.md](docs/artifacts.md) |
 | `auth.py`, `settings.py`, roles, sessions | [auth-and-roles.md](docs/auth-and-roles.md) |
@@ -39,6 +41,7 @@ which routes a task to its topic file. Each topic file follows HADS:
 | Containerfile, Quadlet units, env vars, CI | [deployment.md](docs/deployment.md) |
 | templates, CSS, `web.py`, `worker_status.py` | [frontend.md](docs/frontend.md) |
 | tests, fixtures, captures | [testing.md](docs/testing.md) |
+| `tui.py`, `local_run.py`, `flow.py`, `nhtui` | [tui.md](docs/tui.md) |
 
 ## Commands
 
@@ -55,8 +58,9 @@ flask --app nethub check-store                          # re-hash the store; exi
 flask --app nethub db current | db history | db migrate -m "..."   # see docs/schema.md
 python -m nethub.sealed_credentials keygen --out <file>
 python -m nethub.sibling                                # needs NETHUB_SEARCH_DIR + private key
-python -m nethub.upgrade_cli --scan <host>              # manual escape hatch (docs/device-layer.md)
-python scripts/check_device_facts.py <ip> --user <name> | --replay <dir>
+nhtui --hosts <file> --image <bin> --sha512 <hex> --version <v> --cidr <net>   # standalone TUI run (docs/tui.md)
+uv run python scripts/fake_nhtui.py                     # nhtui against fake switches, no hardware
+python scripts/check_device_facts.py <ip> --scan | --user <name> | --replay <dir>
 scripts/smoke_test.sh [image]                           # ENGINE=docker if no podman
 uv lock                                                 # after editing pyproject.toml; CI runs `uv lock --check`
 ```
