@@ -8,7 +8,7 @@
 # source in); the [build-system] below exists for `nhtui`, the standalone
 # upgrade driver, which is installed with `uv tool install` (docs/tui.md).
 [build-system]
-requires = ["uv_build==0.13.0"]
+requires = ["uv_build==0.13.1"]
 build-backend = "uv_build"
 
 [project]
