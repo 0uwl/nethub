@@ -60,7 +60,7 @@ nhtui = "nethub.tui:main"
 # runtime versions the image ships.
 [dependency-groups]
 dev = [
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     # The linters CI runs, pinned here rather than installed loose in the
     # workflow, so a local `uv sync` gets exactly CI's versions. That
     # matters: ruff 0.16 widened its default rule set over 0.15, so an
